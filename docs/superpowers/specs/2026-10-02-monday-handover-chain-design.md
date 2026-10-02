@@ -53,6 +53,7 @@ when the donor watched; the temporal join is a later analysis step on the GPU si
 | D11 | Tool name **`ddp-comments`**, repo **`researchcloud-ddp-comments`**, personal GitHub first at `~/src/researchcloud-ddp-comments/`, transferred to `d3i-infra` at Phase 1 | `researchcloud-comment-desk`; `researchcloud-zeeschuimer`; prototyping on in the study folder |
 | D12 | Each session gets a **disjoint worklist** (round-robin split of the batch); unopened rows carry forward to the next day's list, ahead of new rows | one shared list per session (collectors start on identical rows) |
 | D13 | The template profile holds the **4CAT login only**; each collector logs into **SRAM inside the contained Firefox** at shift start | cloning the operator's SRAM session (expires mid-shift; attributes uploads to the operator) |
+| D14 | **4CAT's Postgres data and dataset files live on the SRC volume**, bind-mounted through a `docker-compose.override.yml`; 4CAT is the durable collection, not a rebuildable view | treating 4CAT as rebuildable from the NDJSON (inverts D6; nobody re-imports by hand mid-study) |
 
 ## 3. Topology and ownership
 
@@ -68,10 +69,13 @@ Two SRC workspaces in the OnlineHate CO (SRAM collaboration 7889, shortname
 SRC-Nginx with the SRAM `auth_request` gate, the 10 GB volume `desk-spike`
 attached but unused). The desk state moves onto that volume: `~/desk` becomes a
 symlink to `~/data/desk-spike/desk`, holding sessions' `/config`, captures, desk log,
-worklists, feed mirror and ledger, so a workspace rebuild loses nothing. 4CAT's
-Postgres data directory moves there too, or 4CAT is treated as rebuildable from the
-NDJSON and the desk log (decision in §10). Receives only `selection.csv` files; never
-holds `state.sqlite`, transcripts, or watch histories.
+worklists, feed mirror and ledger, so a workspace rebuild loses nothing. 4CAT's two
+data stores move there too (D14): Postgres and the dataset file directory, both
+bind-mounted under `~/data/desk-spike/4cat/` by an override file so the upstream
+`surf` compose stays untouched; migration is `compose down`, copy the named volumes'
+contents, `compose up`. The volume is 10 GB; check it grows in place before Monday or
+create a larger one now. Receives only `selection.csv` files; never holds
+`state.sqlite`, transcripts, or watch histories.
 
 **Yoda collection** (OnlineHate's; path supplied by Danielle, `<collection>` below).
 Layout: `inbox/` (Danielle's manual donation drop, Next file names unchanged),
@@ -495,7 +499,8 @@ style. No SRC access required.
   existing-destination landing); two simultaneous sessions opening different rows
   with captures in their own `captures/<i>/`; an upload after the inner SRAM session
   is cleared (must fail with the documented message, then succeed after login); one
-  restore exercise of `~/desk` from the volume.
+  restore exercise of `~/desk` and 4CAT from the volume (datasets open after the
+  restore).
 
 ## 10. Risks and open questions
 
@@ -511,6 +516,4 @@ Open for Danielle before or during execution:
 2. Number of sessions N for Monday (2 or 3) and the cap: rows per collector-hour and
    hours per shift.
 3. Whether the operator on `checkjefeedzee` joins the `docker` group or keeps `sudo`.
-4. 4CAT durability: move its Postgres data dir onto the volume, or accept 4CAT as
-   rebuildable from the NDJSON and `days.csv`.
-5. Phase 1 language (§8), not needed before Monday.
+4. Phase 1 language (§8), not needed before Monday.
