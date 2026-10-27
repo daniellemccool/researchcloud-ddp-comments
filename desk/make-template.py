@@ -4,15 +4,17 @@
     make-template.py --fqdn HOST SRC_CONFIG_DIR OUT_TAR
 
 SRC_CONFIG_DIR is a *stopped* jlesage Firefox /config (e.g. ~/spike/state/firefox-1).
-The copy keeps Zeeschuimer's extension storage and exactly one cookie: the 4CAT
-`remember_token` for HOST (the shared collector login). It drops every other cookie
-(SRAM `Authorization`, IdP sessions, TikTok device ids), session-restore files (which
+The copy keeps Zeeschuimer's extension storage and two cookies: the 4CAT
+`remember_token` for HOST (the shared collector login) and TikTok's `cookie-consent`
+(the banner choice, no identifier). It drops every other cookie (SRAM `Authorization`,
+IdP sessions, TikTok device ids), session-restore files (which
 can hold session cookies), non-extension site storage, and caches. The source is never
 modified. OUT_TAR is owned by uid 1000, ready for make-sessions.sh to unpack.
 """
 import argparse, glob, os, shutil, sqlite3, sys, tarfile, tempfile
 
 KEEP_COOKIE = "remember_token"
+TIKTOK_CONSENT_HOSTS = (".tiktok.com", "www.tiktok.com", ".www.tiktok.com")
 SKIP_DIRS = {"cache2", "startupCache", "sessionstore-backups", "crashes", "minidumps", "saved-telemetry-pings"}
 SKIP_FILES = ("sessionstore.jsonlz4", "recovery.jsonlz4", "recovery.baklz4")
 
@@ -21,7 +23,8 @@ def strip(profile, fqdn):
     db = os.path.join(profile, "cookies.sqlite")
     if os.path.exists(db):
         c = sqlite3.connect(db)
-        c.execute("DELETE FROM moz_cookies WHERE NOT (host = ? AND name = ?)", (fqdn, KEEP_COOKIE))
+        c.execute("DELETE FROM moz_cookies WHERE NOT ((host = ? AND name = ?) OR (host IN (?, ?, ?) AND name = 'cookie-consent'))",
+                  (fqdn, KEEP_COOKIE, *TIKTOK_CONSENT_HOSTS))
         c.commit()
         c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         c.execute("VACUUM")

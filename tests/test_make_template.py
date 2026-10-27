@@ -5,7 +5,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "desk", "make-template.py")
 FQDN = "desk.example.nl"
 COOKIES = [(FQDN, "remember_token"), (FQDN, "Authorization"), (FQDN, "redirecturi"),
-           ("proxy.sram.surf.nl", "SATOSA_surf_ram_PROXY_STATE"), (".tiktok.com", "ttwid"), ("evil." + FQDN, "remember_token")]
+           ("proxy.sram.surf.nl", "SATOSA_surf_ram_PROXY_STATE"), (".tiktok.com", "ttwid"), ("evil." + FQDN, "remember_token"),
+           (".tiktok.com", "cookie-consent"), ("evil.example", "cookie-consent")]
 
 
 def make_profile(root):
@@ -37,7 +38,8 @@ class MakeTemplateTest(unittest.TestCase):
                 tar.extractall(x, filter="data")
             p = os.path.join(x, "profile")
             c = sqlite3.connect(os.path.join(p, "cookies.sqlite"))
-            self.assertEqual(c.execute("SELECT host, name FROM moz_cookies").fetchall(), [(FQDN, "remember_token")])
+            self.assertEqual(sorted(c.execute("SELECT host, name FROM moz_cookies").fetchall()),
+                             [(".tiktok.com", "cookie-consent"), (FQDN, "remember_token")])
             c.close()
             self.assertTrue(os.path.exists(os.path.join(p, "storage/default/moz-extension+++abc/z.sqlite")))
             self.assertEqual(os.listdir(os.path.join(p, "storage/default")), ["moz-extension+++abc"])
