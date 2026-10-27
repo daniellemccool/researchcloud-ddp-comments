@@ -135,6 +135,27 @@ class StubTest(unittest.TestCase):
         self.assertIn(">nos, &quot;quoted&quot;</a>", body)
         self.assertIn(">Video 2</a>", body)
 
+    def test_enable_uploads_opens_login_page_in_own_browser(self):
+        self.assertEqual(self.req("POST", "/desk/enable-uploads", user="alice")[0], 204)
+        calls = self.docker_calls(); self.assertEqual(len(calls), 1)
+        self.assertIn("desk-firefox-alice", calls[0])
+        self.assertIn("https://checkjefeedzee.onlinehate.src.surf-hosted.nl/desk/uploads-ready/", calls[0])
+        self.assertEqual(self.log()[-1]["action"], "enable-uploads")
+
+    def test_enable_uploads_failure_is_500(self):
+        put(self.mode, "fail")
+        self.assertEqual(self.req("POST", "/desk/enable-uploads", user="alice")[0], 500)
+
+    def test_uploads_ready_page_names_the_user(self):
+        s, body = self.req("GET", "/desk/uploads-ready/", user="bob")
+        self.assertEqual(s, 200); self.assertIn("Uploads are enabled for bob", body)
+        self.assertEqual(self.req("GET", "/desk/uploads-ready/", user="mallory")[0], 403)
+        self.assertEqual(self.req("POST", "/desk/enable-uploads", user="mallory")[0], 403)
+
+    def test_page_has_enable_uploads_button(self):
+        _, body = self.req("GET", "/desk/", user="alice")
+        self.assertIn('onclick="enableUploads()"', body)
+
     def test_page_offers_5_and_10(self):
         _, body = self.req("GET", "/desk/", user="alice")
         self.assertIn("Get 5 more videos", body); self.assertIn("Get 10 more videos", body)

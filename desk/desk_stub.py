@@ -67,6 +67,7 @@ li[data-state=todo] .mark::before{content:"\25CB";color:var(--muted)}
 .timer.up{color:var(--ok)}
 .more{padding:8px 0}.more button{font:inherit;padding:6px 10px;margin-right:6px;border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:6px;cursor:pointer}
 .hint{font-size:12px;color:var(--muted);margin:6px 2px}
+.enable{font:inherit;font-size:12px;padding:2px 8px;border:1px solid var(--ok);background:#fff;color:var(--ok);border-radius:4px;cursor:pointer}
 footer{padding:10px 14px;border-top:1px solid var(--line);background:#fff8e6;font-size:12px}
 #starting{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:15px}
 </style></head>
@@ -80,7 +81,9 @@ footer{padding:10px 14px;border-top:1px solid var(--line);background:#fff8e6;fon
 <li>When every video is done, get more.</li>
 </ol></details>
 <div class="list">%%BODY%%</div>
-<footer><b>Before you leave:</b> click <b>Z</b> in the browser's toolbar, press <b>to 4CAT</b> on <i>TikTok (comments)</i>, then on <i>TikTok</i>, and wait until both say they're done.</footer>
+<footer><b>Before you leave:</b> press <button class="enable" onclick="enableUploads()">Enable uploads</button> and log in if asked (once a day).
+Then click <b>Z</b> in the browser's toolbar, press <b>to 4CAT</b> on <i>TikTok (comments)</i>, then on <i>TikTok</i>, and wait until both say they're done.
+<div id="enablemsg" class="msg"></div></footer>
 </aside>
 <div id="starting">Starting your browser…</div>
 <iframe id="screen" style="flex:1 1 auto;height:100vh;border:0;min-width:0;display:none" allow="clipboard-read; clipboard-write"></iframe>
@@ -114,15 +117,26 @@ function refresh(){const rows=[...document.querySelectorAll('ul.rows li')];const
  const b=document.getElementById('barfill');if(b)b.style.width=(rows.length?100*done/rows.length:0)+'%';
  const nx=document.getElementById('next');if(nx)nx.disabled=!rows.some(r=>r.dataset.state==='todo');
  if(rows.length&&done===rows.length&&!document.getElementById('getmore'))setTimeout(()=>location.reload(),1500);}
+async function enableUploads(){const m=document.getElementById('enablemsg');m.textContent='Opening the login in your browser…';
+ const r=await fetch('enable-uploads',{method:'POST'});
+ m.textContent=r.ok?'Look at the browser on the right: log in if asked, until it says uploads are enabled.':'could not open; tell the operator';
+ m.className='msg'+(r.ok?'':' warn');}
 async function more(n){await fetch('claim?n='+n,{method:'POST'});location.reload();}
 </script></body></html>"""
+UPLOADS_READY = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Uploads enabled</title></head>
+<body style="font:16px/1.5 system-ui,sans-serif;margin:3em;max-width:36em;color:#1d2329">
+<h1 style="color:#1a7f37;font-size:22px">&#10003; Uploads are enabled for %%USER%%</h1>
+<p>This browser can now send to 4CAT for the next 12 hours.</p>
+<p>Click <b>Z</b> in the toolbar and press <b>to 4CAT</b> (first on <i>TikTok (comments)</i>, then on <i>TikTok</i>),
+or carry on with <b>Open next video</b> in the list on the left.</p></body></html>"""
 FORBIDDEN = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>desk</title></head>
 <body style="font:16px system-ui;margin:3em">You are not registered for the desk; ask Danielle.</body></html>"""
 
 
 class Desk:
-    def __init__(self, root, exec_timeout, batch, idle):
+    def __init__(self, root, exec_timeout, batch, idle, public_url="https://checkjefeedzee.onlinehate.src.surf-hosted.nl"):
         self.root, self.exec_timeout, self.batch, self.idle = root, exec_timeout, batch, idle
+        self.public_url = public_url.rstrip("/")
         self.sizes = sorted({batch, 10})   # the claim buttons on the page; nothing else is accepted
         self.log_path = os.path.join(root, "state", "desk-log.ndjson")
         self.lock = threading.Lock()
@@ -271,7 +285,9 @@ class Desk:
             return nxt
 
     def open_video(self, user, vid):
-        url = f"https://www.tiktok.com/@x/video/{vid}/"
+        return self.open_url(user, f"https://www.tiktok.com/@x/video/{vid}/")
+
+    def open_url(self, user, url):
         cmd = ["docker", "exec", "-e", "DISPLAY=:0", "-e", "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus.base",
                "-e", "HOME=/config", "-e", "XDG_RUNTIME_DIR=/tmp/run/user/app", f"desk-firefox-{user}",
                "su-exec", "1000:1000", "/usr/lib/firefox/firefox", "--profile", "/config/profile", url]
@@ -315,6 +331,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/desk/status":
             body = json.dumps({"ready": self.desk.ready(user)}).encode()
             return self._send(200, body, "application/json")
+        if path == "/desk/uploads-ready/":
+            # Reached from inside the user's streamed Firefox, after SRAM: that browser can now upload.
+            return self._send(200, UPLOADS_READY.replace("%%USER%%", html.escape(user)).encode())
         if path == "/desk/admin":
             self.send_response(301); self.send_header("Location", "/desk/admin/")
             self.send_header("Content-Length", "0"); self.end_headers()
@@ -335,6 +354,11 @@ class Handler(BaseHTTPRequestHandler):
             if not n.isdigit() or int(n) not in self.desk.sizes:
                 return self._send(400)
             return self._send(409 if isinstance(self.desk.claim(user, int(n)), str) else 204)
+        if path == "/desk/enable-uploads":
+            rc, err = self.desk.open_url(user, self.desk.public_url + "/desk/uploads-ready/")
+            self.desk.append({"t": int(time.time()), "user": user, "action": "enable-uploads", "video_id": "", "code": "",
+                              "exec_rc": rc, "exec_err": err})
+            return self._send(204 if rc == 0 else 500)
         vid = q.get("id", [""])[0]
         claims, _, _, _ = self.desk.view(user)
         if not vid.isdigit() or vid not in {v for v, _ in claims}:
@@ -427,8 +451,9 @@ class Handler(BaseHTTPRequestHandler):
                 "</table><p><a href=\"/\">4CAT</a></p></body></html>")
 
 
-def make_server(root, port, exec_timeout=15, batch=5, idle=900, reaper=True):
-    desk = Desk(root, exec_timeout, batch, idle)
+def make_server(root, port, exec_timeout=15, batch=5, idle=900, reaper=True,
+                public_url="https://checkjefeedzee.onlinehate.src.surf-hosted.nl"):
+    desk = Desk(root, exec_timeout, batch, idle, public_url)
     handler = type("BoundHandler", (Handler,), {"desk": desk})
     if reaper:
         def loop():
@@ -448,5 +473,7 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8110)
     ap.add_argument("--batch", type=int, default=5)
     ap.add_argument("--idle", type=int, default=900, help="stop a session after this many seconds without a screen")
+    ap.add_argument("--public-url", default="https://checkjefeedzee.onlinehate.src.surf-hosted.nl",
+                    help="the desk's public origin, opened inside a session for the uploads login")
     a = ap.parse_args()
-    make_server(a.desk, a.port, batch=a.batch, idle=a.idle).serve_forever()
+    make_server(a.desk, a.port, batch=a.batch, idle=a.idle, public_url=a.public_url).serve_forever()
