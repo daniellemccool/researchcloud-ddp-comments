@@ -12,8 +12,13 @@ or marked with a problem code. A row click execs into desk-firefox-<user> only, 
 for ids that user claimed. Claims, opens and problems go to <desk>/state/desk-log.ndjson,
 which is the only record of who has what. Everything outside /desk/ is 403: nginx sends
 requests here when a user may not reach the real target.
+
+Sessions run only while used: opening /desk/ starts the user's own stopped containers
+(the page loads the screen once /desk/status says it answers), and a reaper thread stops
+a Firefox that has had no screen connection (nginx's websocket to its noVNC port, seen
+with `ss`) for --idle seconds. Stopping loses nothing; /config lives on the volume.
 """
-import argparse, csv, html, json, os, subprocess, threading, time
+import argparse, csv, html, json, os, socket, subprocess, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -24,8 +29,13 @@ PAGE = """<!doctype html>
 <body style="margin:0;font:14px system-ui;display:flex;flex-direction:row;height:100vh;overflow:hidden">
 <aside style="width:320px;flex:0 0 320px;overflow:auto;border-right:1px solid #ddd;padding:12px;box-sizing:border-box">
 <b>Your videos</b> — {user}{body}</aside>
-<iframe src="/desk/vnc/" style="flex:1 1 auto;height:100vh;border:0;min-width:0" allow="clipboard-read; clipboard-write"></iframe>
+<div id="starting" style="flex:1 1 auto;display:flex;align-items:center;justify-content:center;color:#666">Starting your browser…</div>
+<iframe id="screen" style="flex:1 1 auto;height:100vh;border:0;min-width:0;display:none" allow="clipboard-read; clipboard-write"></iframe>
 <script>
+async function waitScreen(){{try{{const r=await fetch('status');if(r.ok&&(await r.json()).ready){{
+ const f=document.getElementById('screen');f.src='/desk/vnc/';f.style.display='';
+ document.getElementById('starting').style.display='none';return;}}}}catch(e){{}}setTimeout(waitScreen,2000);}}
+waitScreen();
 async function open_(id){{const li=document.getElementById('r'+id),m=li.querySelector('.msg');
  const r=await fetch('open?id='+id,{{method:'POST'}});
  if(r.ok){{li.classList.add('done');m.textContent='';}}else{{m.textContent=' could not open; tell the operator';}}}}
@@ -39,17 +49,85 @@ FORBIDDEN = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title
 
 
 class Desk:
-    def __init__(self, root, exec_timeout, batch):
-        self.root, self.exec_timeout, self.batch = root, exec_timeout, batch
+    def __init__(self, root, exec_timeout, batch, idle):
+        self.root, self.exec_timeout, self.batch, self.idle = root, exec_timeout, batch, idle
         self.log_path = os.path.join(root, "state", "desk-log.ndjson")
         self.lock = threading.Lock()
+        self.start_lock = threading.Lock()
+        self.last_seen = {}   # user -> last time their screen was connected or their page loaded
 
-    def users(self):
+    def sessions(self):
+        """user -> noVNC port (5800 + registry index), as make-sessions.sh renders it."""
         try:
             with open(os.path.join(self.root, "sessions.tsv")) as f:
-                return [l.split("\t")[0] for l in f.read().splitlines() if "\t" in l]
-        except FileNotFoundError:
-            return []
+                rows = [l.split("\t") for l in f.read().splitlines() if "\t" in l]
+            return {u: 5800 + int(n) for u, n in rows}
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def users(self):
+        return list(self.sessions())
+
+    @staticmethod
+    def _docker(*args, timeout=30):
+        try:
+            return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def running(self, name):
+        r = self._docker("inspect", "-f", "{{.State.Running}}", name, timeout=10)
+        return bool(r) and r.stdout.strip() == "true"
+
+    def ensure_started(self, user):
+        with self.start_lock:
+            for name in (f"desk-mitm-{user}", f"desk-firefox-{user}"):
+                if not self.running(name):
+                    self._docker("start", name)
+            self.last_seen[user] = time.time()
+
+    def ready(self, user):
+        port = self.sessions().get(user)
+        if not port or not self.running(f"desk-firefox-{user}"):
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def connected_ports():
+        try:
+            out = subprocess.run(["ss", "-Htn"], capture_output=True, text=True, timeout=10).stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        ports = set()
+        for line in out.splitlines():
+            f = line.split()
+            if len(f) >= 4 and f[0] == "ESTAB" and f[3].rsplit(":", 1)[-1].isdigit():
+                ports.add(int(f[3].rsplit(":", 1)[-1]))
+        return ports
+
+    def reap(self, now=None):
+        """Stop Firefox sessions with no screen connection for longer than self.idle."""
+        now = time.time() if now is None else now
+        conns = self.connected_ports()
+        if conns is None:
+            return                      # can't tell who is watching: stop nothing
+        for user, port in self.sessions().items():
+            name = f"desk-firefox-{user}"
+            if not self.running(name):
+                self.last_seen.pop(user, None)
+                continue
+            if port in conns or user not in self.last_seen:
+                self.last_seen[user] = now
+                continue
+            if now - self.last_seen[user] > self.idle:
+                self._docker("stop", name, timeout=60)
+                self.last_seen.pop(user, None)
+                self.append({"t": int(now), "user": user, "action": "stop", "video_id": "", "code": "",
+                             "idle_s": int(self.idle)})
 
     def pool(self):
         rows, seen = [], set()
@@ -151,7 +229,11 @@ class Handler(BaseHTTPRequestHandler):
         if user is None or not path.startswith("/desk/"):
             return self._send(403, FORBIDDEN.encode())
         if path == "/desk/":
+            self.desk.ensure_started(user)
             return self._send(200, self._page(user).encode())
+        if path == "/desk/status":
+            body = json.dumps({"ready": self.desk.ready(user)}).encode()
+            return self._send(200, body, "application/json")
         if path == "/desk/admin":
             self.send_response(301); self.send_header("Location", "/desk/admin/")
             self.send_header("Content-Length", "0"); self.end_headers()
@@ -242,8 +324,18 @@ class Handler(BaseHTTPRequestHandler):
                 "</table><p><a href=\"/\">4CAT</a></p></body></html>")
 
 
-def make_server(root, port, exec_timeout=15, batch=5):
-    handler = type("BoundHandler", (Handler,), {"desk": Desk(root, exec_timeout, batch)})
+def make_server(root, port, exec_timeout=15, batch=5, idle=900, reaper=True):
+    desk = Desk(root, exec_timeout, batch, idle)
+    handler = type("BoundHandler", (Handler,), {"desk": desk})
+    if reaper:
+        def loop():
+            while True:
+                time.sleep(60)
+                try:
+                    desk.reap()
+                except Exception:   # a failed sweep must not kill the thread; the next one retries
+                    pass
+        threading.Thread(target=loop, daemon=True).start()
     return ThreadingHTTPServer(("127.0.0.1", port), handler)
 
 
@@ -252,5 +344,6 @@ if __name__ == "__main__":
     ap.add_argument("--desk", default="/data/onlinehate_zeeschuimer/desk")
     ap.add_argument("--port", type=int, default=8110)
     ap.add_argument("--batch", type=int, default=5)
+    ap.add_argument("--idle", type=int, default=900, help="stop a session after this many seconds without a screen")
     a = ap.parse_args()
-    make_server(a.desk, a.port, batch=a.batch).serve_forever()
+    make_server(a.desk, a.port, batch=a.batch, idle=a.idle).serve_forever()

@@ -11,7 +11,16 @@ case "$(cat "$FAKE_DOCKER_MODE" 2>/dev/null)" in
   fail) echo "boom" >&2; exit 1;;
   hang) sleep 5;;
 esac
-[ "$1" = ps ] && printf 'desk-firefox-alice\\tUp 2 hours\\ndesk-mitm-alice\\tUp 2 hours\\n'
+case "$1" in
+  ps) printf 'desk-firefox-alice\\tUp 2 hours\\ndesk-mitm-alice\\tUp 2 hours\\n';;
+  inspect) [ -f "$FAKE_DOCKER_STATE/${@: -1}" ] && echo true || echo false;;
+  start) touch "$FAKE_DOCKER_STATE/$2";;
+  stop) rm -f "$FAKE_DOCKER_STATE/${@: -1}";;
+esac
+exit 0
+"""
+FAKE_SS = """#!/usr/bin/env bash
+cat "$FAKE_SS_OUT" 2>/dev/null
 exit 0
 """
 
@@ -39,10 +48,13 @@ class StubTest(unittest.TestCase):
         write_csv(os.path.join(self.desk, "pool.csv"), rows)
         bindir = os.path.join(t, "bin"); os.makedirs(bindir)
         put(os.path.join(bindir, "docker"), FAKE_DOCKER); os.chmod(os.path.join(bindir, "docker"), 0o755)
+        put(os.path.join(bindir, "ss"), FAKE_SS); os.chmod(os.path.join(bindir, "ss"), 0o755)
         self.calls = os.path.join(t, "calls"); self.mode = os.path.join(t, "mode")
-        self.env = {"PATH": bindir + ":" + os.environ["PATH"], "FAKE_DOCKER_CALLS": self.calls, "FAKE_DOCKER_MODE": self.mode}
+        self.state = os.path.join(t, "state"); os.makedirs(self.state); self.ss_out = os.path.join(t, "ss")
+        self.env = {"PATH": bindir + ":" + os.environ["PATH"], "FAKE_DOCKER_CALLS": self.calls, "FAKE_DOCKER_MODE": self.mode,
+                    "FAKE_DOCKER_STATE": self.state, "FAKE_SS_OUT": self.ss_out}
         self._old = {k: os.environ.get(k) for k in self.env}; os.environ.update(self.env)
-        self.srv = desk_stub.make_server(self.desk, 0, exec_timeout=1, batch=5)
+        self.srv = desk_stub.make_server(self.desk, 0, exec_timeout=1, batch=5, idle=900, reaper=False)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
@@ -96,7 +108,7 @@ class StubTest(unittest.TestCase):
         s, body = self.req("GET", "/desk/", user="alice")
         self.assertEqual(s, 200); self.assertIn("Get 5 more videos", body)
         self.assertNotIn('id="r101"', body)
-        self.assertIn('src="/desk/vnc/"', body)
+        self.assertIn("'/desk/vnc/'", body)
 
     def test_claim_takes_next_five_in_pool_order(self):
         self.assertEqual(self.req("POST", "/desk/claim", user="alice")[0], 204)
@@ -216,6 +228,64 @@ class StubTest(unittest.TestCase):
         self.assertIn("/desk/admin/vnc/alice/", body); self.assertIn("/desk/admin/vnc/bob/", body)
         self.assertIn("Up 2 hours", body)
         self.assertIn("7 of 12 videos unclaimed", body)
+
+    # start on open, stop when idle
+    def running(self, name):
+        return os.path.exists(os.path.join(self.state, name))
+
+    def test_page_starts_own_stopped_session_only(self):
+        self.assertEqual(self.req("GET", "/desk/", user="alice")[0], 200)
+        self.assertTrue(self.running("desk-mitm-alice")); self.assertTrue(self.running("desk-firefox-alice"))
+        self.assertFalse(self.running("desk-firefox-bob"))
+        self.assertFalse(any("bob" in c for c in self.docker_calls()))
+
+    def test_page_does_not_restart_running_session(self):
+        put(os.path.join(self.state, "desk-mitm-alice"), ""); put(os.path.join(self.state, "desk-firefox-alice"), "")
+        self.req("GET", "/desk/", user="alice")
+        self.assertFalse(any(c.startswith("start") for c in self.docker_calls()))
+
+    def test_page_waits_for_screen_before_loading_it(self):
+        _, body = self.req("GET", "/desk/", user="alice")
+        self.assertIn("Starting your browser", body)
+        self.assertNotIn('src="/desk/vnc/"', body)   # the iframe gets its src once /desk/status says ready
+        s, st = self.req("GET", "/desk/status", user="alice")
+        self.assertEqual(s, 200); self.assertEqual(json.loads(st)["ready"], False)   # port 5801 not listening here
+
+    def test_status_needs_registered_user(self):
+        self.assertEqual(self.req("GET", "/desk/status", user="mallory")[0], 403)
+
+    def desk_obj(self):
+        return self.srv.RequestHandlerClass.desk
+
+    def test_reaper_stops_idle_session_without_screen(self):
+        put(os.path.join(self.state, "desk-firefox-alice"), ""); put(os.path.join(self.state, "desk-mitm-alice"), "")
+        d = self.desk_obj(); d.last_seen["alice"] = 1000
+        d.reap(now=1000 + 901)
+        self.assertFalse(self.running("desk-firefox-alice"))
+        self.assertTrue(self.running("desk-mitm-alice"))
+        self.assertEqual(self.log()[-1]["action"], "stop")
+
+    def test_reaper_keeps_session_with_screen_connected(self):
+        put(os.path.join(self.state, "desk-firefox-alice"), "")
+        put(self.ss_out, "ESTAB 0 0 127.0.0.1:5801 127.0.0.1:43210\nESTAB 0 0 127.0.0.1:5802 127.0.0.1:43211\n")
+        d = self.desk_obj(); d.last_seen["alice"] = 1000
+        d.reap(now=1000 + 5000)
+        self.assertTrue(self.running("desk-firefox-alice"))
+        self.assertEqual(d.last_seen["alice"], 6000)
+
+    def test_reaper_grace_after_page_load(self):
+        self.req("GET", "/desk/", user="alice")
+        d = self.desk_obj()
+        d.reap(now=d.last_seen["alice"] + 60)
+        self.assertTrue(self.running("desk-firefox-alice"))
+
+    def test_reaper_grace_for_sessions_found_running(self):
+        put(os.path.join(self.state, "desk-firefox-bob"), "")
+        d = self.desk_obj()
+        d.reap(now=5000)            # first sight: start the clock, don't stop
+        self.assertTrue(self.running("desk-firefox-bob"))
+        d.reap(now=5000 + 901)
+        self.assertFalse(self.running("desk-firefox-bob"))
 
 
 class PoolAddTest(unittest.TestCase):

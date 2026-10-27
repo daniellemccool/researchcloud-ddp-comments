@@ -28,7 +28,7 @@
     "OverridePostUpdatePage": "",
     "NoDefaultBookmarks": true,
     "Homepage": {
-      "URL": "https://www.tiktok.com/",
+      "URL": "about:blank",
       "StartPage": "homepage"
     },
     "Preferences": {

@@ -96,7 +96,7 @@ cp "$REPO/desk/desk_stub.py" "$DESK/desk_stub.py"
       - WEB_AUDIO=0
       - KEEP_APP_RUNNING=1
       - DARK_MODE=0
-      - FF_OPEN_URL=https://www.tiktok.com/
+      - FF_OPEN_URL=about:blank
       - USER_ID=1000
       - GROUP_ID=1000
     shm_size: "1g"
