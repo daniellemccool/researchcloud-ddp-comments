@@ -117,6 +117,24 @@ class StubTest(unittest.TestCase):
         self.assertLess(body.index('id="r101"'), body.index('id="r105"'))
         self.assertIn("nos, &quot;quoted&quot;", body)
 
+    def test_page_has_howto_next_button_progress_and_upload_reminder(self):
+        self.req("POST", "/desk/claim", user="alice")
+        self.req("POST", "/desk/open?id=101", user="alice")
+        self.req("POST", "/desk/problem?id=102&code=U", user="alice")
+        _, body = self.req("GET", "/desk/", user="alice")
+        self.assertIn("How to collect", body)
+        self.assertIn('id="next"', body); self.assertIn("Open next video", body)
+        self.assertIn("2 of 5 done", body)
+        self.assertIn("Before you leave", body); self.assertIn("to 4CAT", body)
+        self.assertIn('id="r103" data-state="todo"', body)
+        self.assertIn('data-state="problem"', body)
+
+    def test_rows_show_note_as_title_or_a_number(self):
+        self.req("POST", "/desk/claim", user="alice")
+        _, body = self.req("GET", "/desk/", user="alice")
+        self.assertIn(">nos, &quot;quoted&quot;</a>", body)
+        self.assertIn(">Video 2</a>", body)
+
     def test_page_offers_5_and_10(self):
         _, body = self.req("GET", "/desk/", user="alice")
         self.assertIn("Get 5 more videos", body); self.assertIn("Get 10 more videos", body)
