@@ -203,6 +203,12 @@ class StubTest(unittest.TestCase):
         self.assertEqual(self.req("GET", "/desk/admin/", user="alice")[0], 403)
         self.assertEqual(self.req("GET", "/desk/admin/", user="alice", admin="0")[0], 403)
 
+    def test_admin_without_trailing_slash_redirects(self):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/desk/admin", headers={"REMOTE_USER": "alice", "X-Desk-Admin": "1"})
+        r = c.getresponse(); r.read(); c.close()
+        self.assertEqual((r.status, r.getheader("Location")), (301, "/desk/admin/"))
+
     def test_admin_page_lists_sessions_and_pool(self):
         self.req("POST", "/desk/claim", user="alice"); self.req("POST", "/desk/open?id=101", user="alice")
         s, body = self.req("GET", "/desk/admin/", user="alice", admin="1")

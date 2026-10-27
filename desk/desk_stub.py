@@ -152,6 +152,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, FORBIDDEN.encode())
         if path == "/desk/":
             return self._send(200, self._page(user).encode())
+        if path == "/desk/admin":
+            self.send_response(301); self.send_header("Location", "/desk/admin/")
+            self.send_header("Content-Length", "0"); self.end_headers()
+            return
         if path == "/desk/admin/":
             if self.headers.get("X-Desk-Admin") != "1":
                 return self._send(403, FORBIDDEN.encode())
