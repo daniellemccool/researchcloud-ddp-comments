@@ -18,7 +18,7 @@ Sessions run only while used: opening /desk/ starts the user's own stopped conta
 a Firefox that has had no screen connection (nginx's websocket to its noVNC port, seen
 with `ss`) for --idle seconds. Stopping loses nothing; /config lives on the volume.
 """
-import argparse, csv, html, json, os, socket, subprocess, threading, time
+import argparse, csv, html, http.client, json, os, subprocess, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -55,13 +55,14 @@ class Desk:
         self.lock = threading.Lock()
         self.start_lock = threading.Lock()
         self.last_seen = {}   # user -> last time their screen was connected or their page loaded
+        self.port_base = 5800
 
     def sessions(self):
         """user -> noVNC port (5800 + registry index), as make-sessions.sh renders it."""
         try:
             with open(os.path.join(self.root, "sessions.tsv")) as f:
                 rows = [l.split("\t") for l in f.read().splitlines() if "\t" in l]
-            return {u: 5800 + int(n) for u, n in rows}
+            return {u: self.port_base + int(n) for u, n in rows}
         except (FileNotFoundError, ValueError):
             return {}
 
@@ -87,14 +88,20 @@ class Desk:
             self.last_seen[user] = time.time()
 
     def ready(self, user):
+        """True once noVNC answers HTTP 200. A bare TCP accept is not enough: Docker's
+        port proxy accepts before the container's server listens, then resets."""
         port = self.sessions().get(user)
         if not port or not self.running(f"desk-firefox-{user}"):
             return False
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                return True
-        except OSError:
+            c.request("GET", "/")
+            r = c.getresponse(); r.read()
+            return r.status == 200
+        except (OSError, http.client.HTTPException):
             return False
+        finally:
+            c.close()
 
     @staticmethod
     def connected_ports():

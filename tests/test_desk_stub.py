@@ -251,6 +251,30 @@ class StubTest(unittest.TestCase):
         s, st = self.req("GET", "/desk/status", user="alice")
         self.assertEqual(s, 200); self.assertEqual(json.loads(st)["ready"], False)   # port 5801 not listening here
 
+    def _listener(self, handler):
+        import socket
+        s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(4)
+        def serve():
+            try:
+                while True:
+                    conn, _ = s.accept(); handler(conn); conn.close()
+            except OSError:
+                pass
+        threading.Thread(target=serve, daemon=True).start()
+        self.addCleanup(s.close)
+        self.desk_obj().port_base = s.getsockname()[1] - 1   # alice is index 1
+        put(os.path.join(self.state, "desk-firefox-alice"), "")
+
+    def test_not_ready_while_proxy_accepts_but_resets(self):
+        self._listener(lambda conn: None)   # accept, then hang up: Docker's proxy before noVNC listens
+        self.assertFalse(self.desk_obj().ready("alice"))
+
+    def test_ready_when_novnc_answers_200(self):
+        def ok(conn):
+            conn.recv(4096); conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        self._listener(ok)
+        self.assertTrue(self.desk_obj().ready("alice"))
+
     def test_status_needs_registered_user(self):
         self.assertEqual(self.req("GET", "/desk/status", user="mallory")[0], 403)
 
