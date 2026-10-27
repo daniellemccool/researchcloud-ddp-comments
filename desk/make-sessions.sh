@@ -36,7 +36,7 @@ done
 MITM_IMAGE="mitmproxy/mitmproxy:12.2.3"; FF_IMAGE="jlesage/firefox:v26.08.3"
 STUB=127.0.0.1:8110; FOURCAT=127.0.0.1:8080
 
-mkdir -p "$DESK/firefox" "$DESK/nginx" "$DESK/mitm" "$DESK/worklists"
+mkdir -p "$DESK/firefox" "$DESK/nginx" "$DESK/mitm"
 touch "$DESK/sessions.tsv" "$DESK/admins.txt"
 for u in "${NEW_USERS[@]}"; do
   grep -q "^$u"$'\t' "$DESK/sessions.tsv" && continue

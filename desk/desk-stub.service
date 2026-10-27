@@ -1,10 +1,12 @@
-# /etc/systemd/system/desk-stub.service — keeps the spike worklist alive across reboots
+# /etc/systemd/system/desk-stub.service — the desk page and queue for every user's session.
+# Root for the Docker socket (it execs into desk-firefox-<user>); listens on 127.0.0.1 only.
 [Unit]
-Description=comment-desk spike worklist
+Description=ddp-comments desk
 After=docker.service
+RequiresMountsFor=/data/onlinehate_zeeschuimer
 [Service]
-WorkingDirectory=/home/dmccool/spike
-ExecStart=/usr/bin/python3 /home/dmccool/spike/desk_stub.py --worklist /home/dmccool/spike/selection.csv --port 8110
+WorkingDirectory=/data/onlinehate_zeeschuimer/desk
+ExecStart=/usr/bin/python3 /data/onlinehate_zeeschuimer/desk/desk_stub.py --desk /data/onlinehate_zeeschuimer/desk --port 8110 --batch 5
 Restart=always
 [Install]
 WantedBy=multi-user.target

@@ -12,8 +12,8 @@ Spike record (2026-09-07): `docs/spike-runbook.md`, `docs/spike-compose-2026-09-
 | Path | Runs on | Purpose |
 |---|---|---|
 | `desk/make-sessions.sh` | desk workspace | render one Firefox+mitm pair per user and the nginx gate |
-| `desk/desk_stub.py`, `desk/desk-stub.service` | desk workspace | two-pane desk page per user; opens videos in that user's Firefox |
-| `desk/split-worklist.py` | desk workspace | deal a `selection.csv` into disjoint per-user worklists |
+| `desk/desk_stub.py`, `desk/desk-stub.service` | desk workspace | two-pane desk page per user; users pull batches from one shared queue; opens videos in that user's Firefox |
+| `desk/pool-add.py` | desk workspace | append a `selection.csv` to the shared queue (`pool.csv`), skipping known ids |
 | `desk/mitm/addons/capture_comments.py` | desk workspace (in the proxy) | automatic comment capture |
 
 Tests: `scripts/test-all.sh` (bash + Python, no SRC access needed).
