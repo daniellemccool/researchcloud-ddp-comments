@@ -22,7 +22,20 @@ import argparse, csv, html, http.client, json, os, subprocess, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-PROBLEM_CODES = {"U", "P", "L", "W", "R", "C", "X"}
+# Problem codes agreed with the research group; the labels are what students see.
+PROBLEMS = [
+    ("U", "Video unavailable or removed"),
+    ("P", "Private video"),
+    ("L", "Needs a login to view"),
+    ("W", "Login wall cut the comments short"),
+    ("R", "Not available in this region"),
+    ("C", "Captcha or blank page: stop for today and tell Isabelle"),
+    ("X", "Something else (add a note)"),
+]
+PROBLEM_CODES = {c for c, _ in PROBLEMS}
+LABELS = dict(PROBLEMS)
+PROBLEM_OPTIONS = '<option value="">Problem…</option>' + "".join(
+    f'<option value="{c}">{html.escape(l)}</option>' for c, l in PROBLEMS)
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>desk — {user}</title>
 <style>li{{margin:6px 0}}button{{font:inherit}}.done a{{color:#888}}small{{color:#666}}</style></head>
@@ -39,9 +52,12 @@ waitScreen();
 async function open_(id){{const li=document.getElementById('r'+id),m=li.querySelector('.msg');
  const r=await fetch('open?id='+id,{{method:'POST'}});
  if(r.ok){{li.classList.add('done');m.textContent='';}}else{{m.textContent=' could not open; tell the operator';}}}}
-async function problem(id){{const c=prompt('Problem code: U P L W R C X');if(!c)return;
- const k=c.trim().toUpperCase(),r=await fetch('problem?id='+id+'&code='+encodeURIComponent(k),{{method:'POST'}});
- document.getElementById('r'+id).querySelector('.msg').textContent=r.ok?' problem '+k:' unknown code';}}
+async function problem(id,sel){{const k=sel.value;if(!k)return;let note='';
+ if(k==='X'){{note=prompt('What went wrong? (a few words)')||'';if(!note.trim()){{sel.value='';return;}}}}
+ const r=await fetch('problem?id='+id+'&code='+k+'&note='+encodeURIComponent(note.trim()),{{method:'POST'}});
+ const m=document.getElementById('r'+id).querySelector('.msg');
+ m.textContent=r.ok?' — '+sel.options[sel.selectedIndex].text+(note?': '+note.trim():''):' could not save; tell the operator';
+ sel.value='';}}
 async function more(){{await fetch('claim',{{method:'POST'}});location.reload();}}
 </script></body></html>"""
 FORBIDDEN = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>desk</title></head>
@@ -177,7 +193,7 @@ class Desk:
             elif a == "open" and e.get("exec_rc") == 0:
                 opened.add(e["video_id"]); done.add(e["video_id"])
             elif a == "problem":
-                problems[e["video_id"]] = e["code"]; done.add(e["video_id"])
+                problems[e["video_id"]] = (e["code"], e.get("note", "")); done.add(e["video_id"])
         return claims, done, opened, problems
 
     def claim(self, user):
@@ -270,9 +286,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(204 if rc == 0 else 500)
         if path == "/desk/problem":
             code = q.get("code", [""])[0].strip().upper()
-            if code not in PROBLEM_CODES:
+            note = " ".join(q.get("note", [""])[0].split())[:300]
+            if code not in PROBLEM_CODES or (code == "X" and not note):
                 return self._send(400)
-            ev.update(action="problem", code=code)
+            ev.update(action="problem", code=code, note=note)
             self.desk.append(ev)
             return self._send(204)
         return self._send(404)
@@ -286,10 +303,13 @@ class Handler(BaseHTTPRequestHandler):
         items = []
         for v in shown:
             cls = ' class="done"' if v in opened else ""
-            msg = f" problem {problems[v]}" if v in problems else ""
+            msg = ""
+            if v in problems:
+                code, pnote = problems[v]
+                msg = " — " + html.escape(LABELS.get(code, code)) + (f": {html.escape(pnote)}" if pnote else "")
             note = f" <small>{html.escape(notes[v])}</small>" if notes.get(v) else ""
             items.append(f'<li id="r{v}"{cls}><a href="#" onclick="open_(\'{v}\');return false">{v}</a>{note} '
-                         f'<button onclick="problem(\'{v}\')">Problem…</button><span class="msg">{msg}</span></li>')
+                         f'<select onchange="problem(\'{v}\',this)">{PROBLEM_OPTIONS}</select><span class="msg">{msg}</span></li>')
         body = ("<ol>" + "".join(items) + "</ol>") if items else ""
         if earlier:
             body += f"<p><small>{earlier} done earlier</small></p>"

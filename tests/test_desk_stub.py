@@ -204,7 +204,31 @@ class StubTest(unittest.TestCase):
         self.assertEqual(self.req("POST", "/desk/problem?id=102&code=P", user="alice")[0], 204)
         _, body = self.req("GET", "/desk/", user="alice")
         self.assertIn('id="r101" class="done"', body)
-        self.assertIn("problem P", body)
+        self.assertIn("— Private video", body)
+
+    def test_problem_choices_are_spelled_out(self):
+        self.req("POST", "/desk/claim", user="alice")
+        _, body = self.req("GET", "/desk/", user="alice")
+        for label in ("Video unavailable or removed", "Private video", "Needs a login to view",
+                      "Login wall cut the comments short", "Not available in this region",
+                      "Captcha or blank page: stop for today and tell Isabelle", "Something else (add a note)"):
+            self.assertIn(label, body)
+        self.assertNotIn("prompt('Problem code", body)
+
+    def test_other_needs_a_note_which_is_logged(self):
+        self.req("POST", "/desk/claim", user="alice")
+        self.assertEqual(self.req("POST", "/desk/problem?id=101&code=X", user="alice")[0], 400)
+        self.assertEqual(self.req("POST", "/desk/problem?id=101&code=X&note=video%20is%20a%20livestream", user="alice")[0], 204)
+        ev = self.log()[-1]
+        self.assertEqual((ev["code"], ev["note"]), ("X", "video is a livestream"))
+        _, body = self.req("GET", "/desk/", user="alice")
+        self.assertIn("— Something else (add a note): video is a livestream", body)
+
+    def test_note_is_escaped_on_the_page(self):
+        self.req("POST", "/desk/claim", user="alice")
+        self.req("POST", "/desk/problem?id=101&code=X&note=%3Cscript%3Ex%3C/script%3E", user="alice")
+        _, body = self.req("GET", "/desk/", user="alice")
+        self.assertNotIn("<script>x</script>", body); self.assertIn("&lt;script&gt;", body)
 
     def test_bad_problem_code_is_400(self):
         self.req("POST", "/desk/claim", user="alice")
