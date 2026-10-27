@@ -1,0 +1,38 @@
+# Comment-desk spike: one contained Firefox (streamed via noVNC) + a capturing proxy.
+# Run on the spike workspace:  docker compose up -d   (from this directory)
+# Session id "1" is hard-wired for the spike; the real desk spawns one pair per collector.
+services:
+  mitm:
+    image: mitmproxy/mitmproxy:12.2.3
+    container_name: desk-mitm-1
+    command: mitmdump --set block_global=false --set stream_large_bodies=1m -s /addons/capture_comments.py
+    volumes:
+      - ./mitm/addons:/addons:ro
+      - ./state/mitm-1:/home/mitmproxy/.mitmproxy     # CA is generated here on first start
+      - ./state/captures:/captures
+    environment:
+      - DESK_SESSION=1
+      - DESK_USER=spike
+    restart: unless-stopped
+
+  firefox:
+    image: jlesage/firefox:v26.08.3
+    container_name: desk-firefox-1
+    depends_on: [mitm]
+    ports:
+      - "127.0.0.1:5800:5800"                           # noVNC; nginx proxies it, never exposed publicly
+    volumes:
+      - ./state/firefox-1:/config                       # profile persists across restarts
+      - ./state/mitm-1:/mitm-ca:ro                      # CA cert visible to policies.json
+      - ./firefox/policies.json:/usr/lib/firefox/distribution/policies.json:ro
+    environment:
+      - DISPLAY_WIDTH=1280
+      - DISPLAY_HEIGHT=900
+      - WEB_AUDIO=0
+      - KEEP_APP_RUNNING=1
+      - DARK_MODE=0
+      - FF_OPEN_URL=https://www.tiktok.com/
+      - USER_ID=1000
+      - GROUP_ID=1000
+    shm_size: "1g"
+    restart: unless-stopped

@@ -1,0 +1,10 @@
+# /etc/systemd/system/desk-stub.service — keeps the spike worklist alive across reboots
+[Unit]
+Description=comment-desk spike worklist
+After=docker.service
+[Service]
+WorkingDirectory=/home/dmccool/spike
+ExecStart=/usr/bin/python3 /home/dmccool/spike/desk_stub.py --worklist /home/dmccool/spike/selection.csv --port 8110
+Restart=always
+[Install]
+WantedBy=multi-user.target
