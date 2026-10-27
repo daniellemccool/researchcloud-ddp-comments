@@ -117,6 +117,19 @@ class StubTest(unittest.TestCase):
         self.assertLess(body.index('id="r101"'), body.index('id="r105"'))
         self.assertIn("nos, &quot;quoted&quot;", body)
 
+    def test_page_offers_5_and_10(self):
+        _, body = self.req("GET", "/desk/", user="alice")
+        self.assertIn("Get 5 more videos", body); self.assertIn("Get 10 more videos", body)
+
+    def test_claim_ten(self):
+        self.assertEqual(self.req("POST", "/desk/claim?n=10", user="alice")[0], 204)
+        self.assertEqual(self.claimed("alice"), [str(v) for v in range(101, 111)])
+
+    def test_other_claim_sizes_refused(self):
+        for n in ("7", "100", "0", "abc"):
+            self.assertEqual(self.req("POST", f"/desk/claim?n={n}", user="alice")[0], 400, n)
+        self.assertEqual(self.claimed("alice"), [])
+
     def test_two_users_never_share_a_video(self):
         self.req("POST", "/desk/claim", user="alice"); self.req("POST", "/desk/claim", user="bob")
         a, b = set(self.claimed("alice")), set(self.claimed("bob"))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The desk: a bottomless queue beside each user's own streamed Firefox.
 
-    python3 desk_stub.py --desk /data/onlinehate_zeeschuimer/desk --port 8110 [--batch 5]
+    python3 desk_stub.py --desk /data/onlinehate_zeeschuimer/desk --port 8110 [--batch 5] [--idle 900]
 
 nginx (desk.conf, rendered by make-sessions.sh) authenticates via SRAM and passes
 REMOTE_USER and X-Desk-Admin on every request, overwriting anything the client sent.
@@ -58,7 +58,7 @@ async function problem(id,sel){{const k=sel.value;if(!k)return;let note='';
  const m=document.getElementById('r'+id).querySelector('.msg');
  m.textContent=r.ok?' — '+sel.options[sel.selectedIndex].text+(note?': '+note.trim():''):' could not save; tell the operator';
  sel.value='';}}
-async function more(){{await fetch('claim',{{method:'POST'}});location.reload();}}
+async function more(n){{await fetch('claim?n='+n,{{method:'POST'}});location.reload();}}
 </script></body></html>"""
 FORBIDDEN = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>desk</title></head>
 <body style="font:16px system-ui;margin:3em">You are not registered for the desk; ask Danielle.</body></html>"""
@@ -67,6 +67,7 @@ FORBIDDEN = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title
 class Desk:
     def __init__(self, root, exec_timeout, batch, idle):
         self.root, self.exec_timeout, self.batch, self.idle = root, exec_timeout, batch, idle
+        self.sizes = sorted({batch, 10})   # the claim buttons on the page; nothing else is accepted
         self.log_path = os.path.join(root, "state", "desk-log.ndjson")
         self.lock = threading.Lock()
         self.start_lock = threading.Lock()
@@ -196,15 +197,16 @@ class Desk:
                 problems[e["video_id"]] = (e["code"], e.get("note", "")); done.add(e["video_id"])
         return claims, done, opened, problems
 
-    def claim(self, user):
-        """Claim the next batch for user. Returns the claimed ids, or 'busy' / 'empty'."""
+    def claim(self, user, n=None):
+        """Claim the next n (default self.batch) for user. Returns the claimed ids, or 'busy' / 'empty'."""
+        n = n or self.batch
         with self.lock:
             events = self.events()
             claims, done, _, _ = self.view(user, events)
             if any(v not in done for v, _ in claims):
                 return "busy"
             taken = {e["video_id"] for e in events if e.get("action") == "claim"}
-            nxt = [r["video_id"] for r in self.pool() if r["video_id"] not in taken][: self.batch]
+            nxt = [r["video_id"] for r in self.pool() if r["video_id"] not in taken][:n]
             if not nxt:
                 return "empty"
             b = max((n for _, n in claims), default=0) + 1
@@ -273,7 +275,10 @@ class Handler(BaseHTTPRequestHandler):
         if user is None or not path.startswith("/desk/"):
             return self._send(403, FORBIDDEN.encode())
         if path == "/desk/claim":
-            return self._send(409 if isinstance(self.desk.claim(user), str) else 204)
+            n = q.get("n", [str(self.desk.batch)])[0]
+            if not n.isdigit() or int(n) not in self.desk.sizes:
+                return self._send(400)
+            return self._send(409 if isinstance(self.desk.claim(user, int(n)), str) else 204)
         vid = q.get("id", [""])[0]
         claims, _, _, _ = self.desk.view(user)
         if not vid.isdigit() or vid not in {v for v, _ in claims}:
@@ -317,7 +322,8 @@ class Handler(BaseHTTPRequestHandler):
             body += "<p><small>Finish these first: open each one, or mark a problem. Then you can get more.</small></p>"
         elif any(r["video_id"] not in {e["video_id"] for e in self.desk.events() if e.get("action") == "claim"}
                  for r in self.desk.pool()):
-            body += f'<p><button onclick="more()">Get {self.desk.batch} more videos</button></p>'
+            body += "<p>" + " ".join(f'<button onclick="more({n})">Get {n} more videos</button>'
+                                     for n in self.desk.sizes) + "</p>"
         else:
             body += "<p>No more videos right now; tell the operator.</p>"
         return PAGE.format(user=html.escape(user), body=body)
