@@ -17,6 +17,8 @@ check "pair network with mitm alias" bash -c "grep -q 'net-alice:' '$C' && grep 
 check "captures mounted per user only" grep -q './state/captures/alice:/captures/alice' "$C"
 check "DESK_USER set" grep -q 'DESK_USER=alice' "$C"
 check "policy per user proxies to mitm:8080" grep -q '"HTTPProxy": "mitm:8080"' "$DESK/firefox/policies-alice.json"
+check "video-hiding stylesheet installed in the profile" test -f "$DESK/state/firefox/alice/profile/chrome/userContent.css"
+check "policy enables userContent.css" grep -q '"toolkit.legacyUserProfileCustomizations.stylesheets"' "$DESK/firefox/policies-alice.json"
 check "addons and stub copied" test -f "$DESK/mitm/addons/capture_comments.py" -a -f "$DESK/desk_stub.py"
 check "state dirs exist" test -d "$DESK/state/mitm/alice" -a -d "$DESK/state/firefox/alice" -a -d "$DESK/state/captures/alice"
 

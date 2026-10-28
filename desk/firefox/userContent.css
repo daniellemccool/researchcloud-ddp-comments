@@ -1,0 +1,36 @@
+/* Installed by make-sessions.sh as <profile>/chrome/userContent.css in every desk session.
+   Students collect comments without seeing the videos: on tiktok.com, video players are
+   replaced by a grey "Video hidden" panel and every image is blurred. The page still loads
+   and plays as usual (nothing looks different to TikTok); only what is drawn changes.
+   Comment text stays readable. Selectors match TikTok's generated class-name prefixes and
+   may need updating when TikTok changes its markup. */
+@-moz-document domain("tiktok.com") {
+  video { opacity: 0 !important; }
+
+  [class*="DivBasicPlayerWrapper"],
+  [class*="DivVideoContainer"],
+  [class*="DivPlayerContainer"],
+  [class*="DivVideoWrapper"],
+  [class*="xgplayer"] {
+    background: #d9dde2 !important;
+    position: relative;
+  }
+  [class*="DivBasicPlayerWrapper"]::after,
+  [class*="DivVideoWrapper"]::after {
+    content: "Video hidden";
+    position: absolute; inset: 0; z-index: 5; pointer-events: none;
+    display: flex; align-items: center; justify-content: center;
+    font: 600 18px system-ui, sans-serif; color: #555;
+    background: #d9dde2;
+  }
+
+  img, picture, canvas, svg image, [style*="background-image"] {
+    filter: blur(18px) grayscale(1) !important;
+  }
+  [class*="DivBasicPlayerWrapper"] img,
+  [class*="DivBasicPlayerWrapper"] picture,
+  [class*="DivVideoWrapper"] img,
+  [class*="DivVideoWrapper"] picture {
+    opacity: 0 !important;
+  }
+}

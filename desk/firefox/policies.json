@@ -32,7 +32,10 @@
       "StartPage": "homepage"
     },
     "Preferences": {
-      "browser.link.open_newwindow.override.external": { "Value": 1, "Status": "locked" },
+      "browser.link.open_newwindow.override.external": {
+        "Value": 1,
+        "Status": "locked"
+      },
       "media.autoplay.default": {
         "Value": 5,
         "Status": "locked"
@@ -44,6 +47,10 @@
       "browser.aboutConfig.showWarning": {
         "Value": false,
         "Status": "default"
+      },
+      "toolkit.legacyUserProfileCustomizations.stylesheets": {
+        "Value": true,
+        "Status": "locked"
       }
     }
   }
