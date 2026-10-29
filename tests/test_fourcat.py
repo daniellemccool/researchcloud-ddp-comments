@@ -1,46 +1,15 @@
 """Tests for desk/desklib/fourcat.py: fake `docker` on PATH plus an in-process fake 4CAT."""
-import http.server, os, stat, subprocess, sys, tempfile, threading, unittest, urllib.parse
+import os, stat, sys, tempfile, unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "desk"))
 from desklib import fourcat as fc  # noqa: E402
 from desklib.config import DeskConfig  # noqa: E402
 
-GOOD_HASH = "$2b$12$" + "a" * 53
-FAKE_DOCKER = """#!/usr/bin/env bash
-echo "$*" >> "$FAKE_DOCKER_CALLS"
-case "$*" in
-  *create_user.py*) [ -f "$FAKE_DOCKER_FAIL" ] && { echo "boom" >&2; exit 1; };;
-  *bcrypt*) cat > "$FAKE_DOCKER_STDIN"; if [ -f "$FAKE_DOCKER_HASH" ]; then cat "$FAKE_DOCKER_HASH"; else echo '""" + GOOD_HASH + """'; fi;;
-  *UPDATE*) if [ -f "$FAKE_DOCKER_UPDATE" ]; then cat "$FAKE_DOCKER_UPDATE"; else echo "UPDATE 1"; fi;;
-  *psql*) cat "$FAKE_DOCKER_PSQL" 2>/dev/null;;
-esac
-exit 0
-"""
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fakes  # noqa: E402
 
 PASSWORDS = {"alice": "pw-alice"}
-
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
-
-    def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0))
-        form = urllib.parse.parse_qs(self.rfile.read(n).decode())
-        user = form.get("username", [""])[0]
-        if user == "nocookie":
-            self.send_response(302)
-        elif user == "broken":
-            self.send_response(500)
-        elif self.path == "/login/" and PASSWORDS.get(user) == form.get("password", [""])[0]:
-            self.send_response(302)
-            self.send_header("Location", "/")
-            self.send_header("Set-Cookie", f"remember_token=tok-{user}; Path=/")
-        else:
-            self.send_response(401)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
 
 
 def slurp(p):
@@ -53,29 +22,15 @@ class FourCatTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         t = self.tmp.name
-        bindir = os.path.join(t, "bin")
-        os.mkdir(bindir)
-        d = os.path.join(bindir, "docker")
-        with open(d, "w") as f:
-            f.write(FAKE_DOCKER)
-        os.chmod(d, 0o755)
+        run = fakes.fake_docker(t)
         self.calls = os.path.join(t, "calls")
         self.psql = os.path.join(t, "psql")
-        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"],
-                   FAKE_DOCKER_CALLS=self.calls, FAKE_DOCKER_PSQL=self.psql,
-                   FAKE_DOCKER_STDIN=os.path.join(t, "stdin"), FAKE_DOCKER_HASH=os.path.join(t, "hash"),
-                   FAKE_DOCKER_UPDATE=os.path.join(t, "update"), FAKE_DOCKER_FAIL=os.path.join(t, "fail"))
         self.t = t
-
-        def run(*a, **kw):
-            return subprocess.run(*a, **{**kw, "env": env})
-        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
-        self.addCleanup(self.srv.server_close)
-        self.addCleanup(self.srv.shutdown)
+        self.srv = fakes.FakeFourCat(PASSWORDS)
+        self.addCleanup(self.srv.close)
         self.cfg = DeskConfig(desk_root=os.path.join(t, "desk"), repo_dir=REPO, platform="tiktok",
                               collector_role="src_co_c", admin_role="src_co_a", contact="x",
-                              fourcat_url=f"http://127.0.0.1:{self.srv.server_address[1]}")
+                              fourcat_url=self.srv.url)
         self.fc = fc.FourCat(self.cfg, run=run)
 
     def put(self, name, text):
