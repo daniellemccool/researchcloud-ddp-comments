@@ -6,10 +6,13 @@ sys.path.insert(0, os.path.join(REPO, "desk"))
 from desklib import fourcat as fc  # noqa: E402
 from desklib.config import DeskConfig  # noqa: E402
 
+GOOD_HASH = "$2b$12$" + "a" * 53
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_DOCKER_CALLS"
 case "$*" in
-  *bcrypt*) cat >/dev/null; echo '$2b$12$fakehashfakehashfakehashfakehashfakehashfakehashfakeha'; exit 0;;
+  *create_user.py*) [ -f "$FAKE_DOCKER_FAIL" ] && { echo "boom" >&2; exit 1; };;
+  *bcrypt*) cat > "$FAKE_DOCKER_STDIN"; if [ -f "$FAKE_DOCKER_HASH" ]; then cat "$FAKE_DOCKER_HASH"; else echo '""" + GOOD_HASH + """'; fi;;
+  *UPDATE*) if [ -f "$FAKE_DOCKER_UPDATE" ]; then cat "$FAKE_DOCKER_UPDATE"; else echo "UPDATE 1"; fi;;
   *psql*) cat "$FAKE_DOCKER_PSQL" 2>/dev/null;;
 esac
 exit 0
@@ -26,7 +29,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         form = urllib.parse.parse_qs(self.rfile.read(n).decode())
         user = form.get("username", [""])[0]
-        if self.path == "/login/" and PASSWORDS.get(user) == form.get("password", [""])[0]:
+        if user == "nocookie":
+            self.send_response(302)
+        elif user == "broken":
+            self.send_response(500)
+        elif self.path == "/login/" and PASSWORDS.get(user) == form.get("password", [""])[0]:
             self.send_response(302)
             self.send_header("Location", "/")
             self.send_header("Set-Cookie", f"remember_token=tok-{user}; Path=/")
@@ -55,7 +62,10 @@ class FourCatTests(unittest.TestCase):
         self.calls = os.path.join(t, "calls")
         self.psql = os.path.join(t, "psql")
         env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"],
-                   FAKE_DOCKER_CALLS=self.calls, FAKE_DOCKER_PSQL=self.psql)
+                   FAKE_DOCKER_CALLS=self.calls, FAKE_DOCKER_PSQL=self.psql,
+                   FAKE_DOCKER_STDIN=os.path.join(t, "stdin"), FAKE_DOCKER_HASH=os.path.join(t, "hash"),
+                   FAKE_DOCKER_UPDATE=os.path.join(t, "update"), FAKE_DOCKER_FAIL=os.path.join(t, "fail"))
+        self.t = t
 
         def run(*a, **kw):
             return subprocess.run(*a, **{**kw, "env": env})
@@ -67,6 +77,10 @@ class FourCatTests(unittest.TestCase):
                               collector_role="src_co_c", admin_role="src_co_a", contact="x",
                               fourcat_url=f"http://127.0.0.1:{self.srv.server_address[1]}")
         self.fc = fc.FourCat(self.cfg, run=run)
+
+    def put(self, name, text):
+        with open(os.path.join(self.t, name), "w") as f:
+            f.write(text)
 
     def calls_text(self):
         return slurp(self.calls) if os.path.exists(self.calls) else ""
@@ -80,6 +94,74 @@ class FourCatTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(p)).st_mode), 0o700)
         self.assertEqual(slurp(p), pw)
         self.assertEqual(self.fc.ensure_password("alice"), (pw, False))
+        for d in ("secrets", os.path.join("secrets", "4cat-passwords")):
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.cfg.desk_root, d)).st_mode), 0o700)
+
+    def test_existing_password_wins_and_empty_is_corrupt(self):
+        p = self.fc.password_path("alice")
+        os.makedirs(os.path.dirname(p))
+        with open(p, "w") as f:
+            f.write("winner")
+        self.assertEqual(self.fc.ensure_password("alice"), ("winner", False))
+        with open(p, "w") as f:
+            f.write(" \n")
+        with self.assertRaises(fc.FourCatError):
+            self.fc.ensure_password("alice")
+        # exclusive publish loses cleanly and leaves no temp files
+        with self.assertRaises(FileExistsError):
+            self.fc._write(p, "x", exclusive=True)
+        self.assertEqual(os.listdir(os.path.dirname(p)), ["alice"])
+
+    def test_update_of_missing_user_is_an_error(self):
+        self.put("update", "UPDATE 0\n")
+        with self.assertRaises(fc.FourCatError):
+            self.fc.set_admin("ghost", True)
+        with self.assertRaises(fc.FourCatError):
+            self.fc.set_password("ghost", "pw")
+        self.put("psql", "")
+        with self.assertRaises(fc.FourCatError):
+            self.fc.is_admin("ghost")
+        self.put("psql", "[]\n")
+        self.assertFalse(self.fc.is_admin("alice"))
+
+    def test_hash_on_stdin_and_never_on_argv(self):
+        self.fc.set_password("alice", "hunter2-secret")
+        self.assertEqual(slurp(os.path.join(self.t, "stdin")), "hunter2-secret")
+        self.assertNotIn("hunter2-secret", self.calls_text())
+        self.fc.create_account("alice", "hunter2-secret", False)
+        leaks = [l for l in self.calls_text().splitlines() if "hunter2-secret" in l]
+        self.assertEqual(len(leaks), 1)
+        self.assertIn("create_user.py", leaks[0])
+
+    def test_garbage_hash_rejected(self):
+        self.put("hash", "not-a-hash\n")
+        with self.assertRaises(fc.FourCatError) as cm:
+            self.fc.set_password("alice", "pw")
+        self.assertIn("unexpected hash format", str(cm.exception))
+        self.assertNotIn("UPDATE", self.calls_text())
+
+    def test_create_account_failure_is_fourcaterror_without_secret(self):
+        self.put("fail", "")
+        with self.assertRaises(fc.FourCatError) as cm:
+            self.fc.create_account("alice", "hunter2-secret", False)
+        self.assertNotIn("hunter2-secret", str(cm.exception))
+
+    def test_login_edge_cases_and_messages(self):
+        with self.assertRaises(fc.LoginFailed) as cm:
+            self.fc.login_token("nocookie", "hunter2-secret")
+        self.assertNotIn("hunter2-secret", str(cm.exception))
+        with self.assertRaises(fc.FourCatError) as cm:
+            self.fc.login_token("broken", "hunter2-secret")
+        self.assertNotIsInstance(cm.exception, fc.LoginFailed)
+        self.assertNotIn("hunter2-secret", str(cm.exception))
+        with self.assertRaises(fc.LoginFailed) as cm:
+            self.fc.login_token("alice", "hunter2-secret")
+        self.assertNotIn("hunter2-secret", str(cm.exception))
+
+    def test_bad_usernames_rejected(self):
+        for u in ("Alice", "alice\n"):
+            with self.assertRaises(ValueError):
+                self.fc.password_path(u)
 
     def test_create_account_calls_create_user_with_flags(self):
         self.fc.create_account("alice", "s3cret", False)

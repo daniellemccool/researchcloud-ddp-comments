@@ -1,6 +1,7 @@
 """Per-user 4CAT accounts, passwords and remember_tokens, via `docker exec` and HTTP (stdlib only)."""
 import json
 import os
+import re
 import secrets
 import subprocess
 import urllib.error
@@ -25,12 +26,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _NOREDIR_OPEN = urllib.request.build_opener(_NoRedirect).open
+_HASH_RE = re.compile(r"^\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}\Z")
 _HASH_PY = ("import bcrypt,sys;print(bcrypt.hashpw(sys.stdin.read().strip().encode(),"
             "bcrypt.gensalt()).decode())")
 
 
 def _check(user):
-    if not isinstance(user, str) or not USER_RE.match(user):
+    if not isinstance(user, str) or not USER_RE.fullmatch(user):
         raise ValueError(f"invalid username: {user!r}")
     return user
 
@@ -61,32 +63,43 @@ class FourCat:
         return self._exec(self.cfg.fourcat_db, "psql", "-U", self.db_user, "-d", self.db_name,
                           "-tAc", sql, what="psql").strip()
 
-    @staticmethod
-    def _write(path, text, exclusive=False):
-        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        if exclusive:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        else:
-            tmp = f"{path}.{secrets.token_hex(4)}.tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    def _secret_dir(self, sub):
+        d = self.cfg.desk_root
+        for part in ("secrets", sub):
+            d = os.path.join(d, part)
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            os.chmod(d, 0o700)  # defeat the umask
+        return d
+
+    def _write(self, path, text, exclusive=False):
+        """Write via a 0600 temp file in the same directory; publish atomically.
+
+        exclusive: os.link (FileExistsError if someone else won); else os.replace."""
+        self._secret_dir(os.path.basename(os.path.dirname(path)))
+        tmp = f"{path}.{secrets.token_hex(4)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(text)
-            if not exclusive:
+            if exclusive:
+                os.link(tmp, path)
+            else:
                 os.replace(tmp, path)
-        except BaseException:
+        finally:
             try:
-                os.unlink(path if exclusive else tmp)
+                os.unlink(tmp)
             except FileNotFoundError:
                 pass
-            raise
 
     def ensure_password(self, user):
         path = self.password_path(user)
         for _ in range(2):
             try:
                 with open(path) as f:
-                    return f.read().strip(), False
+                    pw = f.read().strip()
+                if not pw:
+                    raise FourCatError(f"password file for {user} is empty")
+                return pw, False
             except FileNotFoundError:
                 pass
             pw = secrets.token_urlsafe(24)
@@ -96,6 +109,11 @@ class FourCat:
             except FileExistsError:
                 continue  # lost a race: read the winner's file
         raise FourCatError("password file unreadable")
+
+    def _update(self, user, sql):
+        lines = self._psql(sql).splitlines()
+        if not lines or lines[-1].strip() != "UPDATE 1":
+            raise FourCatError(f"no 4CAT account for {user}")
 
     def account_exists(self, user):
         return self._psql(f"SELECT 1 FROM users WHERE name = '{_check(user)}'") == "1"
@@ -109,18 +127,20 @@ class FourCat:
     def hash_password(self, password):
         out = self._exec(self.cfg.fourcat_backend, "python3", "-c", _HASH_PY,
                          input=password, what="bcrypt").strip()
-        if not out.startswith("$2"):
-            raise FourCatError("bcrypt produced no hash")
+        if not _HASH_RE.match(out):
+            raise FourCatError("unexpected hash format")
         return out
 
     def set_password(self, user, password):
         h = self.hash_password(password)
-        self._psql(f"UPDATE users SET password = '{h}' WHERE name = '{_check(user)}'")
+        self._update(user, f"UPDATE users SET password = '{h}' WHERE name = '{_check(user)}'")
 
     def is_admin(self, user):
         out = self._psql(f"SELECT tags::text FROM users WHERE name = '{_check(user)}'")
+        if not out:
+            raise FourCatError(f"no 4CAT account for {user}")
         try:
-            return "admin" in json.loads(out or "[]")
+            return "admin" in json.loads(out)
         except ValueError:
             raise FourCatError("unparseable tags") from None
 
@@ -130,7 +150,7 @@ class FourCat:
             sql = f"UPDATE users SET tags = (tags - 'admin') || '[\"admin\"]'::jsonb WHERE name = '{u}'"
         else:
             sql = f"UPDATE users SET tags = tags - 'admin' WHERE name = '{u}'"
-        self._psql(sql)
+        self._update(user, sql)
 
     def login_token(self, user, password):
         _check(user)

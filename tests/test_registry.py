@@ -30,6 +30,10 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(r.port("alice"), 5801)
         self.assertIsNone(r.port("nobody"))
 
+    def test_trailing_newline_username_rejected(self):
+        with self.assertRaises(ValueError):
+            self.reg().allocate("alice\n")
+
     def test_allocate_is_idempotent_and_sequential(self):
         r = self.reg()
         self.assertEqual(r.allocate("alice").index, 1)

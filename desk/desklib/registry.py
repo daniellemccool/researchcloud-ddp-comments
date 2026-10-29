@@ -13,7 +13,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 
-USER_RE = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
+USER_RE = re.compile(r"^[a-z][a-z0-9._-]{0,31}\Z")
 
 
 class RegistryFull(RuntimeError):
