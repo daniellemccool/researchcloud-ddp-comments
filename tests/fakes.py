@@ -5,11 +5,12 @@ GOOD_HASH = "$2b$12$" + "a" * 53
 
 # Every call is appended to $FAKE_DOCKER_CALLS. `compose -f <root>/docker-compose.yml up -d mitm-<u>`
 # drops the CA a real mitmproxy would write, unless the file $FAKE_DOCKER_NO_CA exists;
-# with $FAKE_DOCKER_HANG present every compose call hangs (exec, so a timeout kill reaches it).
+# `compose ... create <svc>` succeeds; with $FAKE_DOCKER_HANG present every compose up/create
+# hangs (exec, so a timeout kill reaches it).
 # With $FAKE_DOCKER_PSQL_FAIL present a psql query (not an UPDATE) exits 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_DOCKER_CALLS"
-if [ "$1" = compose ] && [ "$4" = up ]; then
+if [ "$1" = compose ] && { [ "$4" = up ] || [ "$4" = create ]; }; then
   [ -f "$FAKE_DOCKER_HANG" ] && exec sleep 5
   case "$6" in
     mitm-*) [ -f "$FAKE_DOCKER_NO_CA" ] || touch "$(dirname "$3")/state/mitm/${6#mitm-}/mitmproxy-ca-cert.pem";;

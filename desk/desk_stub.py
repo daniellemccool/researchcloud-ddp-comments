@@ -21,7 +21,7 @@ state/access.ndjson. Everything outside /desk/ is 403.
 A reaper thread stops a Firefox that has had no screen connection (nginx's websocket to
 its noVNC port, seen with `ss`) for idle_seconds. Stopping loses nothing.
 """
-import argparse, html, http.client, json, os, subprocess, sys, threading, time
+import argparse, csv, html, http.client, json, os, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -50,6 +50,7 @@ class Desk:
         self.last_roles = {}    # user -> last roles header seen, so access.ndjson records changes only
         self.last_seen = {}     # user -> last time their screen was connected or their page loaded
         self.provisioning = set()  # users with an advance() thread running
+        self.pool_error = None     # why the last pool.csv read failed, if it did
 
     # --- provisioning ----------------------------------------------------
 
@@ -60,15 +61,23 @@ class Desk:
                 return
             self.provisioning.add(user)
 
+        def done():
+            with self.prov_lock:
+                self.provisioning.discard(user)
+
         def run():
             try:
                 self.prov.advance(user)
-            except Exception:   # advance records step errors itself; anything else retries on the next visit
-                pass
+            except Exception as e:   # step errors are recorded by advance; this is anything else
+                # Provisioner and FourCat messages carry no secrets (Task 7's contract).
+                print(f"provision {user}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             finally:
-                with self.prov_lock:
-                    self.provisioning.discard(user)
-        threading.Thread(target=run, daemon=True).start()
+                done()
+        try:
+            threading.Thread(target=run, daemon=True).start()
+        except Exception as e:      # the next refresh of the setting-up page retries
+            print(f"provision {user}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            done()
 
     # --- containers ------------------------------------------------------
 
@@ -84,11 +93,20 @@ class Desk:
         return bool(r) and r.stdout.strip() == "true"
 
     def ensure_started(self, user):
+        """Start the user's stopped pair unless max_running other sessions are up; False if busy.
+        The count and the start are one unit, so two arrivals cannot both take the last slot."""
         with self.start_lock:
+            try:
+                running = self.sessions.running()
+            except (subprocess.SubprocessError, OSError):
+                running = {}            # can't count: the cap is a soft guard, let the user in
+            if not running.get(user) and sum(running.values()) >= self.cfg.max_running:
+                return False
             for name in (f"desk-mitm-{user}", f"desk-firefox-{user}"):
                 if not self.running(name):
                     self._docker("start", name)
             self.last_seen[user] = time.time()
+            return True
 
     def ready(self, user):
         """True once noVNC answers HTTP 200. A bare TCP accept is not enough: Docker's
@@ -150,11 +168,14 @@ class Desk:
         return k is not None and isinstance(item_id, str) and bool(k.id_re.fullmatch(item_id))
 
     def pool(self):
-        """Pool rows whose kind and id this platform can open, in file order (none if the header is unknown)."""
+        """Pool rows whose kind and id this platform can open, in file order. An unreadable
+        pool.csv reads as empty and its reason stays in self.pool_error for the admin page."""
         try:
             rows = pool.read_rows(self.root, self.platform.default_kind)
-        except ValueError:
+        except (ValueError, csv.Error) as e:
+            self.pool_error = str(e) or type(e).__name__
             return []
+        self.pool_error = None
         return [r for r in rows if self.valid(r.kind, r.id)]
 
     def key(self, e):
@@ -303,13 +324,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._say(200, f"Setup failed at {st.current()}; ask {contact}.")
             d.kick(user)
             return self._say(200, f"Setting up your desk — {st.current()}", refresh=3)
-        try:
-            running = d.sessions.running()
-        except (subprocess.SubprocessError, OSError):
-            running = {}                # can't count: the cap is a soft guard, let the user in
-        if not running.get(user) and sum(running.values()) >= d.cfg.max_running:
+        if not d.ensure_started(user):
             return self._say(200, "The desk is busy, try again in a few minutes.")
-        d.ensure_started(user)
         return self._send(200, self._page(user))
 
     def do_POST(self):
@@ -323,6 +339,8 @@ class Handler(BaseHTTPRequestHandler):
             n = q.get("n", [str(d.cfg.batch_sizes[0])])[0]
             if not n.isdigit() or int(n) not in d.cfg.batch_sizes:
                 return self._send(400)
+            if not d.prov.state(user).ready():
+                return self._send(409)   # a hand-made POST must not claim before the desk exists
             return self._send(409 if isinstance(d.claim(user, int(n)), str) else 204)
         kind = q.get("kind", [""])[0] or d.platform.default_kind
         item_id = q.get("id", [""])[0]
@@ -396,6 +414,7 @@ class Handler(BaseHTTPRequestHandler):
         status = dict(l.split("\t", 1) for l in (r.stdout if r else "").splitlines() if "\t" in l)
         events = d.events()
         rows = d.pool()
+        pool_error = d.pool_error
         taken = d.taken(events)
         free = sum(1 for r in rows if (r.kind, r.id) not in taken)
         out = []
@@ -406,7 +425,7 @@ class Handler(BaseHTTPRequestHandler):
             open_rows = sum(1 for k, _ in claims if k not in done)
             out.append((u, status.get(f"desk-firefox-{u}", "missing"), status.get(f"desk-mitm-{u}", "missing"),
                         len(claims), len(claims) - open_rows, open_rows, last))
-        return page.admin(out, free, len(rows), d.platform.default_kind)
+        return page.admin(out, free, len(rows), d.platform.default_kind, pool_error, d.cfg.fourcat_enabled)
 
 
 def make_server(desk_root, port, *, reaper=True, exec_timeout=15, sessions=None):

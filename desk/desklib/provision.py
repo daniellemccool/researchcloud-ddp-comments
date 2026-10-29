@@ -257,21 +257,23 @@ class Provisioner:
             self.nginx(self.cfg)
 
     def _step_up(self, user):
-        self._compose_up(f"mitm-{user}")
+        """mitm runs (its CA must exist); Firefox is only created: starting it is the
+        stub's job, under its running cap."""
+        self._compose("up", f"mitm-{user}", "-d")
         ca = self._dir("mitm", user, "mitmproxy-ca-cert.pem")
         deadline = time.monotonic() + self.ca_timeout
         while not os.path.isfile(ca):
             if time.monotonic() >= deadline:
                 raise StepFailed("mitm produced no CA")
             time.sleep(self.ca_poll)
-        self._compose_up(f"firefox-{user}")
+        self._compose("create", f"firefox-{user}")
 
-    def _compose_up(self, service):
+    def _compose(self, verb, service, *flags):
         cmd = ["docker", "compose", "-f", os.path.join(self.cfg.desk_root, "docker-compose.yml"),
-               "up", "-d", service]
+               verb, *flags, service]
         try:
             self.run(cmd, check=True, capture_output=True, timeout=self.cmd_timeout)
         except subprocess.TimeoutExpired:
             raise StepFailed("docker compose timed out") from None
         except subprocess.CalledProcessError as e:
-            raise StepFailed(f"docker compose up {service} exited with status {e.returncode}") from None
+            raise StepFailed(f"docker compose {verb} {service} exited with status {e.returncode}") from None

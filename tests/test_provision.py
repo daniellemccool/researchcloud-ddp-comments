@@ -106,7 +106,7 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(self.nginx_calls, [self.cfg])
         up = self.calls("compose")
         cf = os.path.join(self.root, "docker-compose.yml")
-        self.assertEqual(up, [f"compose -f {cf} up -d mitm-alice", f"compose -f {cf} up -d firefox-alice"])
+        self.assertEqual(up, [f"compose -f {cf} up -d mitm-alice", f"compose -f {cf} create firefox-alice"])
         self.assert_no_secrets()
         n = len(self.calls())
         self.assertTrue(self.prov.advance("alice").ready())
@@ -152,7 +152,7 @@ class ProvisionTests(unittest.TestCase):
         self.assertTrue(all(r.ready() for r in results), [r.steps for r in results])
         self.assertEqual(len(self.calls("create_user.py")), 1)
         self.assertEqual([r.user for r in self.reg.rows()], ["alice"])
-        self.assertEqual(len(self.calls("up -d firefox-alice")), 1)
+        self.assertEqual(len(self.calls("create firefox-alice")), 1)
 
     def test_render_lock_not_held_during_fourcat(self):
         self.cfg.template_path = None
@@ -224,7 +224,7 @@ class ProvisionTests(unittest.TestCase):
         st = self.prov.advance("alice")
         self.assertEqual(st.current(), "up")
         self.assertEqual(st.error(), "error: mitm produced no CA")
-        self.assertEqual(self.calls("up -d firefox-alice"), [])
+        self.assertEqual(self.calls("firefox-alice"), [])
 
     def test_real_renderer_and_bad_user(self):
         self.assertIs(pv.Provisioner(self.cfg, self.reg, None, lambda u: False).renderer, render.write_all)
@@ -309,13 +309,18 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(st.error(), "error: docker compose timed out")
         os.remove(os.path.join(self.t, "hang"))
 
-        def failing(cmd, **kw):
-            if "compose" in cmd:
-                raise subprocess.CalledProcessError(3, cmd)
-            return self.run_docker(cmd, **kw)
-        self.prov.run = failing
+        def failing(verb):
+            def run(cmd, **kw):
+                if "compose" in cmd and verb in cmd:
+                    raise subprocess.CalledProcessError(3, cmd)
+                return self.run_docker(cmd, **kw)
+            return run
+        self.prov.run = failing("up")
         self.assertEqual(self.prov.advance("alice").error(),
                          "error: docker compose up mitm-alice exited with status 3")
+        self.prov.run = failing("create")
+        self.assertEqual(self.prov.advance("alice").error(),
+                         "error: docker compose create firefox-alice exited with status 3")
 
     def test_stranded_template_staging_is_removed(self):
         ff = os.path.join(self.root, "state", "firefox", "alice")

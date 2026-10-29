@@ -1,5 +1,6 @@
 """HTTP tests for desk/desk_stub.py: a temp desk root with desk.json, fake docker/ss on PATH and a fake 4CAT."""
-import csv, http.client, json, os, subprocess, sys, tempfile, threading, time, unittest
+import contextlib, csv, http.client, io, json, os, subprocess, sys, tempfile, threading, time, unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "desk"))
@@ -12,9 +13,11 @@ import fakes  # noqa: E402
 from test_provision import make_template  # noqa: E402
 
 # The stub's own docker calls: container state lives in $FAKE_DOCKER_STATE, a Firefox exec obeys
-# $FAKE_DOCKER_MODE (fail / hang). Everything else (compose, 4CAT execs) goes to the shared fake.
+# $FAKE_DOCKER_MODE (fail / hang); `compose up -d <svc>` also marks desk-<svc> running (`create`
+# does not). Everything else (compose, 4CAT execs) goes to the shared fake.
 OUTER_DOCKER = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_DOCKER_CALLS"
+[ "$1" = compose ] && [ "$4" = up ] && touch "$FAKE_DOCKER_STATE/desk-${@: -1}"
 case "$1" in
   ps) printf 'desk-firefox-alice\\tUp 2 hours\\ndesk-mitm-alice\\tUp 2 hours\\n'; exit 0;;
   inspect) [ -f "$FAKE_DOCKER_STATE/${@: -1}" ] && echo true || echo false; exit 0;;
@@ -234,6 +237,51 @@ class StubTest(unittest.TestCase):
         self.assertNotIn("refresh", body)
         self.assertEqual(self.desk_obj().provisioning, set())   # an error waits for an operator
 
+    def test_first_visit_at_cap_ends_busy_not_running(self):
+        self.serve(max_running=1)
+        put(os.path.join(self.state, "desk-firefox-bob"), "")
+        self.assertIn("Setting up your desk", self.mem("GET", "/desk/", user="carol")[1])
+        self.assertTrue(wait_for(lambda: self.desk_obj().prov.state("carol").ready()))
+        self.assertTrue(wait_for(lambda: not self.desk_obj().provisioning))
+        s, body = self.mem("GET", "/desk/", user="carol")
+        self.assertEqual(s, 200); self.assertIn("The desk is busy, try again in a few minutes.", body)
+        calls = self.docker_calls()
+        self.assertTrue(any(c.endswith("create firefox-carol") for c in calls), calls)
+        self.assertFalse(any("firefox-carol" in c and (" up " in c or c.startswith("start")) for c in calls))
+        self.assertFalse(self.running("desk-firefox-carol"))
+
+    def test_cap_check_and_start_are_one_unit(self):
+        self.serve(max_running=1)
+        ts = [threading.Thread(target=self.mem, args=("GET", "/desk/"), kwargs={"user": u}) for u in ("alice", "bob")]
+        [t.start() for t in ts]; [t.join() for t in ts]
+        self.assertEqual(sum(self.running(f"desk-firefox-{u}") for u in ("alice", "bob")), 1)
+
+    def test_failed_provision_run_is_logged_and_not_stuck(self):
+        d = self.desk_obj(); real = d.prov.advance; tries = []
+
+        def flaky(user):
+            tries.append(user)
+            if len(tries) == 1:
+                raise OSError("disk went away")
+            return real(user)
+        d.prov.advance = flaky
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.mem("GET", "/desk/", user="carol")
+            self.assertTrue(wait_for(lambda: not d.provisioning))
+        self.assertIn("provision carol: OSError: disk went away", err.getvalue())
+        self.assertIn("Setting up your desk", self.mem("GET", "/desk/", user="carol")[1])   # a new run starts
+        self.assertTrue(wait_for(lambda: d.prov.state("carol").ready()))
+        self.assertEqual(tries, ["carol", "carol"])
+
+    def test_thread_start_failure_does_not_stick(self):
+        d, err = self.desk_obj(), io.StringIO()
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")), \
+                contextlib.redirect_stderr(err):
+            d.kick("carol")
+        self.assertEqual(d.provisioning, set())
+        self.assertIn("provision carol: RuntimeError: can't start new thread", err.getvalue())
+
     def test_busy_when_running_cap_reached(self):
         self.serve(max_running=1)
         put(os.path.join(self.state, "desk-firefox-bob"), "")
@@ -309,7 +357,9 @@ class StubTest(unittest.TestCase):
         self.assertEqual(len(a), 5); self.assertEqual(len(b), 5); self.assertFalse(a & b)
 
     def test_concurrent_claims_never_overlap(self):
-        ts = [threading.Thread(target=self.mem, args=("POST", "/desk/claim"), kwargs={"user": f"u{i}"})
+        for i in range(1, 7):
+            self.assertTrue(self.desk_obj().prov.advance(f"u{i}").ready())
+        ts =[threading.Thread(target=self.mem, args=("POST", "/desk/claim"), kwargs={"user": f"u{i}"})
               for i in range(1, 7)]
         [t.start() for t in ts]; [t.join() for t in ts]
         ids = [e["id"] for e in self.log() if e["action"] == "claim"]
@@ -353,11 +403,31 @@ class StubTest(unittest.TestCase):
         self.mem("POST", "/desk/claim")
         self.assertEqual(self.claimed("alice")[5:7], ["999", "106"])   # invalid id and unknown kind skipped
 
-    def test_unrecognised_pool_header_reads_as_empty(self):
-        write_csv(os.path.join(self.root, "pool.csv"), [["101"]], header=("vid",))
-        s, body = self.mem("GET", "/desk/")
-        self.assertEqual(s, 200); self.assertIn("No more videos right now", body)
-        self.assertEqual(self.mem("POST", "/desk/claim")[0], 409)
+    def test_unreadable_pool_is_reported(self):
+        cases = ((("foo", "bar"), [["101", "x"]], "unrecognised header"),
+                 (("id", "kind", "bucket", "note"), [["101", "video", "x", "n" * 200_000]], "field larger"))
+        for header, rows, reason in cases:
+            write_csv(os.path.join(self.root, "pool.csv"), rows, header=header)
+            s, body = self.mem("GET", "/desk/")
+            self.assertEqual(s, 200, reason); self.assertIn("No more videos right now; tell the operator.", body)
+            self.assertEqual(self.mem("POST", "/desk/claim")[0], 409)
+            s, body = self.mem("GET", "/desk/admin/", admin="1")
+            self.assertEqual(s, 200); self.assertIn("pool.csv unreadable: ", body); self.assertIn(reason, body)
+            self.assertNotIn("unclaimed in the pool", body)
+        write_csv(os.path.join(self.root, "pool.csv"), [["101", "x", ""]])
+        self.assertIn("1 of 1 videos unclaimed", self.mem("GET", "/desk/admin/", admin="1")[1])   # error clears
+
+    def test_pool_note_is_not_a_placeholder(self):
+        write_csv(os.path.join(self.root, "pool.csv"), [["101", "x", "%%FOOTER%%"], ["102", "x", "<b>%%BODY%%"]])
+        self.mem("POST", "/desk/claim")
+        _, body = self.mem("GET", "/desk/")
+        self.assertIn(">%%FOOTER%%</a>", body); self.assertIn(">&lt;b&gt;%%BODY%%</a>", body)
+        self.assertEqual(body.count("Before you leave"), 1)
+
+    def test_member_not_ready_cannot_claim(self):
+        self.assertEqual(self.mem("POST", "/desk/claim", user="carol")[0], 409)
+        self.assertEqual(self.claimed("carol"), [])
+        self.assertFalse(os.path.exists(self.users_dir("carol")))   # a claim never provisions
 
     # opens
     def test_open_execs_into_own_container(self):
@@ -475,6 +545,9 @@ class StubTest(unittest.TestCase):
         self.assertIn("/desk/admin/vnc/alice/", body); self.assertIn("/desk/admin/vnc/bob/", body)
         self.assertIn("Up 2 hours", body)
         self.assertIn("7 of 12 videos unclaimed", body)
+        self.assertIn('<a href="/">4CAT</a>', body)
+        self.serve(fourcat_enabled=False)
+        self.assertNotIn("4CAT</a>", self.mem("GET", "/desk/admin/", admin="1")[1])
 
     # start on open, stop when idle
     def running(self, name):

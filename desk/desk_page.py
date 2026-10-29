@@ -6,6 +6,7 @@ user, the pool or the log supplies is escaped.
 """
 import html
 import json
+import re
 
 CSS = """:root{--ink:#1d2329;--muted:#6b7480;--line:#e3e6ea;--bg:#f6f7f9;--accent:#1f6feb;--ok:#1a7f37;--warn:#b35900}
 *{box-sizing:border-box}
@@ -133,21 +134,22 @@ def desk(*, user, platform, noun, seconds, note_codes, progress_html, body, open
               "PROGRESS": progress_html, "OPEN_HELP": " open" if open_help else "", "BODY": body,
               "TIMER_HELP": ", or until the timer reaches 0:00" if seconds else "", "FOOTER": footer,
               "SECONDS": str(int(seconds)), "NOTE_CODES": codes}
-    out = PAGE
-    for k, v in values.items():
-        out = out.replace(f"%%{k}%%", v)
-    return out
+    # One pass: text substituted in (a pool note, say) is never scanned for placeholders again.
+    return re.sub(r"%%([A-Z_]+)%%", lambda m: values[m.group(1)], PAGE)
 
 
-def admin(rows, free, total, noun):
-    """rows: (user, firefox status, mitm status, claimed, done, open, last event) per live session."""
+def admin(rows, free, total, noun, pool_error=None, fourcat=True):
+    """rows: (user, firefox status, mitm status, claimed, done, open, last event) per live session.
+    pool_error replaces the pool count; fourcat False drops the 4CAT link."""
+    pool_line = (f"pool.csv unreadable: {e(pool_error)}" if pool_error is not None
+                 else f"{free} of {total} {e(noun)}s unclaimed in the pool.")
     trs = "".join(
         f"<tr><td>{e(u)}</td><td>{e(ff)}</td><td>{e(mitm)}</td><td>{c}</td><td>{d}</td><td>{o}</td><td>{e(last)}</td>"
         f'<td><a href="/desk/admin/vnc/{e(u)}/" target="_blank">watch</a></td></tr>'
         for u, ff, mitm, c, d, o, last in rows)
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>desk admin</title></head>"
             "<body style=\"font:14px system-ui;margin:2em\"><h1>Desk sessions</h1>"
-            f"<p>{free} of {total} {e(noun)}s unclaimed in the pool.</p>"
+            f"<p>{pool_line}</p>"
             "<table cellpadding=\"6\"><tr><th>user</th><th>firefox</th><th>mitm</th><th>claimed</th>"
-            "<th>done</th><th>open</th><th>last event</th><th>screen</th></tr>" + trs +
-            "</table><p><a href=\"/\">4CAT</a></p></body></html>")
+            "<th>done</th><th>open</th><th>last event</th><th>screen</th></tr>" + trs + "</table>"
+            + ("<p><a href=\"/\">4CAT</a></p>" if fourcat else "") + "</body></html>")
