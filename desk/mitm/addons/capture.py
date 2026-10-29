@@ -10,7 +10,7 @@ import sys
 import time
 import urllib.parse
 
-sys.path.insert(0, "/addons")
+sys.path.insert(0, "/opt/desk")
 
 from mitmproxy import http  # noqa: E402
 

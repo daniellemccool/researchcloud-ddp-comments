@@ -7,6 +7,7 @@ allowed lands on the stub (403).
 import os
 import shutil
 import subprocess
+import tempfile
 import urllib.parse
 from typing import Callable
 
@@ -35,7 +36,7 @@ def _service_pair(cfg: DeskConfig, u: str, index: int, port: int, token: bool) -
            f"DESK_FOURCAT_ENABLED={1 if fc else 0}", f"DESK_FOURCAT_UPSTREAM={cfg.fourcat_upstream}",
            "DESK_FOURCAT_TOKEN_FILE=/run/desk/4cat-token", "DESK_CAPTURES=/captures"]
     vols = [f"{cfg.repo_dir}/desk/mitm/addons:/addons:ro",
-            f"{cfg.repo_dir}/desk/desklib:/addons/desklib:ro",
+            f"{cfg.repo_dir}/desk/desklib:/opt/desk/desklib:ro",
             "./platform:/platform:ro",
             f"./state/mitm/{u}:/home/mitmproxy/.mitmproxy",
             f"./state/captures/{u}:/captures/{u}"]
@@ -74,13 +75,18 @@ def _service_pair(cfg: DeskConfig, u: str, index: int, port: int, token: bool) -
 
 def render_compose(cfg: DeskConfig, reg: Registry, token_exists: Callable[[str], bool]) -> str:
     live = reg.live()
-    parts = [HEADER, "name: desk", "services:"]
-    for u, row in live.items():
-        parts.append(_service_pair(cfg, u, row.index, reg.port(u), bool(token_exists(u))))
-    parts.append("networks:")
-    parts += [f"  net-{u}: {{}}" for u in live]
+    parts = [HEADER, "name: desk"]
+    if live:
+        parts.append("services:")
+        for u, row in live.items():
+            parts.append(_service_pair(cfg, u, row.index, reg.port(u), bool(token_exists(u))))
+    else:
+        parts.append("services: {}")
+    nets = [f"  net-{u}: {{}}" for u in live]
     if cfg.fourcat_enabled:
-        parts += ["  desk-fourcat:", "    external: true"]
+        nets += ["  desk-fourcat:", "    external: true"]
+    if nets:
+        parts += ["networks:", *nets]
     return "\n".join(parts) + "\n"
 
 
@@ -112,7 +118,8 @@ def render_maps(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None 
              # $desk_target is set by the admin-vnc location's regex capture.
              *_map('"$desk_admin:$desk_target"', "$desk_admin_vnc", stub,
                    [(f"1:{u}", f"127.0.0.1:{reg.port(u)}") for u in live]),
-             "map $desk_admin $fourcat_ui {", f"    default {stub};", f"    1 {fourcat};", "}"]
+             "map $desk_admin $fourcat_ui {", f"    default {stub};",
+             *([f"    1 {fourcat};"] if cfg.fourcat_enabled else []), "}"]
     return "\n".join(lines) + "\n"
 
 
@@ -178,10 +185,51 @@ def render_policy(cfg: DeskConfig) -> str:
 # --- Writing ---------------------------------------------------------------
 
 def _write(path: str, text: str) -> str:
+    """In place: for files that are bind-mounted individually (the policies)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(text)
     return path
+
+
+def _write_atomic(path: str, text: str) -> str:
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    return path
+
+
+def _sync_dir(src: str, dest: str) -> None:
+    """Make `dest` match `src` without replacing `dest` (it is bind-mounted into running proxies)."""
+    os.makedirs(dest, exist_ok=True)
+    want = set()
+    for dirpath, dirs, files in os.walk(src):
+        rel = os.path.relpath(dirpath, src)
+        os.makedirs(os.path.join(dest, rel), exist_ok=True)
+        for name in files:
+            r = os.path.normpath(os.path.join(rel, name))
+            want.add(r)
+            shutil.copyfile(os.path.join(src, r), os.path.join(dest, r))
+    for dirpath, dirs, files in os.walk(dest, topdown=False):
+        rel = os.path.relpath(dirpath, dest)
+        for name in files:
+            if os.path.normpath(os.path.join(rel, name)) not in want:
+                os.remove(os.path.join(dirpath, name))
+        for name in dirs:
+            p = os.path.join(dirpath, name)
+            if not os.listdir(p):
+                os.rmdir(p)
 
 
 def _chown_tree(path: str) -> None:
@@ -197,16 +245,15 @@ def write_all(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = 
     platform = load_dir(cfg.platforms_dir, cfg.platform)
     live = reg.live()
     written = [
-        _write(os.path.join(root, "docker-compose.yml"), render_compose(
+        _write_atomic(os.path.join(root, "docker-compose.yml"), render_compose(
             cfg, reg, lambda u: os.path.isfile(os.path.join(root, "secrets", "4cat-tokens", u)))),
-        _write(os.path.join(root, "nginx", "desk-map.conf"), render_maps(cfg, reg, members)),
-        _write(os.path.join(root, "nginx", "desk.conf"), render_desk_conf(cfg)),
-        _write(os.path.join(root, "nginx", "fourcat.conf"), render_fourcat_conf(cfg)),
+        _write_atomic(os.path.join(root, "nginx", "desk-map.conf"), render_maps(cfg, reg, members)),
+        _write_atomic(os.path.join(root, "nginx", "desk.conf"), render_desk_conf(cfg)),
+        _write_atomic(os.path.join(root, "nginx", "fourcat.conf"), render_fourcat_conf(cfg)),
     ]
     policy = render_policy(cfg)
     dest = os.path.join(root, "platform")
-    shutil.rmtree(dest, ignore_errors=True)
-    shutil.copytree(platform.dir, dest)
+    _sync_dir(platform.dir, dest)
     written.append(dest)
     css_src = os.path.join(platform.dir, "userContent.css")
     for u in live:
@@ -215,7 +262,9 @@ def write_all(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = 
         for d in dirs:
             os.makedirs(d, exist_ok=True)
         css = os.path.join(dirs[1], "profile", "chrome", "userContent.css")
-        if cfg.hide_media and os.path.isfile(css_src):
+        if not os.path.isdir(os.path.join(dirs[1], "profile")):
+            pass  # not templated yet: a chrome/ dir here would defeat the "untar if empty" step
+        elif cfg.hide_media and os.path.isfile(css_src):
             os.makedirs(os.path.dirname(css), exist_ok=True)
             shutil.copyfile(css_src, css)
             written.append(css)
@@ -227,12 +276,35 @@ def write_all(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = 
     return written
 
 
-def install_nginx(cfg: DeskConfig, run=subprocess.run) -> None:
+CONF_D = "/etc/nginx/conf.d"
+APP_D = "/etc/nginx/app-location-conf.d"
+
+
+def install_nginx(cfg: DeskConfig, run=subprocess.run, conf_d: str = CONF_D, app_d: str = APP_D) -> None:
+    """Install the rendered nginx files; on a failed `nginx -t` put the originals back and re-raise."""
     nginx = os.path.join(cfg.desk_root, "nginx")
-    for src, dst in ((os.path.join(nginx, "desk-map.conf"), "/etc/nginx/conf.d/"),
-                     (os.path.join(cfg.repo_dir, "desk", "nginx", "websocket-map.conf"), "/etc/nginx/conf.d/"),
-                     (os.path.join(nginx, "desk.conf"), "/etc/nginx/app-location-conf.d/"),
-                     (os.path.join(nginx, "fourcat.conf"), "/etc/nginx/app-location-conf.d/")):
-        shutil.copy(src, dst)
-    run(["nginx", "-t"], check=True)
+    plan = ((os.path.join(nginx, "desk-map.conf"), conf_d),
+            (os.path.join(cfg.repo_dir, "desk", "nginx", "websocket-map.conf"), conf_d),
+            (os.path.join(nginx, "desk.conf"), app_d),
+            (os.path.join(nginx, "fourcat.conf"), app_d))
+    with tempfile.TemporaryDirectory() as aside:
+        saved = []  # (destination path, backup path or None if it did not exist)
+        for n, (src, dst_dir) in enumerate(plan):
+            dst = os.path.join(dst_dir, os.path.basename(src))
+            bak = None
+            if os.path.exists(dst):
+                bak = os.path.join(aside, str(n))
+                shutil.copy2(dst, bak)
+            saved.append((dst, bak))
+        try:
+            for src, dst_dir in plan:
+                shutil.copy(src, dst_dir)
+            run(["nginx", "-t"], check=True)
+        except BaseException:
+            for dst, bak in saved:
+                if bak:
+                    shutil.copy2(bak, dst)
+                elif os.path.exists(dst):
+                    os.remove(dst)
+            raise
     run(["systemctl", "reload", "nginx"], check=True)

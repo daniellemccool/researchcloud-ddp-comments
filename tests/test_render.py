@@ -63,7 +63,7 @@ class ComposeTests(RenderBase):
         c = self.compose()
         mitm = block(c, "  mitm-alice:", "  firefox-alice:")
         self.assertIn("./platform:/platform:ro", mitm)
-        self.assertIn(f"{REPO}/desk/desklib:/addons/desklib:ro", mitm)
+        self.assertIn(f"{REPO}/desk/desklib:/opt/desk/desklib:ro", mitm)
         self.assertIn(f"{REPO}/desk/mitm/addons:/addons:ro", mitm)
         self.assertIn("./state/captures/alice:/captures/alice", mitm)
         self.assertIn("connection_strategy=lazy", mitm)
@@ -85,6 +85,25 @@ class ComposeTests(RenderBase):
         c = self.compose(self.make_cfg(fourcat_enabled=False))
         self.assertNotIn("desk-fourcat", c)
         self.assertIn("DESK_FOURCAT_ENABLED=0", c)
+        m = render.render_maps(self.make_cfg(fourcat_enabled=False), self.reg)
+        self.assertNotIn("8080", block(m, "map $desk_admin $fourcat_ui", "}"))
+
+    def test_compose_with_no_users_is_valid(self):
+        empty = Registry(os.path.join(self.tmp, "empty"))
+        off = render.render_compose(self.make_cfg(fourcat_enabled=False), empty, lambda u: False)
+        self.assertIn("services: {}", off)
+        self.assertNotIn("networks:", off)
+        on = render.render_compose(self.cfg, empty, lambda u: False)
+        self.assertIn("services: {}", on)
+        self.assertRegex(on, r"(?m)^networks:\n  desk-fourcat:\n    external: true\n$")
+
+    def test_alice_block_identical_after_adding_bob(self):
+        solo = Registry(os.path.join(self.tmp, "solo"))
+        solo.allocate("alice")
+        before = render.render_compose(self.cfg, solo, lambda u: False)
+        after = self.compose()
+        a = lambda c: block(c, "  mitm-alice:", "  mitm-bob:") if "mitm-bob" in c else block(c, "  mitm-alice:", "networks:")
+        self.assertEqual(a(before), a(after))
 
     def test_dotted_username_in_compose_and_maps(self):
         self.reg.allocate("j.smith")
@@ -106,6 +125,14 @@ class MapTests(RenderBase):
         self.assertIn('map "$desk_admin:$desk_target" $desk_admin_vnc', m)
         self.assertIn('"1:alice" 127.0.0.1:5801;', block(m, 'map "$desk_admin:$desk_target"', "}"))
         self.assertIn("1 127.0.0.1:8080;", block(m, "map $desk_admin $fourcat_ui", "}"))
+
+    def test_every_map_defaults_to_stub_or_zero_and_no_zero_keys(self):
+        for m in (render.render_maps(self.cfg, self.reg),
+                  render.render_maps(self.make_cfg(gate_mode="api"), self.reg, {"alice": True})):
+            defaults = re.findall(r"(?m)^    default (\S+);", m)
+            self.assertEqual(len(defaults), 5)
+            self.assertTrue(all(d in ("0", "127.0.0.1:8110") for d in defaults), defaults)
+            self.assertNotIn('"0:', m)
 
     def test_maps_api_mode(self):
         cfg = self.make_cfg(gate_mode="api")
@@ -175,11 +202,14 @@ class OtherTests(RenderBase):
         self.assertNotIn("{{", p)
         self.assertIn('"HTTPProxy": "mitm:8080"', p)
         self.assertIn('"Locked": true', p)
+        self.assertRegex(p, r'"toolkit.legacyUserProfileCustomizations.stylesheets": \{\s*"Value": true,\s*"Status": "locked"')
 
     def test_write_all_layout(self):
+        os.makedirs(os.path.join(self.root, "state/firefox/alice/profile"))
         paths = render.write_all(self.cfg, self.reg)
         r = self.root
         css = os.path.join(r, "state/firefox/alice/profile/chrome/userContent.css")
+        self.assertFalse(os.path.exists(os.path.join(r, "state/firefox/bob/profile")))
         for rel in ("docker-compose.yml", "nginx/desk-map.conf", "nginx/desk.conf", "nginx/fourcat.conf",
                     "firefox/policies-alice.json", "firefox/policies-bob.json", "platform/platform.json",
                     "state/firefox/alice/profile/chrome/userContent.css",
@@ -188,6 +218,52 @@ class OtherTests(RenderBase):
         self.assertIn(os.path.join(r, "docker-compose.yml"), paths)
         render.write_all(self.make_cfg(hide_media=False), self.reg)
         self.assertFalse(os.path.exists(css))
+
+    def test_write_all_keeps_platform_dir_inode(self):
+        render.write_all(self.cfg, self.reg)
+        d = os.path.join(self.root, "platform")
+        ino = os.stat(d).st_ino
+        stale = os.path.join(d, "stale.txt")
+        open(stale, "w").close()
+        render.write_all(self.cfg, self.reg)
+        render.write_all(self.cfg, self.reg)
+        self.assertEqual(os.stat(d).st_ino, ino)
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.isfile(os.path.join(d, "platform.json")))
+
+    def test_written_compose_is_complete(self):
+        render.write_all(self.cfg, self.reg)
+        with open(os.path.join(self.root, "docker-compose.yml")) as f:
+            text = f.read()
+        self.assertEqual(text, self.compose())
+        self.assertTrue(text.endswith("    external: true\n"))
+        self.assertEqual(os.listdir(self.root).count("docker-compose.yml"), 1)
+        self.assertFalse([n for n in os.listdir(self.root) if n.startswith(".tmp.")])
+
+    def test_install_nginx_restores_originals_when_nginx_t_fails(self):
+        render.write_all(self.cfg, self.reg)
+        conf_d, app_d = (os.path.join(self.tmp, n) for n in ("conf.d", "app.d"))
+        os.makedirs(conf_d); os.makedirs(app_d)
+        old = os.path.join(conf_d, "desk-map.conf")
+        with open(old, "w") as f:
+            f.write("ORIGINAL")
+        calls = []
+
+        def run(cmd, check=False):
+            calls.append(cmd)
+            if cmd[0] == "nginx":
+                raise subprocess.CalledProcessError(1, cmd)
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            render.install_nginx(self.cfg, run, conf_d=conf_d, app_d=app_d)
+        with open(old) as f:
+            self.assertEqual(f.read(), "ORIGINAL")
+        self.assertFalse(os.path.exists(os.path.join(app_d, "desk.conf")))
+        self.assertEqual(calls, [["nginx", "-t"]])
+        calls.clear()
+        render.install_nginx(self.cfg, lambda c, check=False: calls.append(c), conf_d=conf_d, app_d=app_d)
+        self.assertTrue(os.path.exists(os.path.join(app_d, "fourcat.conf")))
+        self.assertEqual(calls[-1], ["systemctl", "reload", "nginx"])
 
     @unittest.skipUnless(shutil.which("docker"), "docker not installed")
     def test_compose_config_validates(self):
