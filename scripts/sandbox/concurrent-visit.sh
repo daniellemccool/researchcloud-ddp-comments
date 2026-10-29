@@ -33,17 +33,32 @@ visit 1 &
 visit 2 &
 wait
 
-# poll until the desk page is ready (a two-pane page) or says the setup failed
+# Poll /desk/status (the JSON the page itself polls) until it says ready: true. Each round also
+# fetches /desk/, which keeps provisioning going and is where "Setup failed" shows up; the
+# full / busy / not-ready pages just mean "not yet" until the timeout.
+hdr=(-H "REMOTE_USER: $user" -H "X-Desk-Member: 1" -H "X-Desk-Admin: 0" -H "X-Desk-Roles: $role")
 deadline=$((start + 180))
+last="no answer yet"
 while :; do
-  body="$(curl -s -m 30 -H "REMOTE_USER: $user" -H "X-Desk-Member: 1" -H "X-Desk-Admin: 0" \
-    -H "X-Desk-Roles: $role" "http://127.0.0.1:$port/desk/" || true)"
-  case "$body" in
-    *"Setup failed"*) echo "desk setup failed for $user" >&2; exit 1 ;;
-    *"Setting up"*|"") ;;
-    *) break ;;
+  page="$(curl -s -m 30 "${hdr[@]}" "http://127.0.0.1:$port/desk/" || true)"
+  case "$page" in
+    *"Setup failed"*)
+      echo "desk setup failed for $user: $(printf '%s' "$page" | sed 's/<[^>]*>//g' | tr -s '[:space:]' ' ')" >&2
+      exit 1 ;;
   esac
-  [ "$(date +%s)" -lt "$deadline" ] || { echo "timed out waiting for $user to be ready" >&2; exit 1; }
+  code="$(curl -s -m 30 -o "${TMPDIR:-/tmp}/cv-status.$$" -w '%{http_code}' "${hdr[@]}" "http://127.0.0.1:$port/desk/status" || true)"
+  if [ "$code" = 200 ] && python3 -c '
+import json, sys
+sys.exit(0 if json.load(open(sys.argv[1])).get("ready") is True else 1)' "${TMPDIR:-/tmp}/cv-status.$$" 2>/dev/null; then
+    rm -f "${TMPDIR:-/tmp}/cv-status.$$"
+    break
+  fi
+  last="/desk/status HTTP $code; /desk/ said: $(printf '%s' "$page" | sed 's/<[^>]*>//g' | tr -s '[:space:]' ' ' | cut -c1-100)"
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    rm -f "${TMPDIR:-/tmp}/cv-status.$$"
+    echo "timed out after 180 s waiting for $user to be ready; last state: $last" >&2
+    exit 1
+  fi
   sleep 3
 done
 
@@ -59,7 +74,10 @@ accounts="$(sudo docker exec "$dbctr" psql -v ON_ERROR_STOP=1 -U fourcat -d four
   "SELECT count(*) FROM users WHERE name = '$user'" | tr -d '[:space:]')"
 report fourcat-accounts 1 "$accounts"
 
-tokens="$(sudo find "$DESK/secrets/4cat-tokens/$user" -type f -newermt "@$start" | wc -l | tr -d '[:space:]')"
+tokens=0
+if sudo test -d "$DESK/secrets/4cat-tokens/$user"; then
+  tokens="$(sudo find "$DESK/secrets/4cat-tokens/$user" -type f -newermt "@$start" | wc -l | tr -d '[:space:]')"
+fi
 report fresh-token-files 1 "$tokens"
 
 live="$(sudo cat "$DESK/sessions.tsv" | awk -F'\t' -v u="$user" '$1 == u && (NF < 3 || $3 == "live")' | wc -l | tr -d '[:space:]')"
