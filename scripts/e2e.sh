@@ -3,7 +3,9 @@
 #
 #   E2E_BASE=https://<desk fqdn> scripts/e2e.sh IDENTITY
 #
-# Extra environment: E2E_ADMIN=1 for an admin identity, E2E_HEADED=1 to watch.
+# Extra environment: E2E_ADMIN=1 for an admin identity; E2E_ADMIN_STATE=PATH to an admin's
+# saved state (~/.config/ddp-comments-e2e/dmccool.json), without which the claim test skips;
+# E2E_HEADED=1 to watch.
 set -euo pipefail
 
 identity="${1:-}"
@@ -19,5 +21,5 @@ state="$HOME/.config/ddp-comments-e2e/$identity.json"
 
 PY=python3
 [ -x .venv/bin/python ] && PY=.venv/bin/python
-export E2E_STATE="$state" E2E_BASE
+export E2E_STATE="$state" E2E_BASE E2E_ADMIN_STATE="${E2E_ADMIN_STATE:-}"
 exec "$PY" -m unittest discover -s tests/e2e -p 'test_*.py' -v

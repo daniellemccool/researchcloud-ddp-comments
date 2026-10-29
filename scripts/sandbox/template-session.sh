@@ -8,16 +8,16 @@
 # The container reuses the firefox-dmccool service of the rendered compose file (image, proxy
 # policy, network) with the profile directory and policy directory swapped for _template ones.
 # It sits behind dmccool's own mitm container, which must be running. Its screen is published on
-# 127.0.0.1:$TPL_PORT of the box only: from your laptop, `ssh -L 5899:127.0.0.1:5899 desk` and
-# open http://127.0.0.1:5899/ .
+# 127.0.0.1:$TPL_PORT of the box only: from your laptop, `ssh -L 5999:127.0.0.1:5999 desk` and
+# open http://127.0.0.1:5999/ .
 #
-# Environment: DESK (desk root), TPL_USER (pair to borrow, default dmccool), TPL_PORT (5899),
+# Environment: DESK (desk root), TPL_USER (pair to borrow, default dmccool), TPL_PORT (5999),
 # ZS_VERSION (Zeeschuimer version for release, 1.14.2), PLATFORM (tiktok).
 set -euo pipefail
 
 DESK="${DESK:-/data/onlinehate_zeeschuimer/desk}"
 BORROW="${TPL_USER:-dmccool}"
-PORT="${TPL_PORT:-5899}"
+PORT="${TPL_PORT:-5999}"
 ZS_VERSION="${ZS_VERSION:-1.14.2}"
 PLATFORM="${PLATFORM:-tiktok}"
 TPL_DIR="$DESK/state/firefox/_template"
@@ -66,6 +66,12 @@ case "${1:-}" in
   up)
     $SUDO docker inspect -f '{{.State.Running}}' "desk-mitm-$BORROW" 2>/dev/null | grep -qx true \
       || { echo "template-session.sh: desk-mitm-$BORROW is not running (desk-sessions up $BORROW)" >&2; exit 1; }
+    # start from an empty profile: take a leftover tpl project down first, then clear the directory
+    [ ! -f "$COMPOSE_FILE" ] || compose down
+    if $SUDO docker inspect desk-firefox-tpl >/dev/null 2>&1; then
+      echo "template-session.sh: desk-firefox-tpl still exists; remove it first" >&2; exit 1
+    fi
+    $SUDO rm -rf "$TPL_DIR"
     generate
     compose up -d
     echo "template Firefox is up on 127.0.0.1:$PORT of this box."
@@ -76,8 +82,8 @@ case "${1:-}" in
     compose down
     ;;
   release)
-    [ -f "$COMPOSE_FILE" ] && compose down
-    desk-template release --platform "$PLATFORM" --zeeschuimer-version "$ZS_VERSION" "$TPL_DIR" "$OUT_DIR"
+    if [ -f "$COMPOSE_FILE" ]; then compose down; fi
+    $SUDO "$(dirname "$(readlink -f "$0")")/../../bin/desk-template" release --platform "$PLATFORM" --zeeschuimer-version "$ZS_VERSION" "$TPL_DIR" "$OUT_DIR"
     echo "next: desk-sessions init --desk-root $DESK --repo /opt/ddp-comments --platform $PLATFORM \\"
     echo "        --collector-role src_co_students --admin-role src_co_admin --contact Danielle \\"
     echo "        --template $OUT_DIR/ddp-comments-template-$PLATFORM-$ZS_VERSION.tar"

@@ -7,6 +7,13 @@ These drive the real desk page in Chromium. They are not part of `scripts/test-a
     uv venv .venv && uv pip install --python .venv/bin/python playwright
     .venv/bin/playwright install chromium
 
+## Order matters
+
+`login.py` waits for `/desk/` to answer 200, and that poll is itself the user's first visit, so
+a new identity (dmccool2) is provisioned at login time. Build and install the release template
+on the box first (see scripts/sandbox/template-session.sh); on a desk without a template the
+login times out.
+
 ## Log in (once per identity, repeat when the SRAM session expires)
 
     E2E_BASE=https://<desk fqdn> .venv/bin/python tests/e2e/login.py dmccool
@@ -20,13 +27,15 @@ mode 600; it holds session cookies).
 
     E2E_BASE=https://<desk fqdn> scripts/e2e.sh dmccool2
     E2E_BASE=https://<desk fqdn> E2E_ADMIN=1 scripts/e2e.sh dmccool
+    E2E_BASE=https://<desk fqdn> E2E_ADMIN_STATE=$HOME/.config/ddp-comments-e2e/dmccool.json scripts/e2e.sh dmccool2
 
 | variable | meaning |
 | --- | --- |
 | `E2E_BASE` | the desk's https URL, no trailing slash (required) |
 | `E2E_STATE` | storage state file; `scripts/e2e.sh` sets it from the identity |
-| `E2E_ADMIN` | `1` for an admin identity: enables the admin page test and makes the claim test check the desk log through the admin export |
+| `E2E_ADMIN` | `1` for an admin identity: enables the admin page test |
+| `E2E_ADMIN_STATE` | storage state of an admin identity; the claim test reads the desk log through the admin export with it and skips when it is unset |
 | `E2E_HEADED` | `1` to watch the browser |
 
-Without `E2E_STATE` and `E2E_BASE` every test skips. A first visit provisions the user's
+Without `E2E_STATE` and `E2E_BASE` every test skips; with them set, a missing Playwright fails. A first visit provisions the user's
 session, which can take a couple of minutes; the tests wait up to four.
