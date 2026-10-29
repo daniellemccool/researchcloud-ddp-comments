@@ -141,6 +141,8 @@ class Desk:
         self.log_path = os.path.join(root, "state", "desk-log.ndjson")
         self.lock = threading.Lock()
         self.start_lock = threading.Lock()
+        self.access_path = os.path.join(root, "state", "access.ndjson")
+        self.last_roles = {}  # user -> last roles header seen, so access.ndjson records changes only
         self.last_seen = {}   # user -> last time their screen was connected or their page loaded
         self.port_base = 5800
 
@@ -252,6 +254,16 @@ class Desk:
         with self.lock:
             self._append([ev])
 
+    def note_access(self, user: str, roles: str, path: str) -> None:
+        """Append {t, user, roles, path} to state/access.ndjson when the user's roles header changed."""
+        with self.lock:
+            if self.last_roles.get(user) == roles:
+                return
+            self.last_roles[user] = roles
+            os.makedirs(os.path.dirname(self.access_path), exist_ok=True)
+            with open(self.access_path, "a") as f:
+                f.write(json.dumps({"t": int(time.time()), "user": user, "roles": roles, "path": path}) + "\n")
+
     def view(self, user, events=None):
         """The user's claims in order, with batch numbers, and which of them are done."""
         claims, done, problems, opened = [], set(), {}, set()
@@ -314,6 +326,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _user(self):
         u = (self.headers.get("REMOTE_USER") or "").strip()
+        if u:
+            self.desk.note_access(u, self.headers.get("X-Desk-Roles", ""), urlparse(self.path).path)
         return u if u and u in self.desk.users() else None
 
     def _route(self):

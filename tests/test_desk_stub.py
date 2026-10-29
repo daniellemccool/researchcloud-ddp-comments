@@ -65,11 +65,12 @@ class StubTest(unittest.TestCase):
             else: os.environ[k] = v
         self.tmp.cleanup()
 
-    def req(self, method, path, user=None, admin=None):
+    def req(self, method, path, user=None, admin=None, roles=None):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         h = {}
         if user is not None: h["REMOTE_USER"] = user
         if admin is not None: h["X-Desk-Admin"] = admin
+        if roles is not None: h["X-Desk-Roles"] = roles
         c.request(method, path, headers=h); r = c.getresponse(); body = r.read().decode()
         c.close(); return r.status, body
 
@@ -88,6 +89,14 @@ class StubTest(unittest.TestCase):
             self.assertEqual(self.req("POST", f"/desk/problem?id={v}&code=U", user=user)[0], 204)
 
     # identity
+    def test_roles_header_is_logged_once_per_change(self):
+        self.req("GET", "/desk/", user="alice", roles="src_co_students;src_co_admin")
+        self.req("GET", "/desk/", user="alice", roles="src_co_students;src_co_admin")
+        self.req("GET", "/desk/", user="alice", roles="")
+        acc = [json.loads(l) for l in slurp(os.path.join(self.desk, "state", "access.ndjson")).splitlines()]
+        self.assertEqual([(a["user"], a["roles"]) for a in acc],
+                         [("alice", "src_co_students;src_co_admin"), ("alice", "")])
+
     def test_missing_remote_user_is_403(self):
         self.assertEqual(self.req("GET", "/desk/")[0], 403)
         self.assertEqual(self.req("POST", "/desk/claim")[0], 403)
