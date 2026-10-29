@@ -6,7 +6,6 @@ Exit 0 on success, 1 on a reported failure, 2 on usage errors.
 import argparse
 import json
 import os
-import secrets
 import subprocess
 import sys
 import urllib.error
@@ -14,6 +13,8 @@ import urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from desk_sessions import build_sessions  # noqa: E402
 from desklib.fourcat import FourCatError  # noqa: E402
+from desklib.locks import flocked, user_lock  # noqa: E402
+from desklib.registry import USER_RE  # noqa: E402
 
 
 def cmd_show(s, a) -> int:
@@ -31,14 +32,11 @@ def cmd_show(s, a) -> int:
 
 def cmd_adopt(s, a) -> int:
     fc = s.fourcat
-    if not fc.account_exists(a.user):
-        print(f"desk-admin 4cat-user adopt: no 4CAT account for {a.user}", file=sys.stderr)
-        return 1
-    pw = secrets.token_urlsafe(24)
-    fc.hash_password(pw)               # fail early on a broken backend, before touching the account
-    fc.set_password(a.user, pw)
-    fc._write_password(a.user, pw)     # the DB has changed: the file must follow (as rotate does)
-    fc.write_token(a.user, fc.login_token(a.user, pw))
+    with flocked(user_lock(s.cfg.desk_root, a.user)):   # password, DB and token move together
+        if not fc.account_exists(a.user):
+            print(f"desk-admin 4cat-user adopt: no 4CAT account for {a.user}", file=sys.stderr)
+            return 1
+        fc.rotate(a.user)   # new password -> DB -> password file -> login -> token file
     print(f"{a.user}: adopted")
     return 0
 
@@ -55,9 +53,16 @@ def cmd_sync(s, a) -> int:
 
 
 def cmd_rotate(s, a) -> int:
-    s.fourcat.rotate(a.user)
+    with flocked(user_lock(s.cfg.desk_root, a.user)):
+        s.fourcat.rotate(a.user)
     print(f"{a.user}: rotated")
     return 0
+
+
+def username(value: str) -> str:
+    if not USER_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"invalid username: {value!r}")
+    return value
 
 
 def parser() -> argparse.ArgumentParser:
@@ -68,7 +73,7 @@ def parser() -> argparse.ArgumentParser:
         sp = group.add_parser(name)
         sp.add_argument("--desk-root", required=True)
         if user:
-            sp.add_argument("user")
+            sp.add_argument("user", type=username)
     users = groups.add_parser("4cat-user").add_subparsers(dest="action", required=True)
     leaf(users, "show", True)
     leaf(users, "adopt", True)
