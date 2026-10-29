@@ -66,7 +66,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(r["request"]["method"], "GET")
         self.assertEqual(r["request"]["host"], "www.tiktok.com")
         self.assertEqual(r["request"]["path"], "/api/comment/list/")
-        self.assertEqual(r["response"], {"status": 200, "has_more": 1, "cursor": 20})
+        self.assertEqual(r["response"], {"status": 200, "has_more": 1, "cursor": 20, "total": 2, "status_code": 0})
         self.assertIsInstance(r["item"], dict)
         self.assertEqual(r["text"], "comment one")
         self.assertEqual(r["author"], "user_a")
@@ -114,6 +114,43 @@ class CaptureTests(unittest.TestCase):
         none = dataclasses.replace(self.rule, post_id=None)
         self.assertIsNone(cr.post_id_for(none, self.request, {}))
 
+    def test_response_keep_is_rule_driven(self):
+        r = dataclasses.replace(self.rule, response_keep=["total"])
+        recs = cr.extract(r, CTX, self.request, 200, fixture("comments-list.json"))
+        self.assertEqual(recs[0]["response"], {"status": 200, "total": 2})
+        r = dataclasses.replace(self.rule, response_keep=[])
+        recs = cr.extract(r, CTX, self.request, 200, fixture("comments-list.json"))
+        self.assertEqual(recs[0]["response"], {"status": 200})
+
+    def test_too_large_record(self):
+        rec = cr.too_large_record(self.rule, CTX, self.request, 200, 99)
+        self.assertEqual((rec["error"], rec["size"], rec["capture"]), ("body_too_large", 99, "comments"))
+        self.assertEqual(rec["request"]["query"], {"aweme_id": "7001", "cursor": "0", "count": "20"})
+
+    def test_hosts_agree(self):
+        self.assertTrue(cr.hosts_agree("www.tiktok.com", "WWW.tiktok.com:443"))
+        self.assertFalse(cr.hosts_agree("172.17.0.5", "www.tiktok.com"))
+        self.assertFalse(cr.hosts_agree("frontend", "www.tiktok.com"))
+
+    def test_is_internal_address(self):
+        for ip in ["127.0.0.1", "10.0.0.1", "172.17.0.5", "192.168.1.1", "169.254.169.254", "0.0.0.0",
+                   "::1", "::", "fe80::1", "fc00::1", "224.0.0.1", "240.0.0.1", "::ffff:172.17.0.5", "garbage"]:
+            self.assertTrue(cr.is_internal_address(ip), ip)
+        for ip in ["93.184.216.34", "8.8.8.8", "2606:2800:220:1:248:1893:25c8:1946"]:
+            self.assertFalse(cr.is_internal_address(ip), ip)
+
+    def test_resolves_internal_with_fake_getaddrinfo(self):
+        def fake(addrs):
+            return lambda host, port: [(0, 0, 0, "", (a, 0)) for a in addrs]
+
+        def boom(host, port):
+            raise OSError("no such host")
+        self.assertTrue(cr.resolves_internal("172-17-0-5.nip.io", fake(["172.17.0.5"])))
+        self.assertFalse(cr.resolves_internal("www.tiktok.com", fake(["93.184.216.34"])))
+        self.assertTrue(cr.resolves_internal("mixed.example", fake(["93.184.216.34", "127.0.0.1"])))
+        self.assertTrue(cr.resolves_internal("gone.example", boom))
+        self.assertTrue(cr.resolves_internal("empty.example", fake([])))
+
     def test_dotted(self):
         self.assertEqual(cr.dotted({"user": {"unique_id": "a"}}, "user.unique_id"), "a")
         self.assertIsNone(cr.dotted({"user": None}, "user.unique_id"))
@@ -142,6 +179,9 @@ class CaptureTests(unittest.TestCase):
             os.utime(path, (2000, 2000))
             self.assertEqual(cr.read_token(path, cache), "def")
             os.remove(path)
+            self.assertIsNone(cr.read_token(path, cache))
+            with open(path, "wb") as f:
+                f.write(b"\xff\xfe\x80")
             self.assertIsNone(cr.read_token(path, cache))
 
 

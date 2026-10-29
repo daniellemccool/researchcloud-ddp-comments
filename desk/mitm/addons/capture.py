@@ -38,18 +38,37 @@ def _path(flow):
     return flow.request.path.split("?", 1)[0]
 
 
+
+def _request_dict(flow):
+    return {"method": flow.request.method, "host": flow.request.pretty_host, "path": _path(flow),
+            "query": dict(flow.request.query.items())}
+
+
 class Capture:
     def __init__(self):
         self.token_cache = {}
 
+    def _refuse(self, flow, decision, **extra):
+        flow.response = http.Response.make(403, b"desk: refused", {"Content-Type": "text/plain"})
+        _append("refused.ndjson", dict({"t": int(time.time()), "action": "refused", "host": flow.request.host,
+                                        "method": flow.request.method, "path": _path(flow),
+                                        "decision": decision}, **extra))
+
     def request(self, flow: http.HTTPFlow):
+        try:
+            self._request(flow)
+        except Exception as e:                      # fail closed: a broken hook must never forward the flow
+            self._refuse(flow, "error", error=type(e).__name__)
+
+    def _request(self, flow):
         req = flow.request
-        decision, rule = cr.decide(PLATFORM, req.pretty_host, req.method, _path(flow), FOURCAT_ENABLED)
+        # Decide on the destination we really connect to (req.host), never on the client's Host header.
+        if not cr.hosts_agree(req.host, req.pretty_host):
+            return self._refuse(flow, "host-mismatch")
+        decision, rule = cr.decide(PLATFORM, req.host, req.method, _path(flow), FOURCAT_ENABLED)
         if decision in (cr.Decision.FORBID, cr.Decision.REFUSE):
-            flow.response = http.Response.make(403, b"desk: refused", {"Content-Type": "text/plain"})
-            _append("refused.ndjson", {"t": int(time.time()), "action": "refused", "host": req.pretty_host,
-                                       "method": req.method, "path": _path(flow), "decision": decision.value})
-        elif decision is cr.Decision.FOURCAT:
+            return self._refuse(flow, decision.value)
+        if decision is cr.Decision.FOURCAT:
             req.scheme = UPSTREAM.scheme
             req.host = UPSTREAM.hostname
             req.port = UPSTREAM.port or (443 if UPSTREAM.scheme == "https" else 80)
@@ -59,19 +78,37 @@ class Capture:
             if token:
                 req.headers["Cookie"] = "remember_token=" + token
             flow.metadata["desk"] = ("fourcat", None)
-        elif decision is cr.Decision.CAPTURE:
+            return
+        if cr.resolves_internal(req.host):
+            return self._refuse(flow, "resolved-internal")
+        if decision is cr.Decision.CAPTURE:
             flow.metadata["desk"] = ("capture", rule)
 
     def responseheaders(self, flow: http.HTTPFlow):
         kind, rule = flow.metadata.get("desk", (None, None))
-        if kind == "capture" and rule.no_stream:
-            flow.response.stream = False
+        if kind == "fourcat":
+            flow.response.headers.pop("Set-Cookie", None)   # never hand a 4CAT credential to the browser
+        elif kind == "capture" and rule.no_stream:
+            try:
+                size = int(flow.response.headers.get("Content-Length", ""))
+            except ValueError:
+                size = None
+            if size is not None and size > rule.max_body_bytes:
+                flow.metadata["desk_skip"] = True           # leave streaming on; record only the size
+                ctx = {"t": int(time.time()), "user": USER, "session": SESSION, "platform": PLATFORM.name}
+                _append(rule.name + ".ndjson", cr.too_large_record(
+                    rule, ctx, _request_dict(flow), flow.response.status_code, size))
+            else:
+                flow.response.stream = False
 
     def response(self, flow: http.HTTPFlow):
         now, path, resp = int(time.time()), _path(flow), flow.response
         kind, rule = flow.metadata.get("desk", (None, None))
         if kind == "fourcat":
+            resp.headers.pop("Set-Cookie", None)
             _append("fourcat.ndjson", {"t": now, "action": "fourcat", "path": path, "status": resp.status_code})
+            return
+        if flow.metadata.get("desk_skip"):
             return
         if kind != "capture":
             # page opens come from platform hosts that matched no capture rule; the desk reconciles them
@@ -81,10 +118,8 @@ class Capture:
                 if opened:
                     _append("opens.ndjson", dict(opened, t=now, session=SESSION, user=USER, status=resp.status_code))
             return
-        request = {"method": flow.request.method, "host": flow.request.pretty_host, "path": path,
-                   "query": dict(flow.request.query.items())}
         ctx = {"t": now, "user": USER, "session": SESSION, "platform": PLATFORM.name}
-        for rec in cr.extract(rule, ctx, request, resp.status_code, resp.content or b""):
+        for rec in cr.extract(rule, ctx, _request_dict(flow), resp.status_code, resp.content or b""):
             _append(rule.name + ".ndjson", rec)
 
 

@@ -7,6 +7,7 @@ internal-looking host (localhost, IP literals, dotless names, *.desk).
 import ipaddress
 import json
 import os
+import socket
 import re
 from enum import Enum
 
@@ -52,6 +53,33 @@ def is_internal_host(host: str) -> bool:
     if "localhost" in labels or h.endswith(".desk"):
         return True
     return labels[-1].isdigit()                 # 127.1 and friends: not a real TLD, resolvers read it as an address
+
+
+def hosts_agree(real: str, pretty: str) -> bool:
+    """True when the connection target and the client-supplied Host header name the same host."""
+    return normalise_host(real) == normalise_host(pretty)
+
+
+def is_internal_address(ip: str) -> bool:
+    try:
+        a = ipaddress.ip_address(ip.split("%", 1)[0])
+    except ValueError:
+        return True
+    if getattr(a, "ipv4_mapped", None) is not None:
+        a = a.ipv4_mapped
+    return (a.is_loopback or a.is_private or a.is_link_local or a.is_unspecified
+            or a.is_reserved or a.is_multicast)
+
+
+def resolves_internal(host: str, getaddrinfo=socket.getaddrinfo) -> bool:
+    """True if any address `host` resolves to is internal; fails closed on resolution errors."""
+    try:
+        infos = getaddrinfo(normalise_host(host), None)
+    except (OSError, UnicodeError):
+        return True
+    if not infos:
+        return True
+    return any(is_internal_address(info[4][0]) for info in infos)
 
 
 def decide(p, host: str, method: str, path: str, fourcat_enabled: bool):
@@ -104,9 +132,9 @@ def post_id_for(rule, request: dict, body_json):
     return None if val is None else str(val)
 
 
-def extract(rule, ctx: dict, request: dict, status: int, body: bytes) -> list:
+def _envelope(rule, ctx, request, status):
     keep = {k: v for k, v in (request.get("query") or {}).items() if k in rule.query_keep}
-    env = {
+    return {
         "t": ctx["t"], "user": ctx["user"], "session": ctx["session"], "platform": ctx["platform"],
         "capture": rule.name, "kind": None,
         "post_id": post_id_for(rule, request, None),
@@ -114,15 +142,23 @@ def extract(rule, ctx: dict, request: dict, status: int, body: bytes) -> list:
                     "path": request.get("path"), "query": keep},
         "response": {"status": status},
     }
+
+
+def too_large_record(rule, ctx: dict, request: dict, status: int, size: int) -> dict:
+    return dict(_envelope(rule, ctx, request, status), error="body_too_large", size=size)
+
+
+def extract(rule, ctx: dict, request: dict, status: int, body: bytes) -> list:
+    env = _envelope(rule, ctx, request, status)
     if len(body) > rule.max_body_bytes:
-        return [dict(env, error="body_too_large", size=len(body))]
+        return [too_large_record(rule, ctx, request, status, len(body))]
     try:
         data = json.loads(body)
     except ValueError:
         return [dict(env, error="json")]
     env["post_id"] = post_id_for(rule, request, data)
     if isinstance(data, dict):
-        for k in ("has_more", "cursor"):
+        for k in rule.response_keep:
             if k in data:
                 env["response"][k] = data[k]
     if rule.items is None:
@@ -151,7 +187,7 @@ def read_token(path: str, cache: dict):
             return hit[1]
         with open(path, encoding="utf-8") as f:
             token = f.read().strip() or None
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         cache.pop(path, None)
         return None
     cache[path] = (sig, token)

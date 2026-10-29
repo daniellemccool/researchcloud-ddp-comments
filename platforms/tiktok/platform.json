@@ -6,6 +6,7 @@
  "open_pattern": "^/@[^/]+/(video|photo)/(?P<id>[0-9]+)",
  "captures": [{"name": "comments", "path": "^/api/comment/list", "items": "comments", "id": "cid",
    "post_id": {"from": "query", "param": "aweme_id"}, "query_keep": ["aweme_id", "cursor", "count"],
+   "response_keep": ["has_more", "cursor", "total", "status_code"],
    "fields": {"text": "text", "author": "user.unique_id", "author_nickname": "user.nickname", "author_uid": "user.uid",
               "created": "create_time", "likes": "digg_count", "reply_to": "reply_id", "reply_total": "reply_comment_total",
               "language": "comment_language"},

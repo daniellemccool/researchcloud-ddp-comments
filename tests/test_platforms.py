@@ -30,6 +30,18 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(len(self.p.captures), 1)
         self.assertEqual(self.p.login, "none")
         self.assertEqual(self.p.captures[0].max_body_bytes, 16 * 1024 * 1024)
+        self.assertEqual(self.p.captures[0].response_keep, ["has_more", "cursor", "total", "status_code"])
+
+    def test_response_keep_defaults_and_validates(self):
+        d = tiktok_dict()
+        del d["captures"][0]["response_keep"]
+        self.assertEqual(self.load_dict(d).captures[0].response_keep, ["has_more", "cursor"])
+        d["captures"][0]["response_keep"] = "has_more"
+        with self.assertRaisesRegex(pf.PlatformError, r"captures\[0\]\.response_keep"):
+            self.load_dict(d)
+        d["captures"][0]["response_keep"] = ["ok", 3]
+        with self.assertRaisesRegex(pf.PlatformError, r"captures\[0\]\.response_keep"):
+            self.load_dict(d)
 
     def test_item_url_and_id_validation(self):
         self.assertEqual(pf.item_url(self.p, "video", "123"), "https://www.tiktok.com/@x/video/123/")

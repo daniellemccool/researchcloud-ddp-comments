@@ -2,11 +2,12 @@
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 LOGIN_MODES = ("none", "optional", "required")
 POST_ID_SOURCES = {"query": "param", "path": "group", "body": "field"}
 DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
+DEFAULT_RESPONSE_KEEP = ("has_more", "cursor")
 
 
 class PlatformError(ValueError):
@@ -30,6 +31,7 @@ class CaptureRule:
     query_keep: list
     no_stream: bool
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
+    response_keep: list = field(default_factory=lambda: list(DEFAULT_RESPONSE_KEEP))
 
 
 @dataclass(frozen=True)
@@ -98,11 +100,15 @@ def _capture(c, i):
     query_keep = c.get("query_keep", [])
     if not isinstance(query_keep, list):
         raise PlatformError(f"{where}.query_keep: must be list")
+    response_keep = c.get("response_keep", list(DEFAULT_RESPONSE_KEEP))
+    if not isinstance(response_keep, list) or not all(isinstance(k, str) for k in response_keep):
+        raise PlatformError(f"{where}.response_keep: must be a list of strings")
     return CaptureRule(
         name=name, path=path, items=items, id=cid, post_id=post_id,
         fields=dict(fields), query_keep=list(query_keep),
         no_stream=bool(c.get("no_stream", False)),
         max_body_bytes=int(c.get("max_body_bytes", DEFAULT_MAX_BODY_BYTES)),
+        response_keep=list(response_keep),
     )
 
 
