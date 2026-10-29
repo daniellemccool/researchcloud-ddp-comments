@@ -702,8 +702,12 @@ class StubTest(StubHarness):
         _, body = self.mem("GET", "/desk/")
         self.assertIn("Starting your browser", body)
         self.assertNotIn('src="/desk/vnc/"', body)   # the iframe gets its src once /desk/status says ready
+        import socket
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0)); free = probe.getsockname()[1]   # a port nothing listens on, on any host
+        self.desk_obj().reg.port_base = free - 1                          # alice is index 1
         s, st = self.mem("GET", "/desk/status")
-        self.assertEqual(s, 200); self.assertEqual(json.loads(st)["ready"], False)   # port 5801 not listening here
+        self.assertEqual(s, 200); self.assertEqual(json.loads(st)["ready"], False)
 
     def _listener(self, handler):
         import socket

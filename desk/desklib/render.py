@@ -251,10 +251,11 @@ def _sync_dir(src: str, dest: str) -> None:
 
 
 def _chown_tree(path: str) -> None:
-    shutil.chown(path, 1000, 1000)
-    for dirpath, dirs, files in os.walk(path):
+    # os.lchown never follows a symlink (shutil.chown(follow_symlinks=) is 3.13+; the box runs 3.12)
+    os.lchown(path, 1000, 1000)
+    for dirpath, dirs, files in os.walk(path):   # os.walk lists symlinks to dirs in `dirs` but does not descend
         for name in dirs + files:
-            shutil.chown(os.path.join(dirpath, name), 1000, 1000, follow_symlinks=False)
+            os.lchown(os.path.join(dirpath, name), 1000, 1000)
 
 
 def drop_legacy_policy(root: str, user: str) -> None:

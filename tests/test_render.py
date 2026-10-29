@@ -241,6 +241,21 @@ class LocationTests(RenderBase):
 
 
 class OtherTests(RenderBase):
+    def test_chown_tree_lchowns_every_entry_once_without_following_symlinks(self):
+        from unittest import mock
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.makedirs(os.path.join(root, "d"))
+        open(os.path.join(root, "d", "f"), "w").close()
+        os.symlink("/etc/passwd", os.path.join(root, "link"))
+        calls = []
+        with mock.patch.object(render.os, "lchown", lambda p, u, g: calls.append((p, u, g))), \
+             mock.patch.object(render.shutil, "chown", side_effect=AssertionError("shutil.chown used")):
+            render._chown_tree(root)
+        want = [root, os.path.join(root, "d"), os.path.join(root, "d", "f"), os.path.join(root, "link")]
+        self.assertEqual(sorted(c[0] for c in calls), sorted(want))
+        self.assertEqual({c[1:] for c in calls}, {(1000, 1000)})
+
     def test_role_charset_enforced(self):
         with self.assertRaises(ValueError):
             self.make_cfg(collector_role="src_co_a.b").validate()
