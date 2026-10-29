@@ -86,6 +86,8 @@ def _capture(c, i):
         raise PlatformError(f"{where}.id: must be str")
     if items is not None and not cid:
         raise PlatformError(f"{where}.id: required when items is set")
+    if items is not None and not c.get("no_stream", False):
+        raise PlatformError(f"{where}.no_stream: must be true when items is set (a body capture must buffer)")
     post_id = c.get("post_id")
     if post_id is not None:
         src = post_id.get("from") if isinstance(post_id, dict) else None

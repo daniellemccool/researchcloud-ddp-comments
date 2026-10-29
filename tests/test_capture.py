@@ -51,6 +51,12 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(cr.decide(self.p, "www.tiktok.com", "GET", "/api/other", True), (D.PASS, None))
         self.assertEqual(cr.decide(self.p, "evil.com", "GET", "/api/comment/list", True), (D.PASS, None))
 
+    def test_extract_missing_items_key_is_an_error_record(self):
+        recs = cr.extract(self.rule, CTX, self.request, 200, b'{"status_code": 0}')
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["error"], "items_missing")
+        self.assertEqual(recs[0]["capture"], "comments")
+
     def test_extract_items_with_envelope_and_fields(self):
         recs = cr.extract(self.rule, CTX, self.request, 200, fixture("comments-list.json"))
         self.assertEqual(len(recs), 2)

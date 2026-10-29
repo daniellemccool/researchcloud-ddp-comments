@@ -9,6 +9,7 @@ import json
 import os
 import socket
 import re
+import time
 from enum import Enum
 
 from .platform import host_matches
@@ -82,6 +83,25 @@ def resolves_internal(host: str, getaddrinfo=socket.getaddrinfo) -> bool:
     return any(is_internal_address(info[4][0]) for info in infos)
 
 
+_RESOLVE_TTL = 60.0
+_resolve_cache = {}
+
+
+def resolves_internal_cached(host: str, getaddrinfo=socket.getaddrinfo, now=time.monotonic) -> bool:
+    """resolves_internal with a 60 s in-process cache keyed by normalised host.
+
+    The lookup is still synchronous, so a cold miss blocks mitmproxy's event loop for one DNS round trip;
+    making the hook async is out of scope. Failures are cached too (fail closed, same TTL).
+    """
+    key, t = normalise_host(host), now()
+    hit = _resolve_cache.get(key)
+    if hit and hit[1] > t:
+        return hit[0]
+    result = resolves_internal(host, getaddrinfo)
+    _resolve_cache[key] = (result, t + _RESOLVE_TTL)
+    return result
+
+
 def decide(p, host: str, method: str, path: str, fourcat_enabled: bool):
     """Returns (Decision, CaptureRule | None). `path` is the path without the query string."""
     h = normalise_host(host)
@@ -144,6 +164,10 @@ def _envelope(rule, ctx, request, status):
     }
 
 
+def error_record(rule, ctx: dict, request: dict, status: int, error: str, **extra) -> dict:
+    return dict(_envelope(rule, ctx, request, status), error=error, **extra)
+
+
 def too_large_record(rule, ctx: dict, request: dict, status: int, size: int) -> dict:
     return dict(_envelope(rule, ctx, request, status), error="body_too_large", size=size)
 
@@ -165,7 +189,7 @@ def extract(rule, ctx: dict, request: dict, status: int, body: bytes) -> list:
         return [dict(env, body=data)]
     items = dotted(data, rule.items)
     if items is None:
-        return []
+        return [dict(env, error="items_missing")]
     if not isinstance(items, list):
         return [dict(env, error="items")]
     records = []

@@ -43,6 +43,15 @@ class PlatformTests(unittest.TestCase):
         with self.assertRaisesRegex(pf.PlatformError, r"captures\[0\]\.response_keep"):
             self.load_dict(d)
 
+    def test_items_rule_must_buffer(self):
+        d = tiktok_dict()
+        d["captures"][0]["no_stream"] = False
+        with self.assertRaisesRegex(pf.PlatformError, r"captures\[0\]\.no_stream"):
+            self.load_dict(d)
+        del d["captures"][0]["no_stream"]
+        with self.assertRaisesRegex(pf.PlatformError, r"captures\[0\]\.no_stream"):
+            self.load_dict(d)
+
     def test_item_url_and_id_validation(self):
         self.assertEqual(pf.item_url(self.p, "video", "123"), "https://www.tiktok.com/@x/video/123/")
         with self.assertRaises(ValueError):

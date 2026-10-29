@@ -16,26 +16,36 @@ import urllib.parse
 
 sys.path.insert(0, "/opt/desk")
 
-from mitmproxy import http  # noqa: E402
+from mitmproxy import ctx, http  # noqa: E402
 
 from desklib import capture_rules as cr  # noqa: E402
 from desklib import platform as pf  # noqa: E402
 
-USER = os.environ.get("DESK_USER", "unknown")
+USER = os.environ.get("DESK_USER", "").strip()      # empty means the sidecar is misconfigured: running() stops it
 SESSION = os.environ.get("DESK_SESSION", "0")
 CAPTURES = os.environ.get("DESK_CAPTURES", "/captures")
 FOURCAT_ENABLED = os.environ.get("DESK_FOURCAT_ENABLED", "0") == "1"
 UPSTREAM = urllib.parse.urlsplit(os.environ.get("DESK_FOURCAT_UPSTREAM", "http://frontend:5000"))
 TOKEN_FILE = os.environ.get("DESK_FOURCAT_TOKEN_FILE", "/run/desk/4cat-token")
-PLATFORM = pf.load(os.environ.get("DESK_PLATFORM_JSON", "/platform/platform.json"))
+try:
+    PLATFORM = pf.load(os.environ.get("DESK_PLATFORM_JSON", "/platform/platform.json"))
+    PLATFORM_ERROR = None
+except Exception as _e:                             # never raise at import: mitmproxy would keep proxying without us
+    PLATFORM, PLATFORM_ERROR = None, f"{type(_e).__name__}: {_e}"
+WRITE_FAILURES = 0
 
 
 def _append(name, obj):
-    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    d = os.path.join(CAPTURES, USER, day)
-    os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, name), "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    global WRITE_FAILURES
+    try:
+        day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        d = os.path.join(CAPTURES, USER, day)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    except OSError as e:                            # a lost safety-copy write must be loud, never silent
+        WRITE_FAILURES += 1
+        ctx.log.error(f"desk: cannot write {name}: {e}")
 
 
 def _path(flow):
@@ -58,7 +68,17 @@ class Capture:
                                         "method": flow.request.method, "path": _path(flow),
                                         "decision": decision}, **extra))
 
+    def running(self):
+        """Fail closed: a sidecar without a platform or a user is a dead proxy, never an open one."""
+        problem = (f"platform definition not loaded ({PLATFORM_ERROR})" if PLATFORM is None
+                   else "DESK_USER is not set" if not USER else None)
+        if problem:
+            ctx.log.error(f"desk: refusing to run: {problem}")
+            ctx.master.shutdown()
+
     def request(self, flow: http.HTTPFlow):
+        if PLATFORM is None:
+            return self._refuse(flow, "no-platform")
         try:
             self._request(flow)
         except Exception as e:                      # fail closed: a broken hook must never forward the flow
@@ -83,26 +103,36 @@ class Capture:
                 req.headers["Cookie"] = "remember_token=" + token
             flow.metadata["desk"] = ("fourcat", None)
             return
-        if cr.resolves_internal(req.host):
+        if cr.resolves_internal_cached(req.host):
             return self._refuse(flow, "resolved-internal")
         if decision is cr.Decision.CAPTURE:
             req.headers["Accept-Encoding"] = "identity"     # the size check sees the real body size
             flow.metadata["desk"] = ("capture", rule)
 
+    @staticmethod
+    def _ctx(now=None):
+        return {"t": now or int(time.time()), "user": USER, "session": SESSION, "platform": PLATFORM.name}
+
     def responseheaders(self, flow: http.HTTPFlow):
         kind, rule = flow.metadata.get("desk", (None, None))
         if kind == "fourcat":
             flow.response.headers.pop("Set-Cookie", None)   # never hand a 4CAT credential to the browser
-        elif kind == "capture" and rule.no_stream:
+        elif kind == "capture":
+            enc = flow.response.headers.get("Content-Encoding", "").strip().lower()
+            if enc and enc != "identity":                   # we asked for identity; never decompress here
+                flow.metadata["desk_skip"] = True
+                return _append(rule.name + ".ndjson", cr.error_record(
+                    rule, self._ctx(), _request_dict(flow), flow.response.status_code, "encoded", encoding=enc))
+            if not rule.no_stream:
+                return
             try:
                 size = int(flow.response.headers.get("Content-Length", ""))
             except ValueError:
                 size = None
             if size is not None and size > rule.max_body_bytes:
                 flow.metadata["desk_skip"] = True           # leave streaming on; record only the size
-                ctx = {"t": int(time.time()), "user": USER, "session": SESSION, "platform": PLATFORM.name}
                 _append(rule.name + ".ndjson", cr.too_large_record(
-                    rule, ctx, _request_dict(flow), flow.response.status_code, size))
+                    rule, self._ctx(), _request_dict(flow), flow.response.status_code, size))
             else:
                 flow.response.stream = False
 
@@ -123,8 +153,11 @@ class Capture:
                 if opened:
                     _append("opens.ndjson", dict(opened, t=now, session=SESSION, user=USER, status=resp.status_code))
             return
-        ctx = {"t": now, "user": USER, "session": SESSION, "platform": PLATFORM.name}
-        for rec in cr.extract(rule, ctx, _request_dict(flow), resp.status_code, resp.content or b""):
+        cx = self._ctx(now)
+        if not rule.no_stream and not resp.content:         # streamed: the body was never held, so say so
+            return _append(rule.name + ".ndjson", cr.error_record(
+                rule, cx, _request_dict(flow), resp.status_code, "not_buffered"))
+        for rec in cr.extract(rule, cx, _request_dict(flow), resp.status_code, resp.content or b""):
             _append(rule.name + ".ndjson", rec)
 
 
