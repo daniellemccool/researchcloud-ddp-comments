@@ -470,6 +470,27 @@ class TemplateTest(unittest.TestCase):
         self._manifest_edit(tar_path, modules=self.plat.zeeschuimer_modules)
         self.assertEqual(tp.verify_tar(tar_path, self.plat), [])
 
+    def test_verify_tar_survives_missing_or_garbage_manifest(self):
+        _, (tar_path, _) = self.release(); man_path = os.path.splitext(tar_path)[0] + ".json"
+        man_problem = f"manifest {os.path.basename(man_path)} missing or unreadable"
+        with open(man_path, "rb") as fh: good = fh.read()
+        os.remove(man_path)
+        self.assertEqual(tp.verify_tar(tar_path, self.plat), [man_problem])
+        with open(man_path, "w") as fh: fh.write("{garbage")
+        self.assertEqual(tp.verify_tar(tar_path, self.plat), [man_problem])
+        with open(man_path, "wb") as fh: fh.write(good)
+        self.assertEqual(tp.verify_tar(tar_path, self.plat), [])
+
+    def test_verify_release_enforces_root_uri(self):
+        _, (tar_path, _) = self.release()
+        def hook(x):
+            pr = os.path.join(x, "profile")
+            ext = read_json(pr, "extensions.json")
+            ext["addons"][0]["rootURI"] = "jar:file:///home/user/x.xpi!/"
+            write_json(pr, "extensions.json", ext)
+        self._retar(tar_path, [], hook=hook)
+        self.assertIn("extensions.json entry not normalised: rootURI", tp.verify_tar(tar_path, self.plat))
+
     def test_deleted_cookie_values_do_not_survive(self):
         src = os.path.join(self.t, "src"); p = make_profile(src, wal_only=[(".x.example", "sid")])
         with open(os.path.join(p, "cookies.sqlite"), "rb") as fh:

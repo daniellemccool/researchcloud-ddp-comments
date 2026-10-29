@@ -217,6 +217,8 @@ def _entry_problems(e, zeeschuimer_version):
     for k in e:
         if "elemetry" in k.lower():
             bad(k)
+    if "rootURI" in e and e["rootURI"] != f"jar:file://{XPI_CONTAINER_PATH}!/":
+        bad("rootURI")
     if "sourceURI" in e and (zeeschuimer_version is None or e["sourceURI"] != _policy_url(zeeschuimer_version)):
         bad("sourceURI")
 
@@ -581,6 +583,9 @@ def _root_problems(root):
 def verify_tar(tar_path: str, platform) -> list:
     problems = []
     man_path = os.path.splitext(tar_path)[0] + ".json"
+    base = os.path.basename(tar_path)
+    pre = f"ddp-comments-template-{platform.name}-"
+    version = base[len(pre):-len(".tar")] if base.startswith(pre) and base.endswith(".tar") else None
     try:
         with open(man_path, encoding="utf-8") as f:
             man = json.load(f)
@@ -590,9 +595,6 @@ def verify_tar(tar_path: str, platform) -> list:
             problems.append(f"manifest platform {man.get('platform')!r} is not {platform.name!r}")
         if man.get("kind") != "release":
             problems.append(f"manifest kind is {man.get('kind')}, not release")
-        base = os.path.basename(tar_path)
-        pre = f"ddp-comments-template-{platform.name}-"
-        version = base[len(pre):-len(".tar")] if base.startswith(pre) and base.endswith(".tar") else None
         if version is None or man.get("zeeschuimer_version") != version:
             problems.append(f"manifest zeeschuimer_version is {man.get('zeeschuimer_version')}, not {version}")
         if man.get("modules") != platform.zeeschuimer_modules:
