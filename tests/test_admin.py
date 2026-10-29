@@ -1,0 +1,225 @@
+"""HTTP tests for the admin overview (desk_admin_routes.py): queue upload, session actions, 4CAT credentials, exports."""
+import http.client, io, json, os, sys, unittest, zipfile
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import test_desk_stub as base  # noqa: E402  (module import: StubTest itself must not be re-collected here)
+from desklib import pool  # noqa: E402
+from desklib.platform import load_dir  # noqa: E402
+
+BOUNDARY = "XdeskX"
+SAME = {"Sec-Fetch-Site": "same-origin"}
+
+
+def multipart(name, content: bytes, filename="pool.csv"):
+    head = (f'--{BOUNDARY}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+            f'Content-Type: text/csv\r\n\r\n').encode()
+    return head + content + f"\r\n--{BOUNDARY}--\r\n".encode(), f"multipart/form-data; boundary={BOUNDARY}"
+
+
+class AdminTest(base.StubHarness):
+    def areq(self, method, path, user="alice", admin="1", body=None, ctype=None, headers=SAME, raw=False):
+        """A member's request (admin by default) with a CSRF-clean header set; returns (status, body, headers)."""
+        h = {"REMOTE_USER": user, "X-Desk-Member": "1", **({"X-Desk-Admin": admin} if admin is not None else {}),
+             **headers}
+        if ctype:
+            h["Content-Type"] = ctype
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request(method, path, body=body, headers=h)
+        r = c.getresponse(); data = r.read(); c.close()
+        return r.status, (data if raw else data.decode()), {k.lower(): v for k, v in r.getheaders()}
+
+    def members(self, mapping):
+        self.desk_obj().sessions.members = lambda: mapping
+
+    def upload(self, content: bytes, **kw):
+        body, ctype = multipart("file", content)
+        return self.areq("POST", "/desk/admin/pool", body=body, ctype=ctype, **kw)
+
+    def test_admin_page_sections_and_expected_vs_registered(self):
+        self.members({"alice": True, "bob": False, "carol": False})
+        s, body, _ = self.areq("GET", "/desk/admin/")
+        self.assertEqual(s, 200)
+        for section in ("Queue", "Sessions", "4CAT", "Export", "Problems"):
+            self.assertIn(f"<h2>{section}</h2>", body)
+        self.assertIn("expected, not yet visited", body)
+        expected = body.split("expected, not yet visited", 1)[1]
+        self.assertIn("carol", expected); self.assertNotIn("bob", expected.split("</ul>")[0])
+        self.assertIn("/desk/admin/vnc/alice/", body)
+        self.assertIn("op=stop&amp;user=alice", body)
+
+    def test_expected_list_survives_co_api_failure(self):
+        def boom():
+            raise OSError("no route")
+        self.desk_obj().sessions.members = boom
+        s, body, _ = self.areq("GET", "/desk/admin/")
+        self.assertEqual(s, 200); self.assertIn("could not read the CO member list", body)
+
+    def test_pool_upload_reports_rejects(self):
+        csv_text = "﻿Video ID;Bucket;Note\r\n9001;a;one\r\n9002;a;two\r\nabc;a;bad\r\n9001;b;dup\r\n"
+        before = len(pool.read_rows(self.root, "video"))
+        s, body, _ = self.upload(csv_text.encode("utf-8"))
+        self.assertEqual(s, 200)
+        self.assertIn("added 2 of 4; rejected lines: 4: id must match ^[0-9]+$", body)
+        rows = pool.read_rows(self.root, "video")
+        self.assertEqual(len(rows), before + 2)
+        self.assertEqual([(r.id, r.kind, r.bucket, r.note) for r in rows[-2:]],
+                         [("9001", "video", "a", "one"), ("9002", "video", "a", "two")])
+        s, body, _ = self.upload(b"id,kind\n9001,video\n7,x\n")     # a duplicate adds nothing; unknown kind rejected
+        self.assertIn("added 0 of 2; rejected lines: 3: unknown kind &#x27;x&#x27;", body)
+        s, body, _ = self.upload(b"id\n9100\n")
+        self.assertIn("added 1 of 1; no rejects", body)
+
+    def test_pool_upload_limits_and_form_errors(self):
+        body, ctype = multipart("file", b"x" * (5 * 1024 * 1024 + 1))
+        self.assertEqual(self.areq("POST", "/desk/admin/pool", body=body, ctype=ctype)[0], 413)
+        body, ctype = multipart("other", b"id\n1\n")
+        self.assertEqual(self.areq("POST", "/desk/admin/pool", body=body, ctype=ctype)[0], 400)
+        self.assertEqual(self.areq("POST", "/desk/admin/pool", body=b"id=1", ctype="text/plain")[0], 400)
+
+    def test_session_actions_call_sessions(self):
+        sess = self.desk_obj().sessions
+        with mock.patch.object(sess, "reconcile", return_value={"retired": ["x"], "failed": {"y": "boom"}}) as rec, \
+                mock.patch.object(sess, "prune", return_value=["z"]) as pr, \
+                mock.patch.object(sess, "stop") as st, \
+                mock.patch.object(sess, "retire", return_value=None) as ret, \
+                mock.patch.object(sess, "repair", return_value=mock.Mock(ready=lambda: True)) as rep:
+            for op in ("reconcile", "prune", "stop", "retire", "repair"):
+                s, _, h = self.areq("POST", f"/desk/admin/sessions?op={op}&user=bob")
+                self.assertEqual((s, h["location"]), (303, "/desk/admin/"), op)
+            rec.assert_called_once_with(); pr.assert_called_once_with()
+            st.assert_called_once_with("bob"); ret.assert_called_once_with("bob"); rep.assert_called_once_with("bob")
+            self.assertEqual(self.areq("POST", "/desk/admin/sessions?op=explode&user=bob")[0], 400)
+            for op in ("stop", "retire", "repair"):
+                self.assertEqual(self.areq("POST", f"/desk/admin/sessions?op={op}")[0], 400, op)
+                self.assertEqual(self.areq("POST", f"/desk/admin/sessions?op={op}&user=..%2Fx")[0], 400, op)
+            self.assertEqual(st.call_count, 1)
+        self.assertEqual(self.areq("GET", "/desk/admin/sessions?op=prune")[0], 404)
+
+    def test_session_result_is_shown_once(self):
+        sess = self.desk_obj().sessions
+        with mock.patch.object(sess, "retire", return_value="docker timed out"):
+            self.areq("POST", "/desk/admin/sessions?op=retire&user=bob")
+        first = self.areq("GET", "/desk/admin/")[1]
+        self.assertIn("bob: retire failed: docker timed out", first)
+        self.assertNotIn("retire failed", self.areq("GET", "/desk/admin/")[1])
+
+    def test_own_password_only_and_no_store(self):
+        fc = self.desk_obj().sessions.fourcat
+        for u, pw in (("alice", "alice-secret-pw"), ("bob", "bob-secret-pw")):
+            base.put(fc.password_path(u), pw)
+        s, body, h = self.areq("GET", "/desk/admin/4cat/password")
+        self.assertEqual(s, 200); self.assertIn("alice-secret-pw", body); self.assertNotIn("bob-secret-pw", body)
+        self.assertEqual(h["cache-control"], "no-store")
+        for path in ("/desk/admin/", "/desk/admin/problems"):   # the password is rendered nowhere else
+            self.assertNotIn("alice-secret-pw", self.areq("GET", path)[1])
+        s, body, _ = self.areq("GET", "/desk/admin/4cat/password?user=bob")
+        self.assertNotIn("bob-secret-pw", body)
+        os.remove(fc.password_path("alice"))
+        self.assertEqual(self.areq("GET", "/desk/admin/4cat/password")[0], 404)
+        s, body, h = self.areq("POST", "/desk/admin/4cat/password")   # reissue
+        new = base.slurp(fc.password_path("alice"))
+        self.assertEqual(s, 200); self.assertIn(new, body); self.assertEqual(h["cache-control"], "no-store")
+        self.serve(fourcat_enabled=False)
+        for m, p in (("GET", "/desk/admin/4cat/password"), ("POST", "/desk/admin/4cat/password"),
+                     ("POST", "/desk/admin/4cat/rotate?user=bob")):
+            s, body, _ = self.areq(m, p)
+            self.assertEqual(s, 404, p); self.assertIn("4CAT is not enabled on this desk", body)
+
+    def test_rotate_other_user_as_admin(self):
+        fc = self.desk_obj().sessions.fourcat
+        base.put(fc.password_path("bob"), "old-bob-pw")
+        s, body, h = self.areq("POST", "/desk/admin/4cat/rotate?user=bob")
+        self.assertEqual((s, h["location"]), (303, "/desk/admin/"))
+        new = base.slurp(fc.password_path("bob"))
+        self.assertNotEqual(new, "old-bob-pw")
+        page = self.areq("GET", "/desk/admin/")[1]
+        self.assertIn("rotated 4CAT credentials for bob", page)
+        self.assertNotIn(new, page); self.assertNotIn("old-bob-pw", page)
+        self.assertEqual(self.areq("POST", "/desk/admin/4cat/rotate")[0], 400)
+        self.assertEqual(self.areq("POST", "/desk/admin/4cat/rotate?user=Bad%20Name")[0], 400)
+
+    def test_export_zip_contains_captures_and_log(self):
+        base.put(os.path.join(self.root, "state", "captures", "alice", "a.ndjson"), '{"x":1}\n')
+        base.put(os.path.join(self.root, "state", "captures", "bob", "sub", "b.ndjson"), '{"y":2}\n')
+        self.mem("POST", "/desk/claim")
+        s, data, h = self.areq("GET", "/desk/admin/export/captures.zip", raw=True)
+        self.assertEqual(s, 200); self.assertEqual(h["content-type"], "application/zip")
+        self.assertIn("attachment", h["content-disposition"])
+        z = zipfile.ZipFile(io.BytesIO(data))
+        self.assertEqual(z.namelist(), ["captures/alice/a.ndjson", "captures/bob/sub/b.ndjson", "desk-log.ndjson"])
+        self.assertEqual(z.read("captures/alice/a.ndjson"), b'{"x":1}\n')
+        self.assertIn(b'"action": "claim"', z.read("desk-log.ndjson"))
+        s, data, h = self.areq("GET", "/desk/admin/export/desk-log.ndjson", raw=True)
+        self.assertEqual((s, h["content-type"]), (200, "application/x-ndjson"))
+        self.assertIn("attachment", h["content-disposition"]); self.assertIn(b'"action": "claim"', data)
+
+    def test_problems_list_newest_first(self):
+        d = self.desk_obj()
+        for t, code, note in ((1000, "U", ""), (3000, "X", "late <b>one</b>"), (2000, "U", "")):
+            d.append({"t": t, "user": "bob", "action": "problem", "kind": "video", "id": str(t), "code": code,
+                      "note": note})
+        d.append({"t": 4000, "user": "bob", "action": "open", "kind": "video", "id": "4000", "code": "", "exec_rc": 0})
+        s, body, _ = self.areq("GET", "/desk/admin/problems")
+        self.assertEqual(s, 200)
+        self.assertLess(body.index("3000"), body.index("2000")); self.assertLess(body.index("2000"), body.index("1000"))
+        self.assertNotIn("4000", body)
+        self.assertIn("late &lt;b&gt;one&lt;/b&gt;", body)
+
+    def test_non_admin_cannot_reach_any_admin_route(self):
+        routes = [("GET", "/desk/admin/"), ("POST", "/desk/admin/pool"), ("POST", "/desk/admin/sessions?op=prune"),
+                  ("GET", "/desk/admin/4cat/password"), ("POST", "/desk/admin/4cat/password"),
+                  ("POST", "/desk/admin/4cat/rotate?user=bob"), ("GET", "/desk/admin/export/captures.zip"),
+                  ("GET", "/desk/admin/export/desk-log.ndjson"), ("GET", "/desk/admin/problems")]
+        sess = self.desk_obj().sessions
+        with mock.patch.object(sess, "prune") as pr:
+            for admin in (None, "0"):
+                for m, p in routes:
+                    self.assertEqual(self.areq(m, p, admin=admin)[0], 403, (m, p, admin))
+            pr.assert_not_called()
+        self.assertEqual(self.docker_calls(), [])
+
+    def test_admin_posts_refuse_cross_site(self):
+        sess = self.desk_obj().sessions
+        port = self.port
+        with mock.patch.object(sess, "prune", return_value=[]) as pr:
+            p = "/desk/admin/sessions?op=prune"
+            for hdrs in ({"Sec-Fetch-Site": "cross-site"}, {"Sec-Fetch-Site": "same-site"}, {},
+                         {"Origin": "https://evil.example"}, {"Origin": "null"},
+                         {"Sec-Fetch-Site": "cross-site", "Origin": f"http://127.0.0.1:{port}"}):
+                self.assertEqual(self.areq("POST", p, headers=hdrs)[0], 403, hdrs)
+            pr.assert_not_called()
+            self.assertEqual(self.areq("POST", p, headers={"Origin": f"http://127.0.0.1:{port}"})[0], 303)
+            self.assertEqual(self.areq("POST", p, headers={"Sec-Fetch-Site": "same-origin"})[0], 303)
+            self.assertEqual(pr.call_count, 2)
+        # a cross-site upload and a cross-site password reissue are refused as well
+        body, ctype = multipart("file", b"id\n9500\n")
+        self.assertEqual(self.areq("POST", "/desk/admin/pool", body=body, ctype=ctype,
+                                   headers={"Sec-Fetch-Site": "cross-site"})[0], 403)
+        self.assertEqual(self.areq("POST", "/desk/admin/4cat/password", headers={})[0], 403)
+        self.assertNotIn("9500", [r.id for r in pool.read_rows(self.root, "video")])
+
+
+class PoolUnitTest(unittest.TestCase):
+    def setUp(self):
+        self.platform = load_dir(os.path.join(base.REPO, "platforms"), "tiktok")
+
+    def test_parse_selection_header_aliases_and_line_numbers(self):
+        text = "﻿video-id , Kind\r\n\r\n12,video\r\n,video\r\nzz,video\r\n5,nope\r\n"
+        rows, rejects = pool.parse_selection(text, self.platform)
+        self.assertEqual([(r.id, r.kind, r.bucket, r.note) for r in rows], [("12", "video", "", "")])
+        self.assertEqual(rejects, [(4, "id is empty"), (5, "id must match ^[0-9]+$"), (6, "unknown kind 'nope'")])
+        self.assertEqual(pool.parse_selection("name\nx\n", self.platform)[0], [])
+
+    def test_add_rows_creates_file_with_header_and_dedupes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            rows, _ = pool.parse_selection("id,bucket,note\n1,a,x\n2,b,y\n1,c,z\n", self.platform)
+            self.assertEqual(pool.add_rows(root, rows, self.platform), (2, 2))
+            self.assertEqual(pool.add_rows(root, rows, self.platform), (0, 2))
+            with open(os.path.join(root, "pool.csv"), encoding="utf-8") as f:
+                self.assertEqual(f.read().splitlines()[0], "id,kind,bucket,note")
+
+
+if __name__ == "__main__":
+    unittest.main()

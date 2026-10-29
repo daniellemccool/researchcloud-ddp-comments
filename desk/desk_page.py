@@ -7,6 +7,7 @@ user, the pool or the log supplies is escaped.
 import html
 import json
 import re
+import time
 
 CSS = """:root{--ink:#1d2329;--muted:#6b7480;--line:#e3e6ea;--bg:#f6f7f9;--accent:#1f6feb;--ok:#1a7f37;--warn:#b35900}
 *{box-sizing:border-box}
@@ -138,18 +139,87 @@ def desk(*, user, platform, noun, seconds, note_codes, progress_html, body, open
     return re.sub(r"%%([A-Z_]+)%%", lambda m: values[m.group(1)], PAGE)
 
 
-def admin(rows, free, total, noun, pool_error=None, fourcat=True):
-    """rows: (user, firefox status, mitm status, claimed, done, open, last event) per live session.
-    pool_error replaces the pool count; fourcat False drops the 4CAT link."""
-    pool_line = (f"pool.csv unreadable: {e(pool_error)}" if pool_error is not None
-                 else f"{free} of {total} {e(noun)}s unclaimed in the pool.")
-    trs = "".join(
-        f"<tr><td>{e(u)}</td><td>{e(ff)}</td><td>{e(mitm)}</td><td>{c}</td><td>{d}</td><td>{o}</td><td>{e(last)}</td>"
-        f'<td><a href="/desk/admin/vnc/{e(u)}/" target="_blank">watch</a></td></tr>'
-        for u, ff, mitm, c, d, o, last in rows)
-    return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>desk admin</title></head>"
-            "<body style=\"font:14px system-ui;margin:2em\"><h1>Desk sessions</h1>"
-            f"<p>{pool_line}</p>"
-            "<table cellpadding=\"6\"><tr><th>user</th><th>firefox</th><th>mitm</th><th>claimed</th>"
-            "<th>done</th><th>open</th><th>last event</th><th>screen</th></tr>" + trs + "</table>"
-            + ("<p><a href=\"/\">4CAT</a></p>" if fourcat else "") + "</body></html>")
+ADMIN_CSS = ("body{font:14px/1.4 system-ui,sans-serif;margin:2em;max-width:70em;color:#1d2329}"
+             "h2{margin:1.6em 0 .4em;border-bottom:1px solid #e3e6ea}table{border-collapse:collapse}"
+             "td,th{padding:4px 8px;border-bottom:1px solid #e3e6ea;text-align:left;vertical-align:top}"
+             ".notice{background:#fff8e6;border:1px solid #e8d9a8;padding:8px 12px;border-radius:6px}"
+             ".warn{color:#b35900}form{display:inline}td form button{margin-right:4px}")
+
+
+def admin_shell(title, inner, notice=None, back=True):
+    """An admin page around already-built HTML `inner`; `notice` is plain text, shown in a box."""
+    box = f'<p class="notice" role="status">{e(notice)}</p>' if notice else ""
+    link = '<p><a href="/desk/admin/">back to the overview</a></p>' if back else ""
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><title>{e(title)}</title>'
+            f'<style>{ADMIN_CSS}</style></head><body><h1>{e(title)}</h1>{box}{inner}{link}</body></html>')
+
+
+def _post(action, label, confirm=None):
+    ask = f' onclick="return confirm(\'{confirm}\')"' if confirm else ""
+    return f'<form method="post" action="{e(action)}"><button{ask}>{e(label)}</button></form>'
+
+
+def _session_row(r, fourcat):
+    u = e(r["user"])
+    state = "ready" if r["ready"] else e(r["step"])
+    q = f"user={e(r['user'])}"
+    buttons = (_post(f"/desk/admin/sessions?op=stop&{q}", "stop") +
+               _post(f"/desk/admin/sessions?op=retire&{q}", "retire", f"Retire {u}?") +
+               _post(f"/desk/admin/sessions?op=repair&{q}", "repair") +
+               (_post(f"/desk/admin/4cat/rotate?{q}", "rotate 4CAT") if fourcat else ""))
+    return (f"<tr><td>{u}</td><td>{r['index']}</td><td>{'running' if r['running'] else 'stopped'}</td>"
+            f"<td>{e(r['seen'])}</td><td>{state}</td><td>{e(r['error'] or '')}</td>"
+            f"<td>{e(r['firefox'])} / {e(r['mitm'])}</td><td>{r['claimed']}/{r['done']}/{r['open']}</td>"
+            f'<td><a href="/desk/admin/vnc/{u}/" target="_blank">watch</a></td><td>{buttons}</td></tr>')
+
+
+def admin(*, sessions, pool_line, expected, expected_warning, fourcat, notice=None):
+    """The overview. sessions: dicts with user, index, running, seen, step, ready, error, firefox,
+    mitm, claimed, done, open. expected: users expected but not yet visited, or None when the CO
+    list could not be read (expected_warning says why). pool_line is already-escaped text."""
+    trs = "".join(_session_row(r, fourcat) for r in sessions)
+    if expected_warning:
+        exp = f'<p class="warn">{e(expected_warning)}</p>'
+    elif expected:
+        exp = ("<p>expected, not yet visited:</p><ul>" + "".join(f"<li>{e(u)}</li>" for u in expected) + "</ul>")
+    else:
+        exp = "<p>expected, not yet visited: nobody.</p>"
+    four = ('<p><a href="/">4CAT</a></p>' + _post("/desk/admin/4cat/password", "Reissue my 4CAT password") +
+            ' <a href="/desk/admin/4cat/password">Show my 4CAT password</a>'
+            if fourcat else "<p>4CAT is not enabled on this desk.</p>")
+    inner = (
+        "<h2>Queue</h2>"
+        f"<p>{pool_line}</p>"
+        '<form method="post" action="/desk/admin/pool" enctype="multipart/form-data">'
+        '<label>Add to the pool (CSV with an id column; kind, bucket, note optional): '
+        '<input type="file" name="file" accept=".csv,text/csv" required></label> <button>Upload</button></form>'
+        "<h2>Sessions</h2>"
+        + _post("/desk/admin/sessions?op=reconcile", "reconcile") + " "
+        + _post("/desk/admin/sessions?op=prune", "prune", "Retire everyone who is no longer a member?") +
+        '<table><tr><th>user</th><th>index</th><th>running</th><th>last seen</th><th>step</th>'
+        '<th>last error</th><th>firefox / mitm</th><th>claimed/done/open</th><th>screen</th><th>actions</th></tr>'
+        + trs + "</table>" + exp +
+        "<h2>4CAT</h2>" + four +
+        "<h2>Export</h2>"
+        '<ul><li><a href="/desk/admin/export/captures.zip">captures.zip</a> (captures and the desk log)</li>'
+        '<li><a href="/desk/admin/export/desk-log.ndjson">desk-log.ndjson</a></li></ul>'
+        '<h2>Problems</h2><p><a href="/desk/admin/problems">the last 200 problems, newest first</a></p>')
+    return admin_shell("Desk admin", inner, notice, back=False)
+
+
+def admin_password(user, password):
+    """The requesting admin's own 4CAT password, once. Both arguments are plain text."""
+    return admin_shell("Your 4CAT password",
+                       f"<p>Username <b>{e(user)}</b>, password:</p><p><code>{e(password)}</code></p>"
+                       "<p>It is shown on this page only. Reload to see it again, or reissue a new one.</p>")
+
+
+def admin_problems(events):
+    """events: dicts with t (epoch), user, kind, id, code, note, newest first."""
+    trs ="".join(
+        f"<tr><td>{e(time.strftime('%Y-%m-%d %H:%M', time.localtime(ev['t'])))}</td><td>{e(ev['user'])}</td>"
+        f"<td>{e(ev['kind'])}</td><td>{e(ev['id'])}</td><td>{e(ev['code'])}</td><td>{e(ev['note'])}</td></tr>"
+        for ev in events)
+    body = ("<table><tr><th>time</th><th>user</th><th>kind</th><th>id</th><th>code</th><th>note</th></tr>"
+            + trs + "</table>") if events else "<p>No problems recorded.</p>"
+    return admin_shell("Problems", body)

@@ -3,7 +3,9 @@
 The legacy header was video_id,bucket,note; its rows get the platform's default kind.
 """
 import csv
+import io
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 
@@ -48,6 +50,95 @@ def _read(desk_root: str, default_kind: str) -> tuple[list[PoolRow], bool]:
 
 def read_rows(desk_root: str, default_kind: str) -> list[PoolRow]:
     return _read(desk_root, default_kind)[0]
+
+
+_ID_NAMES = {"id", "videoid", "video_id"}
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[\s\-]+", "_", name.strip().lower())
+
+
+def parse_selection(text: str, platform) -> tuple[list[PoolRow], list[tuple[int, str]]]:
+    """Parse an uploaded selection into (valid rows, [(line_no, reason)] rejects).
+
+    Accepts a BOM, CRLF and a ';' or ',' delimiter. The header names are case-, space- and
+    dash-insensitive ("Video ID" == "video_id" == "id"); kind, bucket and note are optional.
+    line_no is the physical line in the upload, 1-based.
+    """
+    text = text.lstrip("﻿")
+    try:
+        delim = csv.Sniffer().sniff(text[:4096], delimiters=",;").delimiter
+    except csv.Error:
+        delim = ","
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delim)
+    cols: dict[str, int] | None = None
+    rows, rejects = [], []
+    try:
+        for cells in reader:
+            line = reader.line_num
+            if not any(c.strip() for c in cells):
+                continue
+            if cols is None:
+                cols = {}
+                for i, name in enumerate(cells):
+                    n = _norm(name)
+                    cols.setdefault("id" if n in _ID_NAMES else n, i)
+                if "id" not in cols:
+                    return [], [(line, "header has no id column")]
+                continue
+
+            def get(name):
+                i = cols.get(name)
+                return cells[i].strip() if i is not None and i < len(cells) else ""
+            item_id, kind = get("id"), get("kind") or platform.default_kind
+            k = platform.item_kinds.get(kind)
+            if k is None:
+                rejects.append((line, f"unknown kind {kind!r}"))
+            elif not item_id:
+                rejects.append((line, "id is empty"))
+            elif not k.id_re.fullmatch(item_id):
+                rejects.append((line, f"id must match {k.id_re.pattern}"))
+            else:
+                rows.append(PoolRow(item_id, kind, get("bucket"), get("note")))
+    except csv.Error as e:
+        rejects.append((reader.line_num, f"unreadable: {e}"))
+    return rows, rejects
+
+
+def add_rows(desk_root: str, rows: list[PoolRow], platform) -> tuple[int, int]:
+    """Append the rows not already in pool.csv (dedupe on (kind, id), also within the batch).
+
+    Returns (added, total rows now). Rows the platform cannot open are skipped, never written.
+    """
+    with flocked(pool_lock(desk_root)):
+        _migrate(desk_root, platform.default_kind)
+        existing, _ = _read(desk_root, platform.default_kind)
+        seen = {(r.kind, r.id) for r in existing}
+        fresh = []
+        for r in rows:
+            k = platform.item_kinds.get(r.kind)
+            if k is None or not k.id_re.fullmatch(r.id) or (r.kind, r.id) in seen:
+                continue
+            seen.add((r.kind, r.id))
+            fresh.append(r)
+        if fresh:
+            path = _path(desk_root)
+            os.makedirs(desk_root, exist_ok=True)
+            with open(path, "a+b") as probe:     # a hand-edited file may lack its final newline
+                size = probe.seek(0, os.SEEK_END)
+                lead = b""
+                if size:
+                    probe.seek(-1, os.SEEK_END)
+                    lead = b"" if probe.read(1) == b"\n" else b"\n"
+            with open(path, "a", newline="", encoding="utf-8") as f:
+                if lead:
+                    f.write(lead.decode())
+                w = csv.writer(f)
+                if not size:
+                    w.writerow(HEADER)
+                w.writerows([r.id, r.kind, r.bucket, r.note] for r in fresh)
+        return len(fresh), len(existing) + len(fresh)
 
 
 def migrate_legacy(desk_root: str, default_kind: str) -> bool:

@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import desk_page as page  # noqa: E402
+from desk_admin_routes import handle_admin  # noqa: E402
 from desk_sessions import build_sessions  # noqa: E402
 from desklib import pool  # noqa: E402
 from desklib.config import load_config  # noqa: E402
@@ -51,6 +52,16 @@ class Desk:
         self.last_seen = {}     # user -> last time their screen was connected or their page loaded
         self.provisioning = set()  # users with an advance() thread running
         self.pool_error = None     # why the last pool.csv read failed, if it did
+        self.notice = None         # one line from the last admin action, shown once on the next overview
+
+    def set_notice(self, text):
+        with self.lock:
+            self.notice = text
+
+    def take_notice(self):
+        with self.lock:
+            text, self.notice = self.notice, None
+        return text
 
     # --- provisioning ----------------------------------------------------
 
@@ -261,11 +272,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # keep journald quiet; the NDJSON log is the record
         pass
 
-    def _send(self, status, body="", ctype="text/html; charset=utf-8"):
+    def _send(self, status, body="", ctype="text/html; charset=utf-8", headers=()):
         body = body.encode() if isinstance(body, str) else body
         self.send_response(status)
-        if body:
+        if body or ctype != "text/html; charset=utf-8":
             self.send_header("Content-Type", ctype)
+        for k, v in headers:
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -307,8 +320,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(301); self.send_header("Location", "/desk/admin/")
             self.send_header("Content-Length", "0"); self.end_headers()
             return
-        if path == "/desk/admin/":
-            return self._send(200, self._admin()) if admin else self._forbidden()
+        if path.startswith("/desk/admin/"):
+            if not admin:
+                return self._forbidden()
+            if handle_admin(self, self.desk, user, "GET", path, self._route()[1]):
+                return
         return self._send(404)
 
     def _home(self, user):
@@ -333,8 +349,14 @@ class Handler(BaseHTTPRequestHandler):
         ident = self._identity(path)
         if ident is None:
             return self._forbidden()
-        user, _ = ident
+        user, admin = ident
         d = self.desk
+        if path.startswith("/desk/admin/"):
+            if not admin:
+                return self._forbidden()
+            if handle_admin(self, d, user, "POST", path, q):
+                return
+            return self._send(404)
         if path == "/desk/claim":
             n = q.get("n", [str(d.cfg.batch_sizes[0])])[0]
             if not n.isdigit() or int(n) not in d.cfg.batch_sizes:
@@ -407,25 +429,6 @@ class Handler(BaseHTTPRequestHandler):
                          progress_html=page.progress(n_done, len(shown)) if shown else "",
                          body=body, open_help=not claims,
                          footer_hint=plat.upload_hint if cfg.fourcat_enabled else None)
-
-    def _admin(self):
-        d = self.desk
-        r = d._docker("ps", "-a", "--format", "{{.Names}}\t{{.Status}}", timeout=10)
-        status = dict(l.split("\t", 1) for l in (r.stdout if r else "").splitlines() if "\t" in l)
-        events = d.events()
-        rows = d.pool()
-        pool_error = d.pool_error
-        taken = d.taken(events)
-        free = sum(1 for r in rows if (r.kind, r.id) not in taken)
-        out = []
-        for u in sorted(d.reg.live()):
-            claims, done, _, _ = d.view(u, events)
-            mine = [e for e in events if e.get("user") == u]
-            last = time.strftime("%H:%M", time.localtime(mine[-1]["t"])) if mine else "—"
-            open_rows = sum(1 for k, _ in claims if k not in done)
-            out.append((u, status.get(f"desk-firefox-{u}", "missing"), status.get(f"desk-mitm-{u}", "missing"),
-                        len(claims), len(claims) - open_rows, open_rows, last))
-        return page.admin(out, free, len(rows), d.platform.default_kind, pool_error, d.cfg.fourcat_enabled)
 
 
 def make_server(desk_root, port, *, reaper=True, exec_timeout=15, sessions=None):

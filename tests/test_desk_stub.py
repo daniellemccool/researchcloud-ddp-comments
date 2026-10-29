@@ -65,7 +65,8 @@ def wait_for(pred, timeout=5.0):
     return True
 
 
-class StubTest(unittest.TestCase):
+class StubHarness(unittest.TestCase):
+    """The shared setup (temp desk root, fake docker/ss/4CAT, served stub, request helpers); no tests of its own."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         t = self.t = self.tmp.name
@@ -151,6 +152,8 @@ class StubTest(unittest.TestCase):
     def users_dir(self, user):
         return os.path.join(self.root, "state", "users", user)
 
+
+class StubTest(StubHarness):
     # identity and the gate
     def test_roles_header_is_logged_once_per_change(self):
         self.mem("GET", "/desk/", roles="src_co_students;src_co_admin")
