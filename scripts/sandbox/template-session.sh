@@ -2,8 +2,9 @@
 # On the box: a disposable Firefox with an empty profile, to build the release template by hand.
 #
 #   scripts/sandbox/template-session.sh up        start it (empty profile, locked proxy policy)
-#   scripts/sandbox/template-session.sh down      stop and remove it; the profile stays
-#   scripts/sandbox/template-session.sh release   stop it, then `desk-template release`
+#   scripts/sandbox/template-session.sh down      stop (60 s grace) and remove it; the profile stays
+#   scripts/sandbox/template-session.sh release   same stop, confirm the container is gone, clear a
+#                                                 stale profile/lock and .parentlock, then `desk-template release`
 #
 # The container reuses the firefox-dmccool service of the rendered compose file (image, proxy
 # policy, network) with the profile directory and policy directory swapped for _template ones.
@@ -62,6 +63,24 @@ generate() {
   } | $SUDO tee "$COMPOSE_FILE" >/dev/null
 }
 
+# Stop the template container with a long grace period so Firefox exits cleanly (docker's default
+# 10 s is not enough and leaves profile/lock and profile/.parentlock behind), confirm it is gone,
+# then clear a lock that is stale by now. desk-template's own lock check stays strict.
+stop_template() {
+  if [ -f "$COMPOSE_FILE" ]; then
+    compose stop -t 60
+    compose down -t 60
+  fi
+  if [ -n "$($SUDO docker ps -a --filter name='^desk-firefox-tpl$' --format '{{.Names}}')" ]; then
+    echo "template-session.sh: desk-firefox-tpl still exists after stop; not touching the profile lock" >&2
+    exit 1
+  fi
+  if $SUDO test -L "$TPL_DIR/profile/lock" || $SUDO test -e "$TPL_DIR/profile/.parentlock"; then
+    $SUDO rm -f "$TPL_DIR/profile/lock" "$TPL_DIR/profile/.parentlock"
+    echo "removed stale Firefox profile lock (lock, .parentlock) from $TPL_DIR/profile"
+  fi
+}
+
 case "${1:-}" in
   up)
     $SUDO docker inspect -f '{{.State.Running}}' "desk-mitm-$BORROW" 2>/dev/null | grep -qx true \
@@ -79,10 +98,10 @@ case "${1:-}" in
     ;;
   down)
     [ -f "$COMPOSE_FILE" ] || { echo "nothing to stop: $COMPOSE_FILE does not exist"; exit 0; }
-    compose down
+    stop_template
     ;;
   release)
-    if [ -f "$COMPOSE_FILE" ]; then compose down; fi
+    stop_template
     $SUDO "$(dirname "$(readlink -f "$0")")/../../bin/desk-template" release --platform "$PLATFORM" --zeeschuimer-version "$ZS_VERSION" "$TPL_DIR" "$OUT_DIR"
     echo "next: desk-sessions init --desk-root $DESK --repo /opt/ddp-comments --platform $PLATFORM \\"
     echo "        --collector-role src_co_students --admin-role src_co_admin --contact Danielle \\"
