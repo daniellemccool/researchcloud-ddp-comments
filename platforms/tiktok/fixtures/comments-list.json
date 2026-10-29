@@ -1,0 +1,149 @@
+{
+ "comments": [
+  {
+   "allow_download_photo": false,
+   "author_pin": false,
+   "aweme_id": "7001",
+   "cid": "1001",
+   "collect_stat": 0,
+   "comment_language": "nl",
+   "comment_post_item_ids": null,
+   "content_type": 1,
+   "create_time": 1789214195,
+   "digg_count": 1,
+   "fold_status": -1,
+   "image_list": null,
+   "is_author_digged": false,
+   "is_comment_translatable": true,
+   "is_high_purchase_intent": false,
+   "label_list": null,
+   "no_show": false,
+   "reply_comment": null,
+   "reply_comment_total": 0,
+   "reply_id": "0",
+   "reply_to_reply_id": "0",
+   "seeking_help_model_type": 0,
+   "share_info": {
+    "acl": {
+     "add_to_story_code": 0,
+     "code": 0,
+     "extra": "{}"
+    },
+    "desc": "share description",
+    "title": "share title",
+    "url": "https://m.tiktok.com/v/7001.html"
+   },
+   "sort_extra_score": {
+    "reply_score": 0.0001,
+    "show_more_score": 1e-05
+   },
+   "sort_tags": "{\"top_list\":1}",
+   "status": 1,
+   "stick_position": 0,
+   "text": "comment one",
+   "text_extra": [],
+   "text_to_image_item_ids": null,
+   "thread_has_more": false,
+   "thread_id": 0,
+   "trans_btn_style": 1,
+   "translated_text_extra": null,
+   "update_reason": "pass",
+   "user": {
+    "account_labels": null,
+    "avatar_thumb": {
+     "uri": "avatar/placeholder",
+     "url_list": [
+      "https://example.invalid/avatar.jpg"
+     ],
+     "url_prefix": null
+    },
+    "custom_verify": "",
+    "enterprise_verify_reason": "",
+    "nickname": "user_a",
+    "predicted_age_group": "-1",
+    "sec_uid": "sec_placeholder_2001",
+    "uid": "2001",
+    "unique_id": "user_a"
+   },
+   "user_buried": false,
+   "user_digged": 0
+  },
+  {
+   "allow_download_photo": false,
+   "author_pin": false,
+   "aweme_id": "7001",
+   "cid": "1002",
+   "collect_stat": 0,
+   "comment_language": "nl",
+   "comment_post_item_ids": null,
+   "content_type": 1,
+   "create_time": 1789214196,
+   "digg_count": 1,
+   "fold_status": -1,
+   "image_list": null,
+   "is_author_digged": true,
+   "is_comment_translatable": true,
+   "is_high_purchase_intent": false,
+   "label_list": [
+    {
+     "text": "Liked by creator",
+     "type": 20
+    }
+   ],
+   "no_show": false,
+   "reply_comment": null,
+   "reply_comment_total": 0,
+   "reply_id": "0",
+   "reply_to_reply_id": "0",
+   "seeking_help_model_type": 0,
+   "share_info": {
+    "acl": {
+     "add_to_story_code": 0,
+     "code": 0,
+     "extra": "{}"
+    },
+    "desc": "share description",
+    "title": "share title",
+    "url": "https://m.tiktok.com/v/7001.html"
+   },
+   "sort_extra_score": {
+    "reply_score": 0.0001,
+    "show_more_score": 1e-05
+   },
+   "sort_tags": "{\"top_list\":1}",
+   "status": 1,
+   "stick_position": 0,
+   "text": "comment two",
+   "text_extra": [],
+   "text_to_image_item_ids": null,
+   "thread_has_more": false,
+   "thread_id": 0,
+   "trans_btn_style": 1,
+   "translated_text_extra": null,
+   "update_reason": "pass",
+   "user": {
+    "account_labels": null,
+    "avatar_thumb": {
+     "uri": "avatar/placeholder",
+     "url_list": [
+      "https://example.invalid/avatar.jpg"
+     ],
+     "url_prefix": null
+    },
+    "custom_verify": "",
+    "enterprise_verify_reason": "",
+    "nickname": "user_b",
+    "predicted_age_group": "-1",
+    "sec_uid": "sec_placeholder_2002",
+    "uid": "2002",
+    "unique_id": "user_b"
+   },
+   "user_buried": false,
+   "user_digged": 0
+  }
+ ],
+ "cursor": 20,
+ "has_more": 1,
+ "total": 2,
+ "status_code": 0
+}

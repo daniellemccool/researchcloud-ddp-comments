@@ -1,0 +1,1 @@
+{"method": "GET", "host": "www.tiktok.com", "path": "/api/comment/list/", "query": {"aweme_id": "7001", "cursor": "0", "count": "20", "msToken": "secret"}}
