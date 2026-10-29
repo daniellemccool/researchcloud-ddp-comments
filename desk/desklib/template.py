@@ -2,13 +2,15 @@
 
 A template carries Zeeschuimer's settings (capture switches, the 4CAT URL) and the platform's consent
 cookie, nothing else. Release templates are public artefacts, so everything is dropped unless allowlisted,
-and `verify_release` checks the result (stdlib only).
+and `verify_release` walks the whole tree to prove it (stdlib only).
 """
 import contextlib
 import datetime
+import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tarfile
@@ -16,13 +18,20 @@ import tempfile
 
 ALLOW_FILES = ("prefs.js", "extensions.json", "extension-preferences.json", "extension-settings.json",
                "cookies.sqlite", "chrome/userContent.css")
-ALLOW_DIRS = ("extensions", "storage/default")   # storage/default keeps only moz-extension+++* entries
-PREF_PREFIXES = ("extensions.", "network.proxy", "toolkit.legacyUserProfileCustomizations", "browser.startup")
+ALLOW_DIRS = ("extensions", "storage/default")   # storage/default keeps only Zeeschuimer's two directories
 XPI_ID = "{677bb78c-7168-4aa5-8e9b-32e9f26c6157}"
+ALLOW_PREFS = frozenset((
+    "extensions.webextensions.uuids",
+    f"extensions.webextensions.ExtensionStorageIDB.migrated.{XPI_ID}",
+    "extensions.databaseSchema", "extensions.lastAppVersion", "extensions.lastPlatformVersion",
+    "extensions.pendingOperations", "toolkit.legacyUserProfileCustomizations.stylesheets"))
 ITEMS_DB = "zeeschuimer-items"
-USER_CONTEXT = "^userContextId="
+STORAGE_LABEL = "storage.local"
+USER_CONTEXT = "^userContextId=4294967295"
 SKIP_COPY = {"cache2", "startupCache", "sessionstore-backups", "crashes", "minidumps", "saved-telemetry-pings",
              "lock", ".parentlock"}
+_UUID_RE = re.compile(r'^user_pref\("extensions\.webextensions\.uuids",\s*"((?:[^"\\]|\\.)*)"\)\s*;', re.M)
+_PREF_RE = re.compile(r'^user_pref\("([^"]+)"\s*,')
 
 
 class TemplateError(Exception):
@@ -40,14 +49,63 @@ def _parents(rels):
 _ANCESTORS = _parents(ALLOW_FILES + ALLOW_DIRS)
 
 
+def zeeschuimer_uuid(profile_dir):
+    """Zeeschuimer's moz-extension uuid from the extensions.webextensions.uuids pref, or None."""
+    try:
+        with open(os.path.join(profile_dir, "prefs.js"), encoding="utf-8", errors="replace") as f:
+            m = _UUID_RE.search(f.read())
+        mapping = json.loads(json.loads('"' + m.group(1) + '"')) if m else None
+    except (OSError, ValueError):
+        return None
+    u = mapping.get(XPI_ID) if isinstance(mapping, dict) else None
+    return u if isinstance(u, str) and re.fullmatch(r"[A-Za-z0-9-]+", u) else None
+
+
+def _ext_dirs(uuid):
+    return (f"moz-extension+++{uuid}", f"moz-extension+++{uuid}{USER_CONTEXT}") if uuid else ()
+
+
 def _remove(p):
     if os.path.isdir(p) and not os.path.islink(p):
-        shutil.rmtree(p, ignore_errors=True)
+        shutil.rmtree(p)
     else:
         os.unlink(p)
 
 
-def _prune(root, rel=""):
+def _rebuild_idb(path):
+    """Rewrite an IndexedDB sqlite file so deleted rows (free pages, WAL) leave no trace."""
+    tmp = path + ".rebuilt"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    con = sqlite3.connect(path)
+    try:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.execute("VACUUM INTO ?", (tmp,))
+    finally:
+        con.close()
+    os.replace(tmp, path)
+    for side in ("-wal", "-shm", "-journal"):
+        if os.path.exists(path + side):
+            os.remove(path + side)
+
+
+def _clean_ext_dir(d):
+    for n in os.listdir(d):
+        if n != "idb":
+            _remove(os.path.join(d, n))
+    idb = os.path.join(d, "idb")
+    if not os.path.isdir(idb):
+        return
+    for n in sorted(os.listdir(idb)):
+        if n.endswith(".sqlite") and os.path.isfile(os.path.join(idb, n)):
+            _rebuild_idb(os.path.join(idb, n))
+    for n in os.listdir(idb):
+        p = os.path.join(idb, n)
+        if not ((n.endswith(".sqlite") and os.path.isfile(p)) or (n.endswith(".files") and os.path.isdir(p))):
+            _remove(p)
+
+
+def _prune(root, uuid, rel=""):
     """Delete everything under root/rel that the allowlist does not name."""
     here = os.path.join(root, rel) if rel else root
     for name in sorted(os.listdir(here)):
@@ -57,31 +115,29 @@ def _prune(root, rel=""):
             os.unlink(p)
         elif r in ALLOW_FILES:
             continue
-        elif r in ALLOW_DIRS:
-            if r == "storage/default":
-                for child in os.listdir(p):
-                    if not child.startswith("moz-extension+++"):
-                        _remove(os.path.join(p, child))
+        elif r == "extensions":
+            for n in os.listdir(p):
+                if not (n.endswith(".xpi") and os.path.isfile(os.path.join(p, n))):
+                    _remove(os.path.join(p, n))
+        elif r == "storage/default":
+            keep = _ext_dirs(uuid)
+            for n in os.listdir(p):
+                if n in keep and os.path.isdir(os.path.join(p, n)):
+                    _clean_ext_dir(os.path.join(p, n))
+                else:
+                    _remove(os.path.join(p, n))
         elif r in _ANCESTORS and os.path.isdir(p):
-            _prune(root, r)
+            _prune(root, uuid, r)
         else:
             _remove(p)
-
-
-def _drop_symlinks(root):
-    for d, dirs, files in os.walk(root):
-        for n in dirs + files:
-            p = os.path.join(d, n)
-            if os.path.islink(p):
-                os.unlink(p)
 
 
 def _filter_prefs(path):
     keep = []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            s = line.strip()
-            if s.startswith(('user_pref("', "user_pref('")) and s[11:].startswith(PREF_PREFIXES):
+            m = _PREF_RE.match(line.strip())
+            if m and m.group(1) in ALLOW_PREFS:
                 keep.append(line if line.endswith("\n") else line + "\n")
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(keep)
@@ -94,7 +150,7 @@ def _filter_cookies(path, keep_cookies):
         doomed = [(i,) for i, h, n in db.execute("SELECT id, host, name FROM moz_cookies") if (h, n) not in keep]
         db.executemany("DELETE FROM moz_cookies WHERE id = ?", doomed)
         db.commit()
-        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        db.execute("PRAGMA journal_mode=DELETE")
         db.execute("VACUUM")
     finally:
         db.close()
@@ -104,15 +160,15 @@ def _filter_cookies(path, keep_cookies):
 
 
 def sanitise(profile_dir: str, keep_cookies: list) -> None:
-    """Work on a COPY: delete everything not allowlisted, keep only keep_cookies, filter prefs.js."""
-    _prune(profile_dir)
-    _drop_symlinks(profile_dir)
-    prefs = os.path.join(profile_dir, "prefs.js")
-    if os.path.isfile(prefs):
-        _filter_prefs(prefs)
+    """Work on a COPY: filter cookies (WAL included), then delete everything not allowlisted."""
     cookies = os.path.join(profile_dir, "cookies.sqlite")
     if os.path.isfile(cookies):
         _filter_cookies(cookies, keep_cookies)
+    uuid = zeeschuimer_uuid(profile_dir)
+    _prune(profile_dir, uuid)
+    prefs = os.path.join(profile_dir, "prefs.js")
+    if os.path.isfile(prefs):
+        _filter_prefs(prefs)
 
 
 @contextlib.contextmanager
@@ -168,19 +224,117 @@ def _has_xpi(profile_dir):
         return False
 
 
-def verify_release(profile_dir: str, platform) -> list:
+def _entries_under(path, rel):
+    """Every file (and empty directory) below path, as paths relative to the tree, with rel as prefix."""
+    out = []
+    for d, dirs, files in os.walk(path):
+        base = os.path.relpath(d, path)
+        pre = rel if base == "." else f"{rel}/{base}"
+        out += [f"{pre}/{n}" for n in files]
+        out += [f"{pre}/{n}" for n in dirs if os.path.islink(os.path.join(d, n))]
+        if not dirs and not files and base != ".":
+            out.append(pre)
+    return out
+
+
+def _tree_problems(profile_dir, uuid, prefix):
+    """'unexpected file: <path>' for every path the allowlist does not cover."""
+    ext = _ext_dirs(uuid)
+    ok_dirs = {"extensions", "chrome", "storage", "storage/default", *(f"storage/default/{e}" for e in ext),
+               *(f"storage/default/{e}/idb" for e in ext)}
+
+    def dir_ok(r):
+        return r in ok_dirs or any(fnmatch.fnmatchcase(r, f"storage/default/{e}/idb/*.files") for e in ext)
+
+    def file_ok(r):
+        if r in ALLOW_FILES or fnmatch.fnmatchcase(r, "extensions/*.xpi"):
+            return True
+        return any(fnmatch.fnmatchcase(r, f"storage/default/{e}/idb/*") for e in ext)  # wal/blobs: own problems
+
+    bad = []
+    for d, dirs, files in os.walk(profile_dir):
+        rd = os.path.relpath(d, profile_dir)
+        rd = "" if rd == "." else rd
+        keep = []
+        for n in dirs:
+            r = f"{rd}/{n}" if rd else n
+            p = os.path.join(d, n)
+            if os.path.islink(p):
+                bad.append(r)
+            elif dir_ok(r):
+                keep.append(n)
+            else:
+                bad += _entries_under(p, r) or [r]
+        dirs[:] = keep
+        for n in files:
+            r = f"{rd}/{n}" if rd else n
+            if os.path.islink(os.path.join(d, n)) or not file_ok(r):
+                bad.append(r)
+    return [f"unexpected file: {prefix}{r}" for r in sorted(bad)]
+
+
+def _idb_problems(profile_dir, uuid):
     problems = []
+    for dname, label in zip(_ext_dirs(uuid), (ITEMS_DB, STORAGE_LABEL)):
+        idb = os.path.join(profile_dir, "storage", "default", dname, "idb")
+        if not os.path.isdir(idb):
+            continue
+        for fn in sorted(os.listdir(idb)):
+            p = os.path.join(idb, fn)
+            if fn.endswith("-wal"):
+                problems.append(f"{label} has a wal file")
+            elif fn.endswith(".files") and os.path.isdir(p) and os.listdir(p):
+                problems.append(f"{label} has blob files")
+            elif fn.endswith(".sqlite") and os.path.isfile(p):
+                try:
+                    with _snapshot(p) as con:
+                        if con.execute("PRAGMA freelist_count").fetchone()[0] != 0:
+                            problems.append(f"{label} has free pages")
+                except sqlite3.Error as e:
+                    problems.append(f"{label} unreadable: {e}")
+    return problems
+
+
+def _pref_problems(profile_dir):
+    try:
+        with open(os.path.join(profile_dir, "prefs.js"), encoding="utf-8", errors="replace") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        m = _PREF_RE.match(ln)
+        if not m or m.group(1) not in ALLOW_PREFS:
+            out.append(f"unexpected pref: {m.group(1) if m else ln[:60]}")
+    return out
+
+
+def verify_release(profile_dir: str, platform, rel_prefix: str = "") -> list:
+    problems = []
+    uuid = zeeschuimer_uuid(profile_dir)
+    if uuid is None:
+        problems.append("uuid not found in prefs")
     if not _has_xpi(profile_dir):
         problems.append("xpi id missing")
     cookies = os.path.join(profile_dir, "cookies.sqlite")
+    keep = {(c["host"], c["name"]) for c in platform.keep_cookies}
+    present = set()
     if os.path.isfile(cookies):
-        keep = {(c["host"], c["name"]) for c in platform.keep_cookies}
-        with _snapshot(cookies) as con:
-            for h, n in con.execute("SELECT host, name FROM moz_cookies ORDER BY host, name"):
-                if (h, n) not in keep:
-                    problems.append(f"cookie outside keep list: {h} {n}")
-    dbs = idb_databases(profile_dir)
-    items = [c for _, name, c in dbs if name == ITEMS_DB]
+        try:
+            with _snapshot(cookies) as con:
+                for h, n in con.execute("SELECT host, name FROM moz_cookies ORDER BY host, name"):
+                    if (h, n) not in keep:
+                        problems.append(f"cookie outside keep list: {h} {n}")
+                    else:
+                        present.add((h, n))
+        except sqlite3.Error as e:
+            problems.append(f"cookies.sqlite unreadable: {e}")
+    if keep and not present:
+        problems.append("no keep cookie present")
+    problems += _pref_problems(profile_dir)
+    items_dir, ctx_dir = (_ext_dirs(uuid) or (None, None))
+    dbs = [(os.path.basename(os.path.dirname(os.path.dirname(p))), n, c) for p, n, c in idb_databases(profile_dir)]
+    items = [c for d, n, c in dbs if d == items_dir and n == ITEMS_DB]
     if not items:
         problems.append(f"{ITEMS_DB} database not found")
     for counts in items:
@@ -188,9 +342,10 @@ def verify_release(profile_dir: str, platform) -> list:
             problems.append(f"{ITEMS_DB} contains {counts['items']} captured items")
         if counts.get("uploads", 0) > 0 or counts.get("nav", 0) > 0:
             problems.append(f"{ITEMS_DB} has upload history")
-    if not any(USER_CONTEXT in path and sum(c.values()) > 0 for path, _, c in dbs):
+    if not any(d == ctx_dir and sum(c.values()) > 0 for d, _, c in dbs):
         problems.append("extension storage.local database not found or empty")
-    return problems
+    problems += _idb_problems(profile_dir, uuid)
+    return problems + _tree_problems(profile_dir, uuid, rel_prefix)
 
 
 def manifest(platform, zeeschuimer_version: str, sha256: str, kind: str) -> dict:
@@ -214,32 +369,55 @@ def _owned(ti):
 
 
 def release(src_config_dir: str, out_dir: str, platform, zeeschuimer_version: str) -> tuple:
-    """Sanitise a copy of a stopped /config, verify it, write the tar and its manifest. Source is untouched."""
+    """Sanitise a copy of a stopped /config's profile, verify it, write the tar and its manifest.
+
+    The tar holds exactly profile/ and an empty xdg/. The source is untouched.
+    """
     src_profile = os.path.join(src_config_dir, "profile")
     if not os.path.isdir(src_profile):
         raise TemplateError(f"{src_config_dir} has no profile/ directory")
     if os.path.islink(os.path.join(src_profile, "lock")):
         raise TemplateError("profile is locked: stop the Firefox container first")
     stem = f"ddp-comments-template-{platform.name}-{zeeschuimer_version}"
+    tar_path = os.path.join(out_dir, stem + ".tar")
+    man_path = os.path.join(out_dir, stem + ".json")
     with tempfile.TemporaryDirectory() as t:
-        work = os.path.join(t, "config")
-        shutil.copytree(src_config_dir, work, symlinks=True,
+        profile = os.path.join(t, "profile")
+        shutil.copytree(src_profile, profile, symlinks=True,
                         ignore=lambda d, names: [n for n in names if n in SKIP_COPY])
-        profile = os.path.join(work, "profile")
         sanitise(profile, platform.keep_cookies)
         problems = verify_release(profile, platform)
         if problems:
             raise TemplateError("template failed verification: " + "; ".join(problems))
         os.makedirs(out_dir, exist_ok=True)
-        tar_path = os.path.join(out_dir, stem + ".tar")
+        for stale in (tar_path, man_path):
+            if os.path.exists(stale):
+                os.remove(stale)
         with tarfile.open(tar_path, "w") as tar:
-            for name in sorted(os.listdir(work)):
-                tar.add(os.path.join(work, name), arcname=name, filter=_owned)
+            xdg = tarfile.TarInfo("xdg")
+            xdg.type, xdg.mode = tarfile.DIRTYPE, 0o755
+            tar.addfile(_owned(xdg))
+            tar.add(profile, arcname="profile", filter=_owned)
     man = manifest(platform, zeeschuimer_version, _sha256(tar_path), "release")
-    with open(os.path.join(out_dir, stem + ".json"), "w", encoding="utf-8") as f:
+    with open(man_path, "w", encoding="utf-8") as f:
         json.dump(man, f, indent=2)
         f.write("\n")
     return tar_path, man
+
+
+def _root_problems(root):
+    bad = []
+    for name in sorted(os.listdir(root)):
+        p = os.path.join(root, name)
+        if name == "profile" and os.path.isdir(p) and not os.path.islink(p):
+            continue
+        if name == "xdg" and os.path.isdir(p) and not os.path.islink(p):
+            bad += _entries_under(p, "xdg")
+        elif os.path.isdir(p) and not os.path.islink(p):
+            bad += _entries_under(p, name) or [name]
+        else:
+            bad.append(name)
+    return [f"unexpected file: {r}" for r in bad]
 
 
 def verify_tar(tar_path: str, platform) -> list:
@@ -252,7 +430,7 @@ def verify_tar(tar_path: str, platform) -> list:
             problems.append("sha256 does not match the manifest")
         if man.get("platform") != platform.name:
             problems.append(f"manifest platform {man.get('platform')!r} is not {platform.name!r}")
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         problems.append(f"manifest {os.path.basename(man_path)} missing or unreadable")
     with tempfile.TemporaryDirectory() as t:
         try:
@@ -260,7 +438,8 @@ def verify_tar(tar_path: str, platform) -> list:
                 tar.extractall(t, filter="data")
         except (tarfile.TarError, OSError) as e:
             return problems + [f"cannot extract tar: {e}"]
+        problems += _root_problems(t)
         profile = os.path.join(t, "profile")
         if not os.path.isdir(profile):
             return problems + ["profile/ missing from tar"]
-        return problems + verify_release(profile, platform)
+        return problems + verify_release(profile, platform, "profile/")

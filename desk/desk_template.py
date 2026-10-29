@@ -8,6 +8,7 @@ Exit 0 on success, 1 on a reported failure, 2 on usage errors.
 """
 import argparse
 import os
+import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,7 +54,7 @@ def main(argv=None) -> int:
         return 2 if e.code else 0
     try:
         return {"release": cmd_release, "verify": cmd_verify}[a.cmd](a)
-    except (template.TemplateError, PlatformError, OSError) as e:
+    except (template.TemplateError, PlatformError, OSError, sqlite3.Error) as e:
         print(f"desk-template: {e}", file=sys.stderr)
         return 1
 
