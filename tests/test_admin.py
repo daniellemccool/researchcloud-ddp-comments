@@ -74,6 +74,13 @@ class AdminTest(base.StubHarness):
         s, body, _ = self.upload(b"id\n9100\n")
         self.assertIn("added 1 of 1; no rejects", body)
 
+    def test_pool_upload_file_level_error_imports_nothing(self):
+        before = [r.id for r in pool.read_rows(self.root, "video")]
+        s, body, _ = self.upload(b'id,note\n9301,ok\n9302,"unfinished\n9303,valid\n')
+        self.assertEqual(s, 200)
+        self.assertIn("nothing added: line 3: a quoted field runs over several lines", body)
+        self.assertEqual([r.id for r in pool.read_rows(self.root, "video")], before)
+
     def test_pool_upload_limits_and_form_errors(self):
         body, ctype = multipart("file", b"x" * (5 * 1024 * 1024 + 1))
         self.assertEqual(self.areq("POST", "/desk/admin/pool", body=body, ctype=ctype)[0], 413)
@@ -372,7 +379,9 @@ class PoolUnitTest(unittest.TestCase):
         rows, rejects = pool.parse_selection(text, self.platform)
         self.assertEqual([(r.id, r.kind, r.bucket, r.note) for r in rows], [("12", "video", "", "")])
         self.assertEqual(rejects, [(4, "id is empty"), (5, "id must match ^[0-9]+$"), (6, "unknown kind 'nope'")])
-        self.assertEqual(pool.parse_selection("name\nx\n", self.platform)[0], [])
+        with self.assertRaises(pool.SelectionError) as cm:
+            pool.parse_selection("name\nx\n", self.platform)
+        self.assertEqual((cm.exception.line, cm.exception.reason), (1, "header has no id column"))
 
     def test_add_rows_replaces_atomically_and_ends_with_newline(self):
         import tempfile

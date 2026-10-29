@@ -208,7 +208,12 @@ def handle_admin(handler, desk, user, method, path, query) -> bool:
             say(status, data)
             return True
         text = data.decode("utf-8", errors="replace")
-        rows, rejects = pool.parse_selection(text, desk.platform)
+        try:
+            rows, rejects = pool.parse_selection(text, desk.platform)
+        except pool.SelectionError as e:
+            desk.set_notice(user, f"nothing added: line {e.line}: {e.reason}")
+            redirect()
+            return True
         try:
             added, _ = pool.add_rows(desk.root, rows, desk.platform)
         except (ValueError, OSError) as e:

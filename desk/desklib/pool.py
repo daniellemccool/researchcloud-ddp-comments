@@ -15,6 +15,15 @@ HEADER = ["id", "kind", "bucket", "note"]
 LEGACY = ["video_id", "bucket", "note"]
 
 
+class SelectionError(ValueError):
+    """The whole selection file is unusable (as opposed to single bad rows, which are rejects)."""
+
+    def __init__(self, line: int, reason: str):
+        super().__init__(f"line {line}: {reason}")
+        self.line = line
+        self.reason = reason
+
+
 @dataclass
 class PoolRow:
     id: str
@@ -84,6 +93,10 @@ def _norm(name: str) -> str:
 def parse_selection(text: str, platform) -> tuple[list[PoolRow], list[tuple[int, str]]]:
     """Parse an uploaded selection into (valid rows, [(line_no, reason)] rejects).
 
+    Row-level problems are rejects. File-level ones raise SelectionError(line, reason) and import
+    nothing: no header or no id column, any csv.Error, a cell holding a newline (an unbalanced quote
+    swallowing the rows after it).
+
     Accepts a BOM, CRLF and a ';' or ',' delimiter. The header names are case-, space- and
     dash-insensitive ("Video ID" == "video_id" == "id"); kind, bucket and note are optional.
     line_no is the physical line in the upload, 1-based.
@@ -96,9 +109,13 @@ def parse_selection(text: str, platform) -> tuple[list[PoolRow], list[tuple[int,
     reader = csv.reader(io.StringIO(text, newline=""), delimiter=delim)
     cols: dict[str, int] | None = None
     rows, rejects = [], []
+    prev = 0
     try:
         for cells in reader:
             line = reader.line_num
+            start, prev = prev + 1, line
+            if any("\n" in c or "\r" in c for c in cells):
+                raise SelectionError(start, "a quoted field runs over several lines (unbalanced quote?)")
             if not any(c.strip() for c in cells):
                 continue
             if cols is None:
@@ -107,7 +124,7 @@ def parse_selection(text: str, platform) -> tuple[list[PoolRow], list[tuple[int,
                     n = _norm(name)
                     cols.setdefault("id" if n in _ID_NAMES else n, i)
                 if "id" not in cols:
-                    return [], [(line, "header has no id column")]
+                    raise SelectionError(line, "header has no id column")
                 continue
 
             def get(name):
@@ -124,7 +141,9 @@ def parse_selection(text: str, platform) -> tuple[list[PoolRow], list[tuple[int,
             else:
                 rows.append(PoolRow(item_id, kind, get("bucket"), get("note")))
     except csv.Error as e:
-        rejects.append((reader.line_num, f"unreadable: {e}"))
+        raise SelectionError(reader.line_num, f"unreadable: {e}") from e
+    if cols is None:
+        raise SelectionError(1, "file is empty (no header)")
     return rows, rejects
 
 

@@ -77,11 +77,31 @@ class PoolAddTest(unittest.TestCase):
         self.assertIn("line 3: unknown kind 'playlist'", r.stdout)
         self.assertEqual([x["id"] for x in self.pool()], ["1"])
 
-    def test_header_without_id_column_is_an_error(self):
-        r = self.add("a.csv", b"foo,bar\n1,2\n")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("no id column", r.stderr)
+    def refused(self, name, data, want):
+        r = self.add(name, data)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(want, r.stderr)
+        self.assertNotIn("added", r.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.desk, "pool.csv")))
+
+    def test_header_without_id_column_is_an_error(self):
+        self.refused("a.csv", b"foo,bar\n1,2\n", "line 1: header has no id column")
+
+    def test_unbalanced_quote_refuses_the_whole_import(self):
+        self.refused("a.csv", b'id,note\n1,ok\n2,"unfinished\n3,valid\n', "line 3: a quoted field")
+
+    def test_csv_error_refuses_the_whole_import(self):
+        self.refused("a.csv", b"id,note\n1,ok\n2," + b"x" * 200000 + b"\n", "line 3: unreadable")
+
+    def test_blank_file_is_an_error(self):
+        self.refused("a.csv", b"\n \n", "line 1: file is empty")
+
+    def test_corrupt_pool_csv_is_an_error_not_a_traceback(self):
+        put(os.path.join(self.desk, "pool.csv"), b"foo,bar\n1,2\n")
+        r = self.add("a.csv", b"id\n1\n")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("cannot update", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
     def test_unreadable_selection_and_uninitialised_desk_are_errors(self):
         r = subprocess.run([sys.executable, ADD, "--desk", self.desk, os.path.join(self.t, "missing.csv")],

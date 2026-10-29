@@ -9,8 +9,9 @@ optional (a missing kind means the platform's default). Excel exports (BOM, CRLF
 New rows go to <desk>/pool.csv in file order, deduped on (kind, id); rows that cannot be used are
 listed with their line number. Claimed rows stay in the pool; the desk log records who claimed what.
 
-Exit 0 when the file parsed (even if some rows were rejected), 1 on an unreadable file, a header
-without an id column or an uninitialised desk.
+Exit 0 when the file parsed (even if some rows were rejected). Exit 1, importing nothing, for a
+file-level error (unreadable, no id column, empty, unbalanced quote), a corrupt pool.csv or an
+uninitialised desk.
 """
 import argparse
 import os
@@ -41,11 +42,16 @@ def main() -> int:
         print(f"pool-add: cannot read {a.selection}: {e}", file=sys.stderr)
         return 1
 
-    rows, rejects = pool.parse_selection(text, platform)
-    if any(reason == "header has no id column" for _, reason in rejects):
-        print(f"pool-add: {a.selection}: header has no id column", file=sys.stderr)
+    try:
+        rows, rejects = pool.parse_selection(text, platform)
+    except pool.SelectionError as e:
+        print(f"line {e.line}: {e.reason}\npool-add: nothing imported from {a.selection}", file=sys.stderr)
         return 1
-    added, total = pool.add_rows(a.desk, rows, platform)
+    try:
+        added, total = pool.add_rows(a.desk, rows, platform)
+    except (OSError, ValueError) as e:
+        print(f"pool-add: cannot update {os.path.join(a.desk, 'pool.csv')}: {e}", file=sys.stderr)
+        return 1
     print(f"added {added} to {os.path.join(a.desk, 'pool.csv')} ({total} in pool)")
     for line, reason in rejects:
         print(f"line {line}: {reason}")
