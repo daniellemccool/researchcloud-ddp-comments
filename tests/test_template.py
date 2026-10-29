@@ -99,7 +99,7 @@ def zs_entry(**over):
 
 
 def make_profile(root, items_rows=0, uploads_rows=0, with_items_db=True, storage_rows=3, sl_uuid="abc",
-                 cookies=COOKIES, wal_only=(), deleted=0, user_version=0, entry=None):
+                 cookies=COOKIES, wal_only=(), deleted=0, user_version=0, entry=None, nav_rows=0, settings_rows=1):
     p = os.path.join(root, "profile")
     for d in ("cache2/entries", "startupCache", "sessionstore-backups", "crashes", "extensions",
               "storage/default/https+++www.tiktok.com", "storage/default/https+++ds.sram.surf.nl", "chrome",
@@ -107,7 +107,8 @@ def make_profile(root, items_rows=0, uploads_rows=0, with_items_db=True, storage
         os.makedirs(os.path.join(root if d in ("log", "downloads", "certs", "xdg/data") else p, d))
     if with_items_db:
         make_idb(os.path.join(p, ZS, "idb", "h1.sqlite"), "zeeschuimer-items", ["items", "uploads", "nav", "settings"],
-                 {"items": items_rows, "uploads": uploads_rows}, deleted, user_version)
+                 {"items": items_rows, "uploads": uploads_rows, "nav": nav_rows, "settings": settings_rows},
+                 deleted, user_version)
     make_idb(os.path.join(p, f"storage/default/moz-extension+++{sl_uuid}^userContextId=4294967295/idb/h2.sqlite"),
              "webExtensions-storage-local", ["storage-local-data"], {"storage-local-data": storage_rows})
     make_idb(os.path.join(p, "storage/default/moz-extension+++other/idb/h3.sqlite"), "zeeschuimer-items",
@@ -223,6 +224,40 @@ class TemplateTest(unittest.TestCase):
         p = make_profile(os.path.join(self.t, "src"), uploads_rows=2)
         tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         self.assertIn("zeeschuimer-items has upload history", tp.verify_release(p, self.plat, "", ZV))
+
+    def test_nav_rows_cleared_and_settings_kept(self):
+        p = make_profile(os.path.join(self.t, "src"), nav_rows=2, settings_rows=1)
+        db = os.path.join(p, ZS, "idb", "h1.sqlite")
+        c = sqlite3.connect(db)  # index rows for the nav store (Firefox keeps them in index_data)
+        c.execute("CREATE TABLE index_data (index_id INTEGER, value BLOB, object_data_key BLOB, object_store_id INTEGER)")
+        c.execute("CREATE TABLE unique_index_data (index_id INTEGER, value BLOB, object_store_id INTEGER, object_data_key BLOB)")
+        for t in ("index_data", "unique_index_data"):
+            c.execute(f"INSERT INTO {t} (index_id, object_store_id) VALUES (1, 3)")
+            c.execute(f"INSERT INTO {t} (index_id, object_store_id) VALUES (2, 4)")
+        c.commit(); c.close()
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        self.assertEqual(tp.verify_release(p, self.plat, "", ZV), [])
+        c = sqlite3.connect(db)
+        q = lambda s: c.execute(s).fetchone()[0]  # noqa: E731
+        self.assertEqual(q("SELECT count(*) FROM object_data WHERE object_store_id = 3"), 0)
+        self.assertEqual(q("SELECT count(*) FROM object_data WHERE object_store_id = 4"), 1)
+        for t in ("index_data", "unique_index_data"):
+            self.assertEqual(q(f"SELECT count(*) FROM {t} WHERE object_store_id = 3"), 0)
+            self.assertEqual(q(f"SELECT count(*) FROM {t} WHERE object_store_id = 4"), 1)
+        c.close()
+
+    def test_nav_history_in_released_profile_is_a_problem(self):
+        p = make_profile(os.path.join(self.t, "src"))
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        c = sqlite3.connect(os.path.join(p, ZS, "idb", "h1.sqlite"))
+        c.execute("INSERT INTO object_data (object_store_id, key, data) VALUES (3, 9, x'00')"); c.commit(); c.close()
+        self.assertIn("zeeschuimer-items has navigation history", tp.verify_release(p, self.plat, "", ZV))
+
+    def test_missing_settings_is_a_problem(self):
+        p = make_profile(os.path.join(self.t, "src"), settings_rows=0)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        self.assertIn("zeeschuimer-items has no settings (modules and 4CAT URL not set)",
+                      tp.verify_release(p, self.plat, "", ZV))
 
     def test_storage_local_must_be_present(self):
         p = make_profile(os.path.join(self.t, "src"), storage_rows=0)

@@ -74,13 +74,24 @@ def _remove(p):
         os.unlink(p)
 
 
-def _rebuild_idb(path):
+def _clear_nav(con):
+    """Delete the rows (and index rows) of the `nav` object store: Zeeschuimer's page-load log."""
+    con.execute("DELETE FROM object_data WHERE object_store_id = (SELECT id FROM object_store WHERE name = 'nav')")
+    for t in ("index_data", "unique_index_data"):
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (t,)).fetchone():
+            con.execute(f"DELETE FROM {t} WHERE object_store_id = (SELECT id FROM object_store WHERE name = 'nav')")
+    con.commit()
+
+
+def _rebuild_idb(path, clear_nav=False):
     """Rewrite an IndexedDB sqlite file so deleted rows (free pages, WAL) leave no trace."""
     tmp = path + ".rebuilt"
     if os.path.exists(tmp):
         os.remove(tmp)
     con = sqlite3.connect(path)
     try:
+        if clear_nav:
+            _clear_nav(con)
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         con.execute("VACUUM INTO ?", (tmp,))
     finally:
@@ -112,7 +123,7 @@ def _clean_ext_dir(d, expected_db):
     for n in sorted(os.listdir(idb)):
         p = os.path.join(idb, n)
         if n.endswith(".sqlite") and os.path.isfile(p) and _idb_name(p) == expected_db:
-            _rebuild_idb(p)
+            _rebuild_idb(p, clear_nav=(expected_db == ITEMS_DB))
             keep.add(n)
         elif n.endswith(".files") and os.path.isdir(p):
             keep.add(n)
@@ -478,8 +489,12 @@ def verify_release(profile_dir: str, platform, rel_prefix: str = "", zeeschuimer
     for counts in items:
         if counts.get("items", 0) > 0:
             problems.append(f"{ITEMS_DB} contains {counts['items']} captured items")
-        if counts.get("uploads", 0) > 0 or counts.get("nav", 0) > 0:
+        if counts.get("uploads", 0) > 0:
             problems.append(f"{ITEMS_DB} has upload history")
+        if counts.get("nav", 0) > 0:
+            problems.append(f"{ITEMS_DB} has navigation history")
+        if counts.get("settings", 0) < 1:
+            problems.append(f"{ITEMS_DB} has no settings (modules and 4CAT URL not set)")
     if not any(d == ctx_dir and sum(c.values()) > 0 for d, _, c in dbs):
         problems.append("extension storage.local database not found or empty")
     problems += _idb_problems(profile_dir, uuid, rel_prefix)

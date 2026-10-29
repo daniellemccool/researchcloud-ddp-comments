@@ -421,7 +421,7 @@ everything else: `prefs.js` (filtered to the extension uuid and policy-set prefs
 `cookies.sqlite`, `chrome/userContent.css`. `places.sqlite`, `formhistory.sqlite`,
 `logins.json`, `key4.db`, session-restore files, caches and crash data are removed.
 It then verifies: xpi id present; no cookie outside `keep_cookies`; the extension's
-item store **found and empty** ("no database found" fails, never passes); writes
+item store **found and empty**, navigation records cleared, settings kept ("no database found" fails, never passes); writes
 `template.json` (`kind: release`, platform, Zeeschuimer version, modules, built-on,
 sha256). The playbook carries the expected sha256 per `(platform, zeeschuimer_version)`
 and refuses a mismatch. Release and workspace templates have different commands,
