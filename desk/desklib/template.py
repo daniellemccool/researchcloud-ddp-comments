@@ -6,7 +6,6 @@ and `verify_release` walks the whole tree to prove it (stdlib only).
 """
 import contextlib
 import datetime
-import fnmatch
 import hashlib
 import json
 import os
@@ -26,6 +25,7 @@ ALLOW_PREFS = frozenset((
     "extensions.databaseSchema", "extensions.lastAppVersion", "extensions.lastPlatformVersion",
     "extensions.pendingOperations", "toolkit.legacyUserProfileCustomizations.stylesheets"))
 ITEMS_DB = "zeeschuimer-items"
+STORAGE_DB = "webExtensions-storage-local"
 STORAGE_LABEL = "storage.local"
 USER_CONTEXT = "^userContextId=4294967295"
 SKIP_COPY = {"cache2", "startupCache", "sessionstore-backups", "crashes", "minidumps", "saved-telemetry-pings",
@@ -89,20 +89,34 @@ def _rebuild_idb(path):
             os.remove(path + side)
 
 
-def _clean_ext_dir(d):
+def _idb_name(path):
+    """The IndexedDB database name recorded in a sqlite file, or None if it is not one."""
+    try:
+        with _snapshot(path) as con:
+            row = con.execute("SELECT name FROM database").fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def _clean_ext_dir(d, expected_db):
     for n in os.listdir(d):
         if n != "idb":
             _remove(os.path.join(d, n))
     idb = os.path.join(d, "idb")
     if not os.path.isdir(idb):
         return
+    keep = set()
     for n in sorted(os.listdir(idb)):
-        if n.endswith(".sqlite") and os.path.isfile(os.path.join(idb, n)):
-            _rebuild_idb(os.path.join(idb, n))
-    for n in os.listdir(idb):
         p = os.path.join(idb, n)
-        if not ((n.endswith(".sqlite") and os.path.isfile(p)) or (n.endswith(".files") and os.path.isdir(p))):
-            _remove(p)
+        if n.endswith(".sqlite") and os.path.isfile(p) and _idb_name(p) == expected_db:
+            _rebuild_idb(p)
+            keep.add(n)
+        elif n.endswith(".files") and os.path.isdir(p):
+            keep.add(n)
+    for n in os.listdir(idb):
+        if n not in keep:
+            _remove(os.path.join(idb, n))
 
 
 def _prune(root, uuid, rel=""):
@@ -122,8 +136,8 @@ def _prune(root, uuid, rel=""):
         elif r == "storage/default":
             keep = _ext_dirs(uuid)
             for n in os.listdir(p):
-                if n in keep and os.path.isdir(os.path.join(p, n)):
-                    _clean_ext_dir(os.path.join(p, n))
+                if n in keep and os.path.isdir(os.path.join(p, n)) and not os.path.islink(os.path.join(p, n)):
+                    _clean_ext_dir(os.path.join(p, n), ITEMS_DB if n == keep[0] else STORAGE_DB)
                 else:
                     _remove(os.path.join(p, n))
         elif r in _ANCESTORS and os.path.isdir(p):
@@ -159,8 +173,20 @@ def _filter_cookies(path, keep_cookies):
             os.remove(path + side)
 
 
+def _unlink_symlinks(root):
+    """Remove every symlink (file or directory) so nothing below can write through to a target."""
+    for d, dirs, files in os.walk(root, followlinks=False):
+        for n in list(dirs) + files:
+            p = os.path.join(d, n)
+            if os.path.islink(p):
+                os.unlink(p)
+                if n in dirs:
+                    dirs.remove(n)
+
+
 def sanitise(profile_dir: str, keep_cookies: list) -> None:
     """Work on a COPY: filter cookies (WAL included), then delete everything not allowlisted."""
+    _unlink_symlinks(profile_dir)
     cookies = os.path.join(profile_dir, "cookies.sqlite")
     if os.path.isfile(cookies):
         _filter_cookies(cookies, keep_cookies)
@@ -243,13 +269,18 @@ def _tree_problems(profile_dir, uuid, prefix):
     ok_dirs = {"extensions", "chrome", "storage", "storage/default", *(f"storage/default/{e}" for e in ext),
                *(f"storage/default/{e}/idb" for e in ext)}
 
+    idb_dir = "|".join(re.escape(f"storage/default/{e}/idb") for e in ext) or "(?!)"
+    files_dir_re = re.compile(rf"(?:{idb_dir})/[^/]+\.files")
+    idb_file_re = re.compile(rf"(?:{idb_dir})/[^/]+\.sqlite(?:-wal)?")        # wal: its own problem
+    blob_re = re.compile(rf"(?:{idb_dir})/[^/]+\.files/[^/]+")                 # blobs: their own problem
+
     def dir_ok(r):
-        return r in ok_dirs or any(fnmatch.fnmatchcase(r, f"storage/default/{e}/idb/*.files") for e in ext)
+        return r in ok_dirs or bool(files_dir_re.fullmatch(r))
 
     def file_ok(r):
-        if r in ALLOW_FILES or fnmatch.fnmatchcase(r, "extensions/*.xpi"):
+        if r in ALLOW_FILES or (r.startswith("extensions/") and r.count("/") == 1 and r.endswith(".xpi")):
             return True
-        return any(fnmatch.fnmatchcase(r, f"storage/default/{e}/idb/*") for e in ext)  # wal/blobs: own problems
+        return bool(idb_file_re.fullmatch(r) or blob_re.fullmatch(r))
 
     bad = []
     for d, dirs, files in os.walk(profile_dir):
@@ -273,9 +304,9 @@ def _tree_problems(profile_dir, uuid, prefix):
     return [f"unexpected file: {prefix}{r}" for r in sorted(bad)]
 
 
-def _idb_problems(profile_dir, uuid):
+def _idb_problems(profile_dir, uuid, prefix=""):
     problems = []
-    for dname, label in zip(_ext_dirs(uuid), (ITEMS_DB, STORAGE_LABEL)):
+    for dname, label, expected in zip(_ext_dirs(uuid), (ITEMS_DB, STORAGE_LABEL), (ITEMS_DB, STORAGE_DB)):
         idb = os.path.join(profile_dir, "storage", "default", dname, "idb")
         if not os.path.isdir(idb):
             continue
@@ -286,6 +317,9 @@ def _idb_problems(profile_dir, uuid):
             elif fn.endswith(".files") and os.path.isdir(p) and os.listdir(p):
                 problems.append(f"{label} has blob files")
             elif fn.endswith(".sqlite") and os.path.isfile(p):
+                if _idb_name(p) != expected:
+                    problems.append(f"unexpected file: {prefix}storage/default/{dname}/idb/{fn}")
+                    continue
                 try:
                     with _snapshot(p) as con:
                         if con.execute("PRAGMA freelist_count").fetchone()[0] != 0:
@@ -344,7 +378,7 @@ def verify_release(profile_dir: str, platform, rel_prefix: str = "") -> list:
             problems.append(f"{ITEMS_DB} has upload history")
     if not any(d == ctx_dir and sum(c.values()) > 0 for d, _, c in dbs):
         problems.append("extension storage.local database not found or empty")
-    problems += _idb_problems(profile_dir, uuid)
+    problems += _idb_problems(profile_dir, uuid, rel_prefix)
     return problems + _tree_problems(profile_dir, uuid, rel_prefix)
 
 

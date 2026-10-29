@@ -287,8 +287,44 @@ class TemplateTest(unittest.TestCase):
         for leak in ("log", "downloads", "certs", ".vncpass_clear", "xdg/data"):
             self.assertFalse(any(n == leak or n.startswith(leak + "/") for n in names), leak)
 
-    def _retar(self, tar_path, extra):
+    def test_symlinked_cookies_not_written_through(self):
+        out = os.path.join(self.t, "outside"); os.makedirs(out)
+        p = make_profile(os.path.join(self.t, "src"))
+        os.replace(os.path.join(p, "cookies.sqlite"), os.path.join(out, "cookies.sqlite"))
+        os.symlink(os.path.join(out, "cookies.sqlite"), os.path.join(p, "cookies.sqlite"))
+        with open(os.path.join(out, "cookies.sqlite"), "rb") as fh: before = fh.read()
+        tp.sanitise(p, self.plat.keep_cookies)
+        with open(os.path.join(out, "cookies.sqlite"), "rb") as fh: self.assertEqual(fh.read(), before)
+        self.assertFalse(os.path.lexists(os.path.join(p, "cookies.sqlite")))
+        self.assertIn("no keep cookie present", tp.verify_release(p, self.plat))
+
+    def test_symlinked_extension_dir_not_followed(self):
+        out = os.path.join(self.t, "outside"); os.makedirs(out)
+        p = make_profile(os.path.join(self.t, "src"))
+        os.replace(os.path.join(p, ZS), os.path.join(out, "ext"))
+        os.symlink(os.path.join(out, "ext"), os.path.join(p, ZS))
+        before = {}
+        for f in tree(out):
+            with open(os.path.join(out, f), "rb") as fh: before[f] = fh.read()
+        tp.sanitise(p, self.plat.keep_cookies)
+        self.assertEqual(tree(out), sorted(before))
+        for f, data in before.items():
+            with open(os.path.join(out, f), "rb") as fh: self.assertEqual(fh.read(), data)
+        self.assertFalse(os.path.lexists(os.path.join(p, ZS)))
+        self.assertIn("zeeschuimer-items database not found", tp.verify_release(p, self.plat))
+
+    def test_verify_rejects_stray_idb_entries(self):
+        _, (tar_path, _) = self.release()
+        self._retar(tar_path, [f"profile/{ZS}/idb/private.txt", f"profile/{ZS}/idb/sub/y"],
+                    hook=lambda x: make_idb(os.path.join(x, "profile", ZS, "idb", "h9.sqlite"), "other-db",
+                                            ["items"], {}))
+        got = tp.verify_tar(tar_path, self.plat)
+        for rel in ("private.txt", "sub/y", "h9.sqlite"):
+            self.assertIn(f"unexpected file: profile/{ZS}/idb/{rel}", got)
+
+    def _retar(self, tar_path, extra, hook=None):
         x = self.extract(tar_path, "tamper")
+        if hook: hook(x)
         for rel in extra:
             os.makedirs(os.path.dirname(os.path.join(x, rel)), exist_ok=True)
             with open(os.path.join(x, rel), "w") as fh: fh.write("x")
