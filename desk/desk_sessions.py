@@ -99,7 +99,9 @@ def cmd_up(s, a) -> int:
     skipped = s.up(a.user)
     for u, why in skipped.items():
         print(f"{u}: skipped: {why}", file=sys.stderr)
-    return 1 if a.user and skipped else 0
+    for u, why in s.failed.items():
+        print(f"{u}: start failed: {why}", file=sys.stderr)
+    return 1 if s.failed or (a.user and skipped) else 0
 
 
 def cmd_status(s, a) -> int:

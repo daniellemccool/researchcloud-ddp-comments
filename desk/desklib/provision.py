@@ -193,18 +193,22 @@ class Provisioner:
                     raise RuntimeError(f"could not stop {c}; retire aborted")
                 if state != "stopped":
                     raise RuntimeError(f"could not confirm {c} stopped; retire aborted")
-            # Move the state before freeing the row: a crash in between must not
-            # leave "ready" state for a user without a live row.
-            users_dir = self._dir("users", user)
-            src = os.path.join(users_dir, "provision.json")
-            if os.path.exists(src):
-                dest = self._dir("retired", user)
-                os.makedirs(dest, exist_ok=True)
-                os.replace(src, os.path.join(dest, "provision.json"))
-            shutil.rmtree(users_dir, ignore_errors=True)
             with flocked(render_lock(self.cfg.desk_root)):
+                # The CO fetch comes first: a NoMembers (or any fetch error) must leave the row
+                # live and the state in place. Fetched under the render lock, so an older snapshot
+                # never overwrites a newer map; the live count still includes this user.
+                members = self._members()
+                # Move the state before freeing the row: a crash in between must not
+                # leave "ready" state for a user without a live row.
+                users_dir = self._dir("users", user)
+                src = os.path.join(users_dir, "provision.json")
+                if os.path.exists(src):
+                    dest = self._dir("retired", user)
+                    os.makedirs(dest, exist_ok=True)
+                    os.replace(src, os.path.join(dest, "provision.json"))
+                shutil.rmtree(users_dir, ignore_errors=True)
                 self.reg.retire(user)
-                self.renderer(self.cfg, self.reg, self._members())
+                self.renderer(self.cfg, self.reg, members)
                 self.nginx(self.cfg)
 
     # --- steps -----------------------------------------------------------

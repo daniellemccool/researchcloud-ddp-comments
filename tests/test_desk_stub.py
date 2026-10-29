@@ -148,7 +148,7 @@ class StubHarness(unittest.TestCase):
         return [c for c in self.docker_calls() if " up -d --no-deps " in c]
 
     def start_call(self, user):
-        return f"compose -f {self.root}/docker-compose.yml up -d --no-deps mitm-{user} firefox-{user}"
+        return f"compose -f {self.root}/docker-compose.yml up -d --no-deps --pull never mitm-{user} firefox-{user}"
 
     def log(self):
         p = os.path.join(self.root, "state", "desk-log.ndjson")
@@ -622,6 +622,29 @@ class StubTest(StubHarness):
         self.assertTrue(os.path.exists(os.path.join(self.root, "firefox", "policies-alice.json")))   # kept
         put(self.mode, "")
         self.assertIn("'/desk/vnc/'", self.mem("GET", "/desk/")[1])   # the next visit starts it
+
+    def test_start_without_the_policy_file_is_start_failed(self):
+        os.remove(os.path.join(self.root, "firefox", "policy", "alice", "policies.json"))
+        s, body = self.mem("GET", "/desk/")
+        self.assertIn("Your browser could not be started", body)
+        self.assertEqual(self.starts(), [])                      # compose was never run
+        self.assertFalse(self.running("desk-firefox-alice"))
+        self.assertNotIn("alice", self.desk_obj().last_seen)
+
+    def test_legacy_policy_kept_while_compose_file_references_it(self):
+        put(os.path.join(self.root, "firefox", "policies-alice.json"), "{}")
+        compose = os.path.join(self.root, "docker-compose.yml")
+        put(compose, slurp(compose) + "\n# - ./firefox/policies-alice.json:/x\n")   # a pre-R29 layout
+        self.assertIn("'/desk/vnc/'", self.mem("GET", "/desk/")[1])
+        self.assertTrue(os.path.exists(os.path.join(self.root, "firefox", "policies-alice.json")))
+
+    def test_failing_legacy_drop_still_starts(self):
+        from unittest import mock
+        put(os.path.join(self.root, "firefox", "policies-alice.json"), "{}")
+        with mock.patch("desklib.sessions.drop_legacy_policy", side_effect=PermissionError("nope")):
+            self.assertIn("'/desk/vnc/'", self.mem("GET", "/desk/")[1])
+        self.assertTrue(self.running("desk-firefox-alice"))
+        self.assertIn("alice", self.desk_obj().last_seen)
 
     def hold_alice_lock_during_visit(self, while_held=lambda: None):
         """GET /desk/ for alice while this thread holds her user lock; returns (calls while held, response)."""

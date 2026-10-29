@@ -376,6 +376,19 @@ class ProvisionTests(unittest.TestCase):
         self.prov.run = odd
         self.assert_retire_aborts("could not confirm desk-firefox-alice stopped; retire aborted")
 
+    def test_retire_with_a_failing_members_fetch_leaves_the_row_and_state(self):
+        """The CO fetch comes before the state move: NoMembers must not strand a freed row."""
+        self.assertTrue(self.prov.advance("alice").ready())
+        self.cfg.gate_mode = "api"
+        prov = pv.Provisioner(self.cfg, self.reg, self.fc, lambda u: False, members=lambda: {},
+                              run=self.run_docker, nginx=self.nginx_calls.append)
+        with self.assertRaisesRegex(RuntimeError, "CO API returned no members"):
+            prov.retire("alice")
+        self.assertIn("alice", self.reg.live())
+        self.assertTrue(os.path.exists(os.path.join(self.root, "state", "users", "alice", "provision.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "state", "retired", "alice")))
+        self.assertTrue(prov.state("alice").ready())
+
     def test_retire_of_a_never_provisioned_user_completes(self):
         with locks.flocked(locks.render_lock(self.root)):
             self.reg.allocate("ghost")                     # a row, but no containers were ever made

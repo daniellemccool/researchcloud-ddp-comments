@@ -133,6 +133,9 @@ class SessionsTests(unittest.TestCase):
         for u in ("alice", "bob", "carol"):
             put(os.path.join(self.root, "state", "users", u, "provision.json"),
                 json.dumps({"steps": {"fourcat_account": "done"}}))
+        for u in ("alice", "bob", "carol"):   # what render writes; start_pair refuses to start without it
+            put(os.path.join(self.root, "firefox", "policy", u, "policies.json"), "{}")
+        put(os.path.join(self.root, "docker-compose.yml"), "services: {}\n")
         self.fc = FakeFC({"alice": True, "bob": False, "carol": False})
         self.members = {"alice": False, "bob": True}  # carol left; alice demoted; bob promoted
         self.prov = pv.Provisioner(self.cfg, self.reg, self.fc, is_admin=lambda u: False,
@@ -165,6 +168,15 @@ class SessionsTests(unittest.TestCase):
 
     def provision_json(self, user, where="users"):
         return os.path.join(self.root, "state", where, user, "provision.json")
+
+    def test_retire_with_a_failing_members_fetch_keeps_the_row_and_state(self):
+        self.members = {}   # NoMembers while sessions exist
+        err = self.s.retire("carol")
+        self.assertIn("CO API returned no members", err)
+        self.assertIn("carol", self.reg.live())
+        self.assertTrue(os.path.exists(self.provision_json("carol")))
+        self.assertFalse(os.path.exists(self.provision_json("carol", "retired")))
+        self.assertEqual(self.rendered, [])
 
     def test_retire_aborts_when_a_container_keeps_running(self):
         for c in ("desk-firefox-carol", "desk-mitm-carol"):
@@ -218,7 +230,7 @@ class SessionsTests(unittest.TestCase):
     def test_up_is_compose_up_no_deps_on_the_pair(self):
         self.assertEqual(self.s.up("bob"), {})
         self.assertEqual(self.compose_calls(),
-                         [f"compose -f {self.root}/docker-compose.yml up -d --no-deps mitm-bob firefox-bob"])
+                         [f"compose -f {self.root}/docker-compose.yml up -d --no-deps --pull never mitm-bob firefox-bob"])
 
     def test_up_skips_a_user_retired_meanwhile(self):
         with flocked(render_lock(self.root)):
@@ -238,8 +250,11 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(self.s.up(), {"bob": "no live session (retired, or never added)"})
         self.assertEqual([c.rsplit(" ", 1)[1] for c in self.compose_calls()], ["firefox-alice", "firefox-carol"])
 
+    def legacy(self, u):
+        return os.path.join(self.root, "firefox", f"policies-{u}.json")
+
     def test_legacy_policy_survives_render_and_goes_after_up(self):
-        legacy = {u: os.path.join(self.root, "firefox", f"policies-{u}.json") for u in ("alice", "bob")}
+        legacy = {u: self.legacy(u) for u in ("alice", "bob")}
         for p in legacy.values():
             put(p, "{}")
         self.s.render()
@@ -249,15 +264,74 @@ class SessionsTests(unittest.TestCase):
         self.assertTrue(os.path.exists(legacy["bob"]))                     # bob's not yet
         self.assertTrue(os.path.isfile(os.path.join(self.root, "firefox", "policy", "alice", "policies.json")))
 
+    def test_legacy_policy_survives_while_the_compose_file_still_mounts_it(self):
+        put(self.legacy("alice"), "{}")
+        put(os.path.join(self.root, "docker-compose.yml"),
+            "services:\n  firefox-alice:\n    volumes:\n      - ./firefox/policies-alice.json:/etc/x:ro\n")
+        self.s.up("alice")
+        self.assertEqual(len(self.compose_calls()), 1)                      # the start itself went ahead
+        self.assertTrue(os.path.exists(self.legacy("alice")))               # but the old bind source stays
+        put(os.path.join(self.root, "docker-compose.yml"), "services: {}\n")   # re-rendered, no reference
+        self.s.up("alice")
+        self.assertFalse(os.path.exists(self.legacy("alice")))
+
+    def test_start_refuses_without_the_policy_file(self):
+        put(self.legacy("alice"), "{}")
+        policy = os.path.join(self.root, "firefox", "policy", "alice", "policies.json")
+        for make in (lambda: None, lambda: os.mkdir(policy)):               # absent, then a directory
+            os.remove(policy) if os.path.isfile(policy) else None
+            make()
+            with self.assertRaises(OSError):
+                self.s.start_pair("alice")
+            self.assertEqual(self.compose_calls(), [])                      # never reached compose
+            self.assertTrue(os.path.exists(self.legacy("alice")))
+            if os.path.isdir(policy):
+                os.rmdir(policy)
+
     def test_failed_up_keeps_the_legacy_policy(self):
-        put(os.path.join(self.root, "firefox", "policies-alice.json"), "{}")
+        put(self.legacy("alice"), "{}")
 
         def fail(cmd, **kw):
             raise subprocess.CalledProcessError(1, cmd)
         self.s.run = fail
         with self.assertRaises(subprocess.CalledProcessError):
-            self.s.up("alice")
-        self.assertTrue(os.path.exists(os.path.join(self.root, "firefox", "policies-alice.json")))
+            self.s.start_pair("alice")
+        self.assertTrue(os.path.exists(self.legacy("alice")))
+
+    def test_a_failing_legacy_drop_does_not_fail_the_start(self):
+        from unittest import mock
+        err = io.StringIO()
+        with mock.patch("desklib.sessions.drop_legacy_policy", side_effect=PermissionError("nope")), \
+                mock.patch("sys.stderr", err):
+            self.assertEqual(self.s.up("alice"), {})
+        self.assertEqual(len(self.compose_calls()), 1)
+        self.assertIn("alice", err.getvalue())
+        self.assertIn("nope", err.getvalue())
+
+    def test_up_continues_past_a_failing_user_and_reports_it(self):
+        from unittest import mock
+        import desk_sessions
+        real = self.s.run
+
+        def run(cmd, **kw):
+            if "compose" in cmd and cmd[-1] == "firefox-alice":
+                raise subprocess.CalledProcessError(3, cmd)
+            return real(cmd, **kw)
+        self.s.run = run
+        os.remove(os.path.join(self.root, "firefox", "policy", "bob", "policies.json"))   # a second kind of failure
+        self.assertEqual(self.s.up(), {})                                   # nobody skipped
+        self.assertEqual(sorted(self.s.failed), ["alice", "bob"])
+        self.assertIn("status 3", self.s.failed["alice"])
+        self.assertEqual([c.rsplit(" ", 1)[1] for c in self.compose_calls()], ["firefox-carol"])
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            rc = desk_sessions.cmd_up(self.s, mock.Mock(user=None))
+        self.assertEqual(rc, 1)
+        self.assertIn("alice", err.getvalue())
+        self.assertIn("bob", err.getvalue())
+        self.s.run = real
+        put(os.path.join(self.root, "firefox", "policy", "bob", "policies.json"), "{}")
+        self.assertEqual(desk_sessions.cmd_up(self.s, mock.Mock(user=None)), 0)   # all well: exit 0
 
     def test_stop_reports_success(self):
         self.assertTrue(self.s.stop("alice"))

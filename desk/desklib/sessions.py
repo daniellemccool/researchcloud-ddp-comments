@@ -10,6 +10,7 @@ takes no lock: its callers (`up`, the stub's ensure_started) hold the user's loc
 """
 import os
 import subprocess
+import sys
 from typing import Callable
 
 from .coapi import guarded_members
@@ -48,29 +49,56 @@ class Sessions:
         return written
 
     def start_pair(self, user, timeout: float | None = None) -> None:
-        """`docker compose up -d --no-deps mitm-<u> firefox-<u>` (R33), then drop the user's legacy
-        single-file policy, which no container mounts once the pair has been through Compose.
+        """`docker compose up -d --no-deps --pull never mitm-<u> firefox-<u>` (R33), then drop the
+        user's legacy single-file policy once nothing can mount it any more.
 
         Compose recreates a container whose rendered spec drifted (a mount added, an image bumped)
-        and only starts an unchanged one, which `docker start` never does. Takes no lock: the
-        caller holds the user's lock. Raises CalledProcessError or TimeoutExpired on failure."""
-        self.run(["docker", "compose", "-f", os.path.join(self.cfg.desk_root, "docker-compose.yml"),
-                  "up", "-d", "--no-deps", f"mitm-{user}", f"firefox-{user}"],
+        and only starts an unchanged one, which `docker start` never does. `--pull never`: images
+        are pulled at install, a start must not reach the registry.
+
+        Refuses (OSError) unless firefox/policy/<u>/policies.json is a regular file: a Compose file
+        that mounts the directory would hand Firefox an empty one, i.e. no locked proxy policy.
+        The legacy firefox/policies-<u>.json goes only when the Compose file just used no longer
+        references it (a pre-R29 file bind-mounts it, and the next start would get an empty source);
+        a failure dropping it is logged and harmless. Takes no lock: the caller holds the user's
+        lock. Raises CalledProcessError or TimeoutExpired on a failed `up`."""
+        root = self.cfg.desk_root
+        policy = os.path.join(root, "firefox", "policy", user, "policies.json")
+        if os.path.islink(policy) or not os.path.isfile(policy):
+            raise FileNotFoundError(f"{policy} is not a regular file; render first, not starting {user}")
+        compose = os.path.join(root, "docker-compose.yml")
+        self.run(["docker", "compose", "-f", compose, "up", "-d", "--no-deps", "--pull", "never",
+                  f"mitm-{user}", f"firefox-{user}"],
                  check=True, capture_output=True, timeout=self.prov.cmd_timeout if timeout is None else timeout)
-        drop_legacy_policy(self.cfg.desk_root, user)
+        try:
+            with open(compose) as f:
+                still_mounted = f"policies-{user}.json" in f.read()
+            if not still_mounted:
+                drop_legacy_policy(root, user)
+        except OSError as e:
+            print(f"desk: could not drop the legacy policy of {user}: {e}", file=sys.stderr)
 
     def up(self, user=None) -> dict[str, str]:
         """start_pair under each user's lock, so it never races a retire or a provisioning run.
 
         The row is checked again once the lock is held: a user retired while we waited is skipped
-        (never restarted) and reported in the returned {user: reason}; the others still go up."""
+        (never restarted) and reported in the returned {user: reason}. A user whose start fails
+        lands in self.failed ({user: why}) and the others still go up."""
         skipped = {}
+        self.failed = {}
         for u in ([user] if user else sorted(self.reg.live())):
             with flocked(user_lock(self.cfg.desk_root, u)):
                 if u not in self.reg.live():
                     skipped[u] = "no live session (retired, or never added)"
                     continue
-                self.start_pair(u)
+                try:
+                    self.start_pair(u)
+                except subprocess.CalledProcessError as e:
+                    self.failed[u] = f"docker exited with status {e.returncode}"
+                except subprocess.TimeoutExpired:
+                    self.failed[u] = "docker timed out"
+                except OSError as e:
+                    self.failed[u] = str(e) or type(e).__name__
         return skipped
 
     def stop(self, user) -> bool:
