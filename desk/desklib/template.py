@@ -15,8 +15,7 @@ import sqlite3
 import tarfile
 import tempfile
 
-ALLOW_FILES = ("prefs.js", "extensions.json", "extension-preferences.json", "extension-settings.json",
-               "cookies.sqlite", "chrome/userContent.css")
+ALLOW_FILES = ("prefs.js", "extensions.json", "cookies.sqlite", "chrome/userContent.css")
 ALLOW_DIRS = ("extensions", "storage/default")   # storage/default keeps only Zeeschuimer's two directories
 XPI_ID = "{677bb78c-7168-4aa5-8e9b-32e9f26c6157}"
 ALLOW_PREFS = frozenset((
@@ -25,7 +24,8 @@ ALLOW_PREFS = frozenset((
     "extensions.databaseSchema", "extensions.lastAppVersion", "extensions.lastPlatformVersion",
     "extensions.pendingOperations", "toolkit.legacyUserProfileCustomizations.stylesheets"))
 XPI_REL = f"extensions/{XPI_ID}.xpi"
-JSON_FILES = ("extensions.json", "extension-preferences.json", "extension-settings.json")
+XPI_CONTAINER_PATH = f"/config/profile/{XPI_REL}"
+SYNC_GUID = "{00000000-0000-4000-8000-000000000000}"
 ITEMS_DB = "zeeschuimer-items"
 STORAGE_DB = "webExtensions-storage-local"
 STORAGE_LABEL = "storage.local"
@@ -164,89 +164,96 @@ def _load_json(path):
         return json.load(f)
 
 
-def _filter_json(name, data):
-    """The part of an extension metadata file that belongs to Zeeschuimer; anything unclear is dropped."""
+def _policy_url(version):
+    return f"https://github.com/digitalmethodsinitiative/zeeschuimer/releases/download/v{version}/zeeschuimer-{version}.xpi"
+
+
+def _filter_extensions(data, zeeschuimer_version, built_on):
+    """Only Zeeschuimer's addon entry, with installation-specific fields normalised."""
     if not isinstance(data, dict):
-        return {}
-    if name == "extensions.json":
-        addons = data.get("addons")
-        out = {k: v for k, v in data.items() if k == "schemaVersion"}
-        out["addons"] = [a for a in addons if isinstance(a, dict) and a.get("id") == XPI_ID] \
-            if isinstance(addons, list) else []
-        return out
-    out = {}
-    settings = name == "extension-settings.json"
-    for k, v in data.items():
-        if k == XPI_ID:
-            out[k] = v
-        elif settings and isinstance(v, dict):
-            out[k] = {kk: vv for kk, vv in v.items() if kk == XPI_ID}      # category -> {addon id: data}
-        elif settings and isinstance(v, list):
-            out[k] = [e for e in v if isinstance(e, dict) and e.get("id") == XPI_ID]
-        elif settings:
-            out[k] = v                                                  # scalar, e.g. version
+        return {"addons": []}
+    addons = data.get("addons")
+    out = {k: v for k, v in data.items() if k == "schemaVersion"}
+    entries = [a for a in addons if isinstance(a, dict) and a.get("id") == XPI_ID] if isinstance(addons, list) else []
+    ms = _mtime(built_on) * 1000
+    norm = []
+    for a in entries:
+        e = {k: v for k, v in a.items() if "elemetry" not in k.lower()}
+        e["path"] = XPI_CONTAINER_PATH
+        e["syncGUID"] = SYNC_GUID
+        e["installDate"] = e["updateDate"] = ms
+        if e.get("sourceURI") != _policy_url(zeeschuimer_version):
+            e.pop("sourceURI", None)
+        if "rootURI" in e:
+            e["rootURI"] = f"jar:file://{XPI_CONTAINER_PATH}!/"
+        norm.append(e)
+    out["addons"] = norm
     return out
 
 
-def _foreign_ids(name, data):
-    """Addon ids other than Zeeschuimer's that a metadata file still mentions."""
-    if not isinstance(data, dict):
-        return ["<not an object>"]
-    if name == "extensions.json":
-        addons = data.get("addons")
-        if not isinstance(addons, list):
-            return ["<addons>"]
-        return [str(a.get("id")) if isinstance(a, dict) else "<entry>" for a in addons
-                if not (isinstance(a, dict) and a.get("id") == XPI_ID)]
-    settings = name == "extension-settings.json"
+def _filter_json_files(profile_dir, zeeschuimer_version, built_on):
+    path = os.path.join(profile_dir, "extensions.json")
+    if not os.path.isfile(path):
+        return
+    try:
+        data = _load_json(path)
+    except (OSError, ValueError) as e:
+        raise TemplateError(f"extensions.json is not valid JSON: {e}")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(_filter_extensions(data, zeeschuimer_version, built_on), f, separators=(",", ":"))
+
+
+def _entry_problems(e, zeeschuimer_version):
     out = []
-    for k, v in data.items():
-        if k == XPI_ID:
-            continue
-        if settings and isinstance(v, dict):
-            out += [kk for kk in v if kk != XPI_ID]
-        elif settings and isinstance(v, list):
-            out += [str(e.get("id")) if isinstance(e, dict) else "<entry>" for e in v
-                    if not (isinstance(e, dict) and e.get("id") == XPI_ID)]
-        elif not settings:
-            out.append(k)
+
+    def bad(field):
+        msg = f"extensions.json entry not normalised: {field}"
+        if msg not in out:
+            out.append(msg)
+    if e.get("path") != XPI_CONTAINER_PATH:
+        bad("path")
+    if e.get("syncGUID") != SYNC_GUID:
+        bad("syncGUID")
+    for k in e:
+        if "elemetry" in k.lower():
+            bad(k)
+    if "sourceURI" in e and (zeeschuimer_version is None or e["sourceURI"] != _policy_url(zeeschuimer_version)):
+        bad("sourceURI")
+
+    def walk(v, key):
+        if isinstance(v, str):
+            if v.startswith("/"):
+                bad(key)
+        elif isinstance(v, dict):
+            for kk, vv in v.items():
+                walk(vv, kk)
+        elif isinstance(v, list):
+            for vv in v:
+                walk(vv, key)
+    for k, v in e.items():
+        if k != "path":                      # path is checked exactly above
+            walk(v, k)
     return out
 
 
-def _filter_json_files(profile_dir):
-    for name in JSON_FILES:
-        path = os.path.join(profile_dir, name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            data = _load_json(path)
-        except (OSError, ValueError) as e:
-            if name == "extensions.json":
-                raise TemplateError(f"extensions.json is not valid JSON: {e}")
-            os.remove(path)
-            continue
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(_filter_json(name, data), f, separators=(",", ":"))
-
-
-def _json_problems(profile_dir):
-    out = []
-    for name in JSON_FILES:
-        path = os.path.join(profile_dir, name)
-        if not os.path.isfile(path):
-            if name == "extensions.json":
-                out.append("extensions.json does not list the xpi")
-            continue
-        try:
-            data = _load_json(path)
-        except (OSError, ValueError):
-            out.append(f"{name} is not valid JSON")
-            continue
-        out += [f"foreign addon id in {name}: {i}" for i in _foreign_ids(name, data)]
-        if name == "extensions.json" and not (isinstance(data, dict) and isinstance(data.get("addons"), list)
-                                              and any(isinstance(a, dict) and a.get("id") == XPI_ID
-                                                      for a in data["addons"])):
-            out.append("extensions.json does not list the xpi")
+def _json_problems(profile_dir, zeeschuimer_version):
+    path = os.path.join(profile_dir, "extensions.json")
+    if not os.path.isfile(path):
+        return ["extensions.json does not list the xpi"]
+    try:
+        data = _load_json(path)
+    except (OSError, ValueError):
+        return ["extensions.json is not valid JSON"]
+    addons = data.get("addons") if isinstance(data, dict) else None
+    if not isinstance(addons, list):
+        return ["foreign addon id in extensions.json: <addons>", "extensions.json does not list the xpi"]
+    mine = [a for a in addons if isinstance(a, dict) and a.get("id") == XPI_ID]
+    out = [f"foreign addon id in extensions.json: {a.get('id') if isinstance(a, dict) else '<entry>'}"
+           for a in addons if not (isinstance(a, dict) and a.get("id") == XPI_ID)]
+    if not mine:
+        out.append("extensions.json does not list the xpi")
+    for e in mine:
+        out += _entry_problems(e, zeeschuimer_version)
     return out
 
 
@@ -277,7 +284,7 @@ def _unlink_symlinks(root):
                     dirs.remove(n)
 
 
-def sanitise(profile_dir: str, keep_cookies: list) -> None:
+def sanitise(profile_dir: str, keep_cookies: list, zeeschuimer_version: str, built_on: str) -> None:
     """Work on a COPY: filter cookies (WAL included), then delete everything not allowlisted."""
     _unlink_symlinks(profile_dir)
     cookies = os.path.join(profile_dir, "cookies.sqlite")
@@ -288,7 +295,7 @@ def sanitise(profile_dir: str, keep_cookies: list) -> None:
     prefs = os.path.join(profile_dir, "prefs.js")
     if os.path.isfile(prefs):
         _filter_prefs(prefs)
-    _filter_json_files(profile_dir)
+    _filter_json_files(profile_dir, zeeschuimer_version, built_on)
 
 
 @contextlib.contextmanager
@@ -437,7 +444,7 @@ def _pref_problems(profile_dir):
     return out
 
 
-def verify_release(profile_dir: str, platform, rel_prefix: str = "") -> list:
+def verify_release(profile_dir: str, platform, rel_prefix: str = "", zeeschuimer_version: str = None) -> list:
     problems = []
     uuid = zeeschuimer_uuid(profile_dir)
     if uuid is None:
@@ -460,7 +467,7 @@ def verify_release(profile_dir: str, platform, rel_prefix: str = "") -> list:
     if keep and not present:
         problems.append("no keep cookie present")
     problems += _pref_problems(profile_dir)
-    problems += _json_problems(profile_dir)
+    problems += _json_problems(profile_dir, zeeschuimer_version)
     items_dir, ctx_dir = (_ext_dirs(uuid) or (None, None))
     dbs = [(os.path.basename(os.path.dirname(os.path.dirname(p))), n, c) for p, n, c in idb_databases(profile_dir)]
     items = [c for d, n, c in dbs if d == items_dir and n == ITEMS_DB]
@@ -522,8 +529,9 @@ def release(src_config_dir: str, out_dir: str, platform, zeeschuimer_version: st
         profile = os.path.join(t, "profile")
         shutil.copytree(src_profile, profile, symlinks=True,
                         ignore=lambda d, names: [n for n in names if n in SKIP_COPY])
-        sanitise(profile, platform.keep_cookies)
-        problems = verify_release(profile, platform)
+        built_on = datetime.date.today().isoformat()
+        sanitise(profile, platform.keep_cookies, zeeschuimer_version, built_on)
+        problems = verify_release(profile, platform, "", zeeschuimer_version)
         if problems:
             raise TemplateError("template failed verification: " + "; ".join(problems))
         os.makedirs(out_dir, exist_ok=True)
@@ -531,7 +539,6 @@ def release(src_config_dir: str, out_dir: str, platform, zeeschuimer_version: st
         for stale in (tar_path, man_path, tmp_tar):
             if os.path.exists(stale):
                 os.remove(stale)
-        built_on = datetime.date.today().isoformat()
         owned = _owned(_mtime(built_on))
         try:
             with tarfile.open(tmp_tar, "w") as tar:
@@ -602,4 +609,4 @@ def verify_tar(tar_path: str, platform) -> list:
         profile = os.path.join(t, "profile")
         if not os.path.isdir(profile):
             return problems + ["profile/ missing from tar"]
-        return problems + verify_release(profile, platform, "profile/")
+        return problems + verify_release(profile, platform, "profile/", version)

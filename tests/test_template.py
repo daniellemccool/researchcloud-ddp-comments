@@ -11,6 +11,11 @@ XPI = f"extensions/{XID}.xpi"
 ZS = "storage/default/moz-extension+++abc"
 ZSCTX = "storage/default/moz-extension+++abc^userContextId=4294967295"
 SECRET = b"SECRETCAPTURE"
+ZV = "1.14.2"
+BUILT = "2026-10-29"
+BUILT_MS = 1793232000000     # 2026-10-29T00:00:00Z
+POLICY_URL = f"https://github.com/digitalmethodsinitiative/zeeschuimer/releases/download/v{ZV}/zeeschuimer-{ZV}.xpi"
+CPATH = f"/config/profile/{XPI}"
 KEEP = (".tiktok.com", "cookie-consent")
 COOKIES = [KEEP, ("www.tiktok.com", "cookie-consent"), (".tiktok.com", "ttwid"), ("desk.example.nl", "remember_token"),
            ("proxy.sram.surf.nl", "SATOSA_surf_ram_PROXY_STATE"), ("evil.example", "cookie-consent")]
@@ -79,8 +84,22 @@ def read_json(p, name):
         return json.load(fh)
 
 
+def zs_entry(**over):
+    e = {"id": XID, "syncGUID": "{1b2c3d4e-0000-4000-8000-123456789abc}", "version": ZV, "type": "extension",
+         "loader": None, "updateURL": None, "installOrigins": None, "manifestVersion": 2,
+         "optionalPermissions": {"permissions": [], "origins": []}, "location": "app-profile",
+         "active": True, "userDisabled": False, "appDisabled": False, "signedState": 2, "signedDate": 1700000000000,
+         "installDate": 1761000000000, "updateDate": 1761000001000,
+         "path": f"/home/someone/.mozilla/firefox/x/{XPI}", "sourceURI": POLICY_URL,
+         "installTelemetryInfo": {"source": "amo", "method": "sideload"},
+         "defaultLocale": {"name": "Zeeschuimer"}, "targetApplications": [{"id": "toolkit@mozilla.org"}],
+         "startupData": {"persistentListeners": {}}}
+    e.update(over)
+    return e
+
+
 def make_profile(root, items_rows=0, uploads_rows=0, with_items_db=True, storage_rows=3, sl_uuid="abc",
-                 cookies=COOKIES, wal_only=(), deleted=0, user_version=0):
+                 cookies=COOKIES, wal_only=(), deleted=0, user_version=0, entry=None):
     p = os.path.join(root, "profile")
     for d in ("cache2/entries", "startupCache", "sessionstore-backups", "crashes", "extensions",
               "storage/default/https+++www.tiktok.com", "storage/default/https+++ds.sram.surf.nl", "chrome",
@@ -103,11 +122,10 @@ def make_profile(root, items_rows=0, uploads_rows=0, with_items_db=True, storage
     for f in ("log/access.log", "downloads/x.mp4", "certs/key.pem", "xdg/data/recently-used.xbel", ".vncpass_clear"):
         with open(os.path.join(root, f), "w") as fh: fh.write("x")
     write_json(p, "extensions.json", {"schemaVersion": 35, "addons": [
-        {"id": XID, "location": "app-profile", "path": f"/config/profile/{XPI}"},
+        entry or zs_entry(),
         {"id": "other@example", "location": "app-profile", "path": "/config/profile/extensions/other@example.xpi"}]})
-    write_json(p, "extension-preferences.json", {XID: {"permissions": ["tabs"]}, "other@example": {"permissions": []}})
-    write_json(p, "extension-settings.json", {"version": 2, "commands": {}, "default_search": {},
-                                              "prefs": {XID: {"initialValue": {}}, "other@example": {"x": 1}}})
+    write_json(p, "extension-preferences.json", {XID: {"permissions": ["tabs"]}})
+    write_json(p, "extension-settings.json", {"version": 2, "prefs": {XID: {"initialValue": {}}}})
     with open(os.path.join(p, "prefs.js"), "w") as fh: fh.write(prefs_text())
     make_cookies(p, cookies, wal_only)
     return p
@@ -139,22 +157,24 @@ class TemplateTest(unittest.TestCase):
 
     def test_release_keeps_only_allowlist(self):
         src = os.path.join(self.t, "src"); p = make_profile(src)
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         files = tree(p)
         for gone in ("places.sqlite", "logins.json", "key4.db", "formhistory.sqlite", "sessionstore.jsonlz4",
                      "sessionstore-x.baklz4", "cache2", "crashes", "startupCache", "storage/default/https+++www.tiktok.com",
                      "storage/default/moz-extension+++other", ZS + "/.metadata-v2", "extensions/other.txt"):
             self.assertFalse(any(f == gone or f.startswith(gone + "/") for f in files), gone)
-        for kept in ("prefs.js", "extensions.json", "extension-preferences.json", "extension-settings.json",
+        for gone in ("extension-preferences.json", "extension-settings.json"):
+            self.assertNotIn(gone, files)
+        for kept in ("prefs.js", "extensions.json",
                      "cookies.sqlite", "chrome/userContent.css", XPI, ZS + "/idb/h1.sqlite", ZSCTX + "/idb/h2.sqlite"):
             self.assertIn(kept, files)
         self.assertEqual(sorted(os.listdir(os.path.join(p, "storage/default"))),
                          ["moz-extension+++abc", "moz-extension+++abc^userContextId=4294967295"])
-        self.assertEqual(tp.verify_release(p, self.plat), [])
+        self.assertEqual(tp.verify_release(p, self.plat, "", ZV), [])
 
     def test_prefs_are_an_exact_allowlist(self):
         p = make_profile(os.path.join(self.t, "src"))
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         with open(os.path.join(p, "prefs.js")) as fh:
             prefs = fh.read()
         for k in KEPT_PREFS:
@@ -165,35 +185,35 @@ class TemplateTest(unittest.TestCase):
 
     def test_cookies_filtered_to_keep_list(self):
         p = make_profile(os.path.join(self.t, "src"))
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         c = sqlite3.connect(os.path.join(p, "cookies.sqlite"))
         got = sorted(c.execute("SELECT host, name FROM moz_cookies").fetchall()); c.close()
         self.assertEqual(got, [(".tiktok.com", "cookie-consent"), ("www.tiktok.com", "cookie-consent")])
         self.assertFalse(any(f.startswith("cookies.sqlite-") for f in os.listdir(p)))
-        self.assertEqual(tp.verify_release(p, self.plat), [])
+        self.assertEqual(tp.verify_release(p, self.plat, "", ZV), [])
         c = sqlite3.connect(os.path.join(p, "cookies.sqlite"))
         c.execute("INSERT INTO moz_cookies (host, name, value) VALUES ('x.example', 'sid', 'v')"); c.commit(); c.close()
-        self.assertIn("cookie outside keep list: x.example sid", tp.verify_release(p, self.plat))
+        self.assertIn("cookie outside keep list: x.example sid", tp.verify_release(p, self.plat, "", ZV))
 
     def test_cookie_only_in_wal_survives(self):
         p = make_profile(os.path.join(self.t, "src"), cookies=[(".tiktok.com", "ttwid")], wal_only=[KEEP])
         self.assertTrue(os.path.exists(os.path.join(p, "cookies.sqlite-wal")))
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         c = sqlite3.connect(os.path.join(p, "cookies.sqlite"))
         self.assertEqual(c.execute("SELECT host, name FROM moz_cookies").fetchall(), [KEEP]); c.close()
 
     def test_no_keep_cookie_fails_verify(self):
         p = make_profile(os.path.join(self.t, "src"), cookies=[(".tiktok.com", "ttwid")])
-        tp.sanitise(p, self.plat.keep_cookies)
-        self.assertIn("no keep cookie present", tp.verify_release(p, self.plat))
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        self.assertIn("no keep cookie present", tp.verify_release(p, self.plat, "", ZV))
 
     def test_items_store_must_exist_and_be_empty(self):
         src = os.path.join(self.t, "a"); p = make_profile(src, with_items_db=False)
-        tp.sanitise(p, self.plat.keep_cookies)
-        self.assertIn("zeeschuimer-items database not found", tp.verify_release(p, self.plat))
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        self.assertIn("zeeschuimer-items database not found", tp.verify_release(p, self.plat, "", ZV))
         src = os.path.join(self.t, "b"); p = make_profile(src, items_rows=1)
-        tp.sanitise(p, self.plat.keep_cookies)
-        self.assertIn("zeeschuimer-items contains 1 captured items", tp.verify_release(p, self.plat))
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        self.assertIn("zeeschuimer-items contains 1 captured items", tp.verify_release(p, self.plat, "", ZV))
         with self.assertRaises(tp.TemplateError) as cm:
             tp.release(src, os.path.join(self.t, "out"), self.plat, "1.14.2")
         self.assertIn("contains 1 captured items", str(cm.exception))
@@ -201,33 +221,33 @@ class TemplateTest(unittest.TestCase):
 
     def test_upload_history_is_a_problem(self):
         p = make_profile(os.path.join(self.t, "src"), uploads_rows=2)
-        tp.sanitise(p, self.plat.keep_cookies)
-        self.assertIn("zeeschuimer-items has upload history", tp.verify_release(p, self.plat))
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        self.assertIn("zeeschuimer-items has upload history", tp.verify_release(p, self.plat, "", ZV))
 
     def test_storage_local_must_be_present(self):
         p = make_profile(os.path.join(self.t, "src"), storage_rows=0)
-        tp.sanitise(p, self.plat.keep_cookies)
-        self.assertIn("extension storage.local database not found or empty", tp.verify_release(p, self.plat))
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        self.assertIn("extension storage.local database not found or empty", tp.verify_release(p, self.plat, "", ZV))
 
     def test_storage_local_under_wrong_uuid_does_not_count(self):
         p = make_profile(os.path.join(self.t, "src"), sl_uuid="other")
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         self.assertFalse(os.path.exists(os.path.join(p, "storage/default/moz-extension+++other^userContextId=4294967295")))
-        self.assertIn("extension storage.local database not found or empty", tp.verify_release(p, self.plat))
+        self.assertIn("extension storage.local database not found or empty", tp.verify_release(p, self.plat, "", ZV))
 
     def test_uuid_missing_from_prefs(self):
         p = make_profile(os.path.join(self.t, "src"))
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         with open(os.path.join(p, "prefs.js"), "w") as fh: fh.write("")
-        self.assertIn("uuid not found in prefs", tp.verify_release(p, self.plat))
+        self.assertIn("uuid not found in prefs", tp.verify_release(p, self.plat, "", ZV))
 
     def test_xpi_id_missing(self):
         p = make_profile(os.path.join(self.t, "src"))
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         os.remove(os.path.join(p, XPI))
-        self.assertEqual(tp.verify_release(p, self.plat), [])  # extensions.json still names the id
+        self.assertEqual(tp.verify_release(p, self.plat, "", ZV), [])  # extensions.json still names the id
         os.remove(os.path.join(p, "extensions.json"))
-        self.assertIn("xpi id missing", tp.verify_release(p, self.plat))
+        self.assertIn("xpi id missing", tp.verify_release(p, self.plat, "", ZV))
 
     def test_idb_rebuilt_without_deleted_rows(self):
         src = os.path.join(self.t, "src"); p = make_profile(src, deleted=40, user_version=7)
@@ -248,13 +268,13 @@ class TemplateTest(unittest.TestCase):
 
     def test_verify_flags_free_pages_wal_and_blobs(self):
         p = make_profile(os.path.join(self.t, "src"), deleted=40)
-        tp.sanitise(p, self.plat.keep_cookies)
-        self.assertEqual(tp.verify_release(p, self.plat), [])
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        self.assertEqual(tp.verify_release(p, self.plat, "", ZV), [])
         idb = os.path.join(p, ZS, "idb")
         with open(os.path.join(idb, "h1.sqlite-wal"), "w") as fh: fh.write("x")
         os.makedirs(os.path.join(idb, "h1.files"))
         with open(os.path.join(idb, "h1.files", "1"), "w") as fh: fh.write("x")
-        got = tp.verify_release(p, self.plat)
+        got = tp.verify_release(p, self.plat, "", ZV)
         self.assertIn("zeeschuimer-items has a wal file", got)
         self.assertIn("zeeschuimer-items has blob files", got)
         os.remove(os.path.join(idb, "h1.sqlite-wal"))
@@ -263,7 +283,7 @@ class TemplateTest(unittest.TestCase):
         for k in range(40):
             c.execute("INSERT INTO object_data (object_store_id, key, data) VALUES (2, ?, ?)", (k, b"x" * 2000))
         c.commit(); c.execute("DELETE FROM object_data WHERE object_store_id = 2"); c.commit(); c.close()
-        self.assertIn("zeeschuimer-items has free pages", tp.verify_release(p, self.plat))
+        self.assertIn("zeeschuimer-items has free pages", tp.verify_release(p, self.plat, "", ZV))
 
     def test_manifest_and_sha256(self):
         _, (tar_path, man) = self.release()
@@ -310,10 +330,10 @@ class TemplateTest(unittest.TestCase):
         os.replace(os.path.join(p, "cookies.sqlite"), os.path.join(out, "cookies.sqlite"))
         os.symlink(os.path.join(out, "cookies.sqlite"), os.path.join(p, "cookies.sqlite"))
         with open(os.path.join(out, "cookies.sqlite"), "rb") as fh: before = fh.read()
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         with open(os.path.join(out, "cookies.sqlite"), "rb") as fh: self.assertEqual(fh.read(), before)
         self.assertFalse(os.path.lexists(os.path.join(p, "cookies.sqlite")))
-        self.assertIn("no keep cookie present", tp.verify_release(p, self.plat))
+        self.assertIn("no keep cookie present", tp.verify_release(p, self.plat, "", ZV))
 
     def test_symlinked_extension_dir_not_followed(self):
         out = os.path.join(self.t, "outside"); os.makedirs(out)
@@ -323,12 +343,12 @@ class TemplateTest(unittest.TestCase):
         before = {}
         for f in tree(out):
             with open(os.path.join(out, f), "rb") as fh: before[f] = fh.read()
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         self.assertEqual(tree(out), sorted(before))
         for f, data in before.items():
             with open(os.path.join(out, f), "rb") as fh: self.assertEqual(fh.read(), data)
         self.assertFalse(os.path.lexists(os.path.join(p, ZS)))
-        self.assertIn("zeeschuimer-items database not found", tp.verify_release(p, self.plat))
+        self.assertIn("zeeschuimer-items database not found", tp.verify_release(p, self.plat, "", ZV))
 
     def test_verify_rejects_stray_idb_entries(self):
         _, (tar_path, _) = self.release()
@@ -342,52 +362,77 @@ class TemplateTest(unittest.TestCase):
     def test_only_zeeschuimer_xpi_survives(self):
         p = make_profile(os.path.join(self.t, "pre"))
         self.assertTrue(os.path.exists(os.path.join(p, "extensions/other@example.xpi")))
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         self.assertEqual(os.listdir(os.path.join(p, "extensions")), [f"{XID}.xpi"])
         _, (tar_path, _) = self.release()
         self._retar(tar_path, ["profile/extensions/other@example.xpi"])
         self.assertIn("unexpected file: profile/extensions/other@example.xpi", tp.verify_tar(tar_path, self.plat))
 
-    def test_extension_json_filtered_to_zeeschuimer(self):
+    def test_extension_json_filtered_and_normalised(self):
         p = make_profile(os.path.join(self.t, "src"))
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         ext = read_json(p, "extensions.json")
         self.assertEqual(ext["schemaVersion"], 35)
         self.assertEqual([a["id"] for a in ext["addons"]], [XID])
-        self.assertEqual(list(read_json(p, "extension-preferences.json")), [XID])
-        st = read_json(p, "extension-settings.json")
-        self.assertEqual(st["version"], 2)
-        self.assertEqual(list(st["prefs"]), [XID])
-        for n in tp.JSON_FILES:
-            with open(os.path.join(p, n)) as fh: self.assertNotIn("other@example", fh.read())
-        self.assertEqual(tp.verify_release(p, self.plat), [])
+        e = ext["addons"][0]
+        self.assertEqual(e["path"], CPATH)
+        self.assertEqual(e["syncGUID"], "{00000000-0000-4000-8000-000000000000}")
+        self.assertEqual((e["installDate"], e["updateDate"]), (BUILT_MS, BUILT_MS))
+        self.assertNotIn("installTelemetryInfo", e)
+        self.assertEqual(e["sourceURI"], POLICY_URL)
+        for k in ("signedState", "startupData", "targetApplications", "defaultLocale", "userDisabled"):
+            self.assertIn(k, e)
+        with open(os.path.join(p, "extensions.json")) as fh:
+            txt = fh.read()
+        self.assertNotIn("other@example", txt)
+        self.assertNotIn("/home/someone", txt)
+        self.assertFalse(os.path.exists(os.path.join(p, "extension-settings.json")))
+        self.assertFalse(os.path.exists(os.path.join(p, "extension-preferences.json")))
+        self.assertEqual(tp.verify_release(p, self.plat, "", ZV), [])
+
+    def test_foreign_source_uri_removed_and_other_telemetry_keys_and_rooturi(self):
+        e = zs_entry(sourceURI="https://example.org/private/x.xpi", fooTelemetryBar=1,
+                     rootURI="jar:file:///home/someone/x.xpi!/")
+        p = make_profile(os.path.join(self.t, "src"), entry=e)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
+        got = read_json(p, "extensions.json")["addons"][0]
+        self.assertNotIn("sourceURI", got)
+        self.assertNotIn("fooTelemetryBar", got)
+        self.assertEqual(got["rootURI"], f"jar:file://{CPATH}!/")
+        self.assertEqual(tp.verify_release(p, self.plat, "", ZV), [])
+
+    def test_verify_requires_normalised_entry(self):
+        _, (tar_path, _) = self.release()
+        def hook(x):
+            pr = os.path.join(x, "profile")
+            ext = read_json(pr, "extensions.json")
+            ext["addons"][0].update(path=f"/home/someone/{XPI}", syncGUID="{abc}", sourceURI="https://evil.example/x",
+                                    installTelemetryInfo={}, other="/home/someone/y")
+            write_json(pr, "extensions.json", ext)
+        self._retar(tar_path, [], hook=hook)
+        got = tp.verify_tar(tar_path, self.plat)
+        for f in ("path", "syncGUID", "sourceURI", "installTelemetryInfo", "other"):
+            self.assertIn(f"extensions.json entry not normalised: {f}", got)
+
+    def test_extension_settings_file_in_tar_is_unexpected(self):
+        _, (tar_path, _) = self.release()
+        self._retar(tar_path, ["profile/extension-settings.json"])
+        self.assertIn("unexpected file: profile/extension-settings.json", tp.verify_tar(tar_path, self.plat))
 
     def test_unparseable_extensions_json_is_an_error(self):
         p = make_profile(os.path.join(self.t, "src"))
         with open(os.path.join(p, "extensions.json"), "w") as fh: fh.write("{nope")
         with self.assertRaises(tp.TemplateError):
-            tp.sanitise(p, self.plat.keep_cookies)
-
-    def test_unparseable_settings_file_is_removed(self):
-        p = make_profile(os.path.join(self.t, "src"))
-        with open(os.path.join(p, "extension-settings.json"), "w") as fh: fh.write("{nope")
-        tp.sanitise(p, self.plat.keep_cookies)
-        self.assertFalse(os.path.exists(os.path.join(p, "extension-settings.json")))
-        self.assertEqual(tp.verify_release(p, self.plat), [])
+            tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
 
     def test_verify_flags_foreign_ids_and_missing_xpi_listing(self):
         _, (tar_path, _) = self.release()
         def hook(x):
             write_json(os.path.join(x, "profile"), "extensions.json", {"schemaVersion": 35, "addons": [
                 {"id": XID}, {"id": "evil@example"}]})
-            write_json(os.path.join(x, "profile"), "extension-preferences.json", {"evil2@example": {}})
-            write_json(os.path.join(x, "profile"), "extension-settings.json", {"prefs": {"evil3@example": {}}})
         self._retar(tar_path, [], hook=hook)
         got = tp.verify_tar(tar_path, self.plat)
-        for want in ("foreign addon id in extensions.json: evil@example",
-                     "foreign addon id in extension-preferences.json: evil2@example",
-                     "foreign addon id in extension-settings.json: evil3@example"):
-            self.assertIn(want, got)
+        self.assertIn("foreign addon id in extensions.json: evil@example", got)
         self._retar(tar_path, [], hook=lambda x: write_json(os.path.join(x, "profile"), "extensions.json",
                                                             {"schemaVersion": 35, "addons": []}))
         self.assertIn("extensions.json does not list the xpi", tp.verify_tar(tar_path, self.plat))
@@ -442,11 +487,11 @@ class TemplateTest(unittest.TestCase):
 
     def test_leftover_rebuilt_and_tmp_files_in_idb(self):
         p = make_profile(os.path.join(self.t, "src"))
-        tp.sanitise(p, self.plat.keep_cookies)
+        tp.sanitise(p, self.plat.keep_cookies, ZV, BUILT)
         idb = os.path.join(p, ZS, "idb")
         for n in ("h1.sqlite.rebuilt", "h1.sqlite.tmp"):
             with open(os.path.join(idb, n), "w") as fh: fh.write("x")
-        got = tp.verify_release(p, self.plat)
+        got = tp.verify_release(p, self.plat, "", ZV)
         for n in ("h1.sqlite.rebuilt", "h1.sqlite.tmp"):
             self.assertIn(f"unexpected file: storage/default/moz-extension+++abc/idb/{n}", got)
         # the sanitiser itself sweeps such leftovers out of a source copy
