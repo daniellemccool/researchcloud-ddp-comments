@@ -16,7 +16,7 @@
     "ExtensionSettings": {
       "{677bb78c-7168-4aa5-8e9b-32e9f26c6157}": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/digitalmethodsinitiative/zeeschuimer/releases/download/v1.14.2/zeeschuimer-1.14.2.xpi",
+        "install_url": "https://github.com/digitalmethodsinitiative/zeeschuimer/releases/download/v{{ZEESCHUIMER_VERSION}}/zeeschuimer-{{ZEESCHUIMER_VERSION}}.xpi",
         "default_area": "navbar"
       }
     },
