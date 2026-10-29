@@ -2,6 +2,11 @@
 
 Format: `user<TAB>index<TAB>status`, status in {live, retired}. Legacy
 two-column rows (`user<TAB>index`) are live. Each user appears in one row.
+
+Locking contract: every writer (`allocate`, `retire`) does an unlocked
+read-modify-write, so the CALLER must hold flocked(render_lock(desk_root))
+around it. The readers (`rows`, `live`, `port`) are lock-free; writes replace
+the file atomically, so a read sees either the old or the new content.
 """
 import os
 import re
@@ -76,14 +81,15 @@ class Registry:
                 raise RegistryFull(f"all {self.max_sessions} sessions are in use")
         new = Row(user, index, "live")
         if old is None:
-            os.makedirs(self.desk_root, exist_ok=True)
-            with open(self.path, "a") as f:
-                f.write(f"{user}\t{index}\tlive\n")
+            # Rewrite (not append) so a legacy file lacking a final newline
+            # cannot have the new row glued onto its last line.
+            self._rewrite(rows + [new])
         else:
             self._rewrite([new if r is old else r for r in rows])
         return new
 
     def retire(self, user: str) -> None:
+        """Mark `user`'s row retired. Caller must hold render_lock(desk_root)."""
         rows = self.rows()
         if not any(r.user == user and r.status == "live" for r in rows):
             return

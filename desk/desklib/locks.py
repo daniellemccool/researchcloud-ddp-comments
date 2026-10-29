@@ -4,12 +4,16 @@ import os
 import time
 from contextlib import contextmanager
 
+from .registry import USER_RE  # registry does not import locks, so no cycle
+
 
 def render_lock(desk_root: str) -> str:
     return os.path.join(desk_root, ".render.lock")
 
 
 def user_lock(desk_root: str, user: str) -> str:
+    if not isinstance(user, str) or not USER_RE.match(user):
+        raise ValueError(f"invalid username: {user!r}")
     return os.path.join(desk_root, "locks", user)
 
 

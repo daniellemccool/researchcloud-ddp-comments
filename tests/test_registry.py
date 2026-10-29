@@ -78,6 +78,54 @@ class RegistryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 r.allocate(bad)
 
+    def test_legacy_file_without_trailing_newline_is_safe(self):
+        self.write("alice\t1\nbob\t2")
+        r = self.reg()
+        self.assertEqual(r.allocate("carol").index, 3)
+        self.assertEqual({u: row.index for u, row in r.live().items()},
+                         {"alice": 1, "bob": 2, "carol": 3})
+
+    def test_user_lock_rejects_bad_names_and_creates_nothing(self):
+        for bad in ("../../x", "Bad;user"):
+            with self.assertRaises(ValueError):
+                locks.user_lock(self.root, bad)
+        self.assertEqual(os.listdir(self.root), [])
+
+    def test_allocate_and_retire_under_render_lock_from_two_threads(self):
+        r = self.reg()
+        r.allocate("seed")
+        errors = []
+
+        def worker(fn):
+            try:
+                for i in range(20):
+                    fn(i)
+            except Exception as e:  # pragma: no cover
+                errors.append(e)
+
+        def alloc(i):
+            with locks.flocked(locks.render_lock(self.root)):
+                r.allocate(f"u{i}")
+
+        def retire(i):
+            with locks.flocked(locks.render_lock(self.root)):
+                r.retire("seed" if i == 0 else f"u{i - 1}")
+
+        ts = [threading.Thread(target=worker, args=(f,)) for f in (alloc, retire)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(errors, [])
+        rows = r.rows()
+        users = [row.user for row in rows]
+        self.assertEqual(len(users), len(set(users)))
+        self.assertTrue(set(users) <= {"seed"} | {f"u{i}" for i in range(20)})
+        self.assertIn("u19", users)
+        self.assertEqual(r.rows()[users.index("seed")].status, "retired")
+        live_idx = [row.index for row in rows if row.status == "live"]
+        self.assertEqual(len(live_idx), len(set(live_idx)))
+
     def test_flocked_blocks_second_holder(self):
         path = locks.user_lock(self.root, "alice")
         held = threading.Event()
