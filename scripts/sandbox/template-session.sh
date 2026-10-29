@@ -71,13 +71,23 @@ stop_template() {
     compose stop -t 60
     compose down -t 60
   fi
-  if [ -n "$($SUDO docker ps -a --filter name='^desk-firefox-tpl$' --format '{{.Names}}')" ]; then
+  # assigned on its own line so set -e aborts if docker itself fails (fail closed)
+  local left removed=""
+  left="$($SUDO docker ps -a --filter 'name=^desk-firefox-tpl$' --format '{{.Names}}')"
+  if [ -n "$left" ]; then
     echo "template-session.sh: desk-firefox-tpl still exists after stop; not touching the profile lock" >&2
     exit 1
   fi
-  if $SUDO test -L "$TPL_DIR/profile/lock" || $SUDO test -e "$TPL_DIR/profile/.parentlock"; then
-    $SUDO rm -f "$TPL_DIR/profile/lock" "$TPL_DIR/profile/.parentlock"
-    echo "removed stale Firefox profile lock (lock, .parentlock) from $TPL_DIR/profile"
+  if $SUDO test -L "$TPL_DIR/profile/lock"; then
+    $SUDO rm -f "$TPL_DIR/profile/lock"
+    removed="lock"
+  fi
+  if $SUDO test -e "$TPL_DIR/profile/.parentlock"; then
+    $SUDO rm -f "$TPL_DIR/profile/.parentlock"
+    removed="${removed:+$removed, }.parentlock"
+  fi
+  if [ -n "$removed" ]; then
+    echo "removed stale Firefox profile lock ($removed) from $TPL_DIR/profile"
   fi
 }
 
