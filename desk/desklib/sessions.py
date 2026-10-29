@@ -68,9 +68,17 @@ class Sessions:
             return f"docker exited with status {e.returncode}"
         return None
 
-    def prune(self) -> list[str]:
-        """Retire live users who are no longer members; failures land in self.failed."""
+    def _current_members(self) -> dict[str, bool]:
+        """One CO fetch per operation; an empty answer while sessions exist is not believed."""
         members = self.members()
+        if not members and self.reg.live():
+            raise RuntimeError("CO API returned no members; refusing to retire or sync")
+        return members
+
+    def prune(self, members: dict[str, bool] | None = None) -> list[str]:
+        """Retire live users who are no longer members; failures land in self.failed."""
+        if members is None:
+            members = self._current_members()
         self.failed = {}
         retired = []
         for u in sorted(self.reg.live()):
@@ -83,32 +91,46 @@ class Sessions:
                 retired.append(u)
         return retired
 
-    def sync_admins(self) -> dict:
-        """Make each live member's 4CAT admin tag match the CO roles; rotate on demotion."""
+    def sync_admins(self, members: dict[str, bool] | None = None) -> dict:
+        """Make each ready member's 4CAT admin tag match the CO roles.
+
+        On demotion the credentials rotate first and the tag is cleared after, so a
+        failed rotate leaves the tag for the next run to retry. Users whose 4CAT
+        account step is not done yet are listed under `skipped` (only when any).
+        """
         out = {"admin_set": [], "admin_cleared": []}
         if not self._fourcat_on():
             return out
-        members = self.members()
+        if members is None:
+            members = self._current_members()
+        skipped = []
         for u in sorted(self.reg.live()):
             if u not in members:
                 continue
+            if self.prov.state(u).steps.get("fourcat_account") != "done":
+                skipped.append(u)
+                continue
             want = bool(members[u])
+            self.failed.pop(u, None)
             try:
                 if bool(self.fourcat.is_admin(u)) == want:
                     continue
-                self.fourcat.set_admin(u, want)
                 if not want:
                     self.fourcat.rotate(u)
+                self.fourcat.set_admin(u, want)
             except (FourCatError, subprocess.SubprocessError, OSError) as e:
                 self.failed[u] = str(e) or type(e).__name__
                 continue
             out["admin_set" if want else "admin_cleared"].append(u)
+        if skipped:
+            out["skipped"] = skipped
         return out
 
     def reconcile(self) -> dict:
-        retired = self.prune()
+        members = self._current_members()
+        retired = self.prune(members)
         failed = dict(self.failed)
-        out = {"retired": retired, **self.sync_admins()}
+        out = {"retired": retired, **self.sync_admins(members)}
         failed.update(self.failed)
         if failed:
             out["failed"] = failed

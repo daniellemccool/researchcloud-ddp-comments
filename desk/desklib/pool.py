@@ -7,6 +7,8 @@ import os
 import tempfile
 from dataclasses import dataclass
 
+from .locks import flocked, pool_lock
+
 HEADER = ["id", "kind", "bucket", "note"]
 LEGACY = ["video_id", "bucket", "note"]
 
@@ -25,10 +27,12 @@ def _path(desk_root: str) -> str:
 
 def _read(desk_root: str, default_kind: str) -> tuple[list[PoolRow], bool]:
     try:
-        with open(_path(desk_root), newline="") as f:
+        with open(_path(desk_root), newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            legacy = reader.fieldnames is not None and "id" not in reader.fieldnames \
-                and "video_id" in reader.fieldnames
+            names = reader.fieldnames
+            if names is not None and "id" not in names and "video_id" not in names:
+                raise ValueError(f"pool.csv: unrecognised header {names!r}")
+            legacy = names is not None and "id" not in names
             rows, seen = [], set()
             for r in reader:
                 id_ = ((r.get("id") if not legacy else r.get("video_id")) or "").strip()
@@ -47,12 +51,17 @@ def read_rows(desk_root: str, default_kind: str) -> list[PoolRow]:
 
 
 def migrate_legacy(desk_root: str, default_kind: str) -> bool:
+    with flocked(pool_lock(desk_root)):
+        return _migrate(desk_root, default_kind)
+
+
+def _migrate(desk_root: str, default_kind: str) -> bool:
     rows, legacy = _read(desk_root, default_kind)
     if not legacy:
         return False
     fd, tmp = tempfile.mkstemp(dir=desk_root, prefix=".pool.csv.")
     try:
-        with os.fdopen(fd, "w", newline="") as f:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(HEADER)
             w.writerows([r.id, r.kind, r.bucket, r.note] for r in rows)

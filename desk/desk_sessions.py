@@ -88,6 +88,8 @@ def cmd_reconcile(s, a) -> int:
     out = s.reconcile()
     for key in ("retired", "admin_set", "admin_cleared"):
         print(f"{key}: " + (" ".join(out[key]) or "-"))
+    if out.get("skipped"):
+        print("skipped (no 4CAT account yet): " + " ".join(out["skipped"]))
     for u, why in out.get("failed", {}).items():
         print(f"{u}: failed: {why}", file=sys.stderr)
     return 1 if "failed" in out else 0
@@ -141,7 +143,7 @@ def main(argv=None) -> int:
         else:
             return globals()["cmd_" + a.cmd](s, a)
         return 0
-    except (ValueError, FileNotFoundError, FourCatError, OSError, urllib.error.URLError,
+    except (ValueError, RuntimeError, FileNotFoundError, FourCatError, OSError, urllib.error.URLError,
             subprocess.SubprocessError, KeyError, json.JSONDecodeError) as e:
         print(f"desk-sessions {a.cmd}: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

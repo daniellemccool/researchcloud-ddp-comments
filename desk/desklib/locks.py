@@ -11,6 +11,10 @@ def render_lock(desk_root: str) -> str:
     return os.path.join(desk_root, ".render.lock")
 
 
+def pool_lock(desk_root: str) -> str:
+    return os.path.join(desk_root, ".pool.lock")
+
+
 def user_lock(desk_root: str, user: str) -> str:
     if not isinstance(user, str) or not USER_RE.match(user):
         raise ValueError(f"invalid username: {user!r}")

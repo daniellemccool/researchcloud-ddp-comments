@@ -4,8 +4,9 @@ import io, json, os, subprocess, sys, tempfile, unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "desk"))
 from desklib import coapi, pool, provision as pv  # noqa: E402
+from desklib.fourcat import FourCatError  # noqa: E402
 from desklib.config import DeskConfig, load_config, save_config  # noqa: E402
-from desklib.locks import flocked, render_lock  # noqa: E402
+from desklib.locks import flocked, pool_lock, render_lock  # noqa: E402
 from desklib.registry import Registry  # noqa: E402
 from desklib.sessions import Sessions  # noqa: E402
 
@@ -42,6 +43,7 @@ class FakeResp(io.BytesIO):
 class FakeFC:
     def __init__(self, admins):
         self.admins, self.calls = dict(admins), []
+        self.rotate_fails = False
 
     def is_admin(self, u):
         return self.admins[u]
@@ -51,6 +53,8 @@ class FakeFC:
         self.calls.append(("set_admin", u, a))
 
     def rotate(self, u):
+        if self.rotate_fails:
+            raise FourCatError("rotate failed")
         self.calls.append(("rotate", u))
 
 
@@ -117,6 +121,9 @@ class SessionsTests(unittest.TestCase):
         with flocked(render_lock(self.root)):
             for u in ("alice", "bob", "carol"):
                 self.reg.allocate(u)
+        for u in ("alice", "bob", "carol"):
+            put(os.path.join(self.root, "state", "users", u, "provision.json"),
+                json.dumps({"steps": {"fourcat_account": "done"}}))
         self.fc = FakeFC({"alice": True, "bob": False, "carol": False})
         self.members = {"alice": False, "bob": True}  # carol left; alice demoted; bob promoted
         self.prov = pv.Provisioner(self.cfg, self.reg, self.fc, is_admin=lambda u: False,
@@ -158,6 +165,57 @@ class SessionsTests(unittest.TestCase):
         s = Sessions(self.cfg, self.reg, self.prov, None, lambda: self.members, run=self.run_cmd)
         self.assertEqual(s.sync_admins(), {"admin_set": [], "admin_cleared": []})
 
+    def test_empty_member_list_refuses_to_retire(self):
+        self.members = {}
+        for op in (self.s.reconcile, self.s.prune, self.s.sync_admins):
+            with self.assertRaisesRegex(RuntimeError, "CO API returned no members"):
+                op()
+        self.assertEqual(sorted(self.reg.live()), ["alice", "bob", "carol"])
+        self.assertFalse(os.path.exists(os.path.join(self.t, "calls")))
+
+    def test_reconcile_fetches_members_once(self):
+        n = []
+        self.s.members = lambda: n.append(1) or self.members
+        self.s.reconcile()
+        self.assertEqual(len(n), 1)
+
+    def test_demotion_rotates_before_clearing_and_retries(self):
+        self.fc.rotate_fails = True
+        out = self.s.sync_admins(self.members)
+        self.assertEqual(out["admin_cleared"], [])
+        self.assertIn("alice", self.s.failed)
+        self.assertTrue(self.fc.admins["alice"])  # tag left for the retry
+        self.fc.rotate_fails = False
+        out = self.s.sync_admins(self.members)
+        self.assertEqual(out["admin_cleared"], ["alice"])
+        self.assertFalse(self.fc.admins["alice"])
+        self.assertNotIn("alice", self.s.failed)
+
+    def test_sync_admins_skips_users_without_a_4cat_account(self):
+        put(os.path.join(self.root, "state", "users", "bob", "provision.json"),
+            json.dumps({"steps": {"fourcat_account": "error: x"}}))
+        out = self.s.sync_admins(self.members)
+        self.assertEqual(out, {"admin_set": [], "admin_cleared": ["alice"], "skipped": ["bob"]})
+        self.assertNotIn(("set_admin", "bob", True), self.fc.calls)
+
+    def test_render_fetches_members_under_lock_in_api_mode_only(self):
+        held, n = [], []
+
+        def members():
+            n.append(1)
+            try:
+                with flocked(render_lock(self.root), timeout=0.01):
+                    held.append(False)
+            except TimeoutError:
+                held.append(True)
+            return self.members
+        s = Sessions(self.cfg, self.reg, self.prov, self.fc, members, run=self.run_cmd)
+        s.render()
+        self.assertEqual((n, held), ([1], [True]))
+        s.cfg = self.prov.cfg = DeskConfig(**{**self.cfg.__dict__, "gate_mode": "roles"})
+        s.render()
+        self.assertEqual(n, [1])
+
 
 class InitAndCliTests(unittest.TestCase):
     def setUp(self):
@@ -193,6 +251,41 @@ class InitAndCliTests(unittest.TestCase):
         cfg = load_config(self.root)
         self.assertEqual((cfg.max_running, cfg.max_sessions, cfg.gate_mode), (3, 7, "api"))
         self.assertEqual(self.cmd(*self.init_args("--platform", "nope")).returncode, 1)
+
+    def test_bom_crlf_legacy_pool_reads_and_migrates(self):
+        os.makedirs(self.root)
+        with open(os.path.join(self.root, "pool.csv"), "wb") as f:
+            f.write("\ufeffvideo_id,bucket,note\r\n1,a,x\r\n2,b,y\r\n".encode("utf-8"))
+        self.assertEqual(len(pool.read_rows(self.root, "video")), 2)
+        self.assertTrue(pool.migrate_legacy(self.root, "video"))
+        self.assertEqual(slurp(os.path.join(self.root, "pool.csv")).splitlines()[:2],
+                         ["id,kind,bucket,note", "1,video,a,x"])
+        self.assertFalse(pool.migrate_legacy(self.root, "video"))
+
+    def test_unknown_pool_header_raises(self):
+        put(os.path.join(self.root, "pool.csv"), "foo,bar\n1,2\n")
+        with self.assertRaisesRegex(ValueError, "unrecognised header"):
+            pool.read_rows(self.root, "video")
+
+    def test_migrate_holds_the_pool_lock(self):
+        self.assertEqual(pool_lock(self.root), os.path.join(self.root, ".pool.lock"))
+        put(os.path.join(self.root, "pool.csv"), "video_id,bucket,note\n1,a,x\n")
+        seen = []
+        real = os.replace
+
+        def slow(src, dst):
+            try:
+                with flocked(pool_lock(self.root), timeout=0.05):
+                    seen.append(False)
+            except TimeoutError:
+                seen.append(True)
+            real(src, dst)
+        pool.os.replace = slow
+        try:
+            pool.migrate_legacy(self.root, "video")
+        finally:
+            pool.os.replace = real
+        self.assertEqual(seen, [True])
 
     def test_cli_status_lists_rows(self):
         self.assertEqual(self.cmd(*self.init_args("--no-fourcat")).returncode, 0)
