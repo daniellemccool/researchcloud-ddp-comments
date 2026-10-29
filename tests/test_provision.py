@@ -1,5 +1,5 @@
 """Tests for desk/desklib/provision.py: fake `docker` on PATH, fake 4CAT, a tiny template tar."""
-import json, os, shutil, sys, tarfile, tempfile, threading, time, unittest
+import json, os, shutil, subprocess, sys, tarfile, tempfile, threading, time, unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "desk"))
@@ -232,6 +232,97 @@ class ProvisionTests(unittest.TestCase):
             self.prov.advance("Bad/user")
         with self.assertRaises(ValueError):
             self.prov.state("../x")
+
+    def put(self, name, text=""):
+        with open(os.path.join(self.t, name), "w") as f:
+            f.write(text)
+
+    def test_api_members_read_under_render_lock(self):
+        self.cfg.gate_mode = "api"
+        times = {}
+
+        def members():
+            times["members"] = time.monotonic()
+            return {"alice": False}
+
+        def renderer(cfg, reg, m):
+            times["renderer"], times["members_arg"] = time.monotonic(), m
+            return render.write_all(cfg, reg, m)
+        prov = pv.Provisioner(self.cfg, self.reg, self.fc, lambda u: False, members=members,
+                              run=self.run_docker, renderer=renderer, nginx=self.nginx_calls.append)
+        self.cfg.template_path = None
+        self.assertEqual(prov.advance("alice").current(), "template")
+        self.cfg.template_path = self.template
+        out = []
+        th = threading.Thread(target=lambda: out.append(prov.advance("alice")))
+        with locks.flocked(locks.render_lock(self.root)):
+            th.start()
+            deadline = time.monotonic() + 2
+            while prov.state("alice").current() != "render" and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(prov.state("alice").current(), "render")
+            time.sleep(0.5)
+            self.assertNotIn("members", times)
+            released = time.monotonic()
+        th.join(30)
+        self.assertTrue(out and out[0].ready(), out and out[0].steps)
+        self.assertGreater(times["members"], released)
+        self.assertLessEqual(times["members"], times["renderer"])
+        self.assertEqual(times["members_arg"], {"alice": False})
+        self.assertIn('"alice" 1;', slurp(os.path.join(self.root, "nginx", "desk-map.conf")))
+
+    def test_rerun_after_crash_between_account_and_token(self):
+        self.assertTrue(self.prov.advance("alice").ready())
+        os.remove(os.path.join(self.root, "state", "users", "alice", "provision.json"))
+        self.put("psql", "1\n")  # the account the first run created
+        n = len(self.calls())
+        st = self.prov.advance("alice")
+        self.assertTrue(st.ready(), st.steps)
+        self.assertEqual(len(self.calls("create_user.py")), 1)
+        second = fakes.docker_calls(self.t)[n:]
+        self.assertTrue([c for c in second if "UPDATE users SET tags" in c], second)
+
+    def test_account_exists_failure_removes_fresh_password_file(self):
+        self.put("psql-fail")
+        st = self.prov.advance("alice")
+        self.assertEqual(st.current(), "fourcat_account")
+        self.assertEqual(st.error(), "error: psql exited with status 1")
+        self.assertFalse(os.path.exists(self.fc.password_path("alice")))
+        self.assertEqual(self.calls("create_user.py"), [])
+
+    def test_wrong_shape_state_starts_over(self):
+        d = os.path.join(self.root, "state", "users", "alice")
+        os.makedirs(d)
+        for bad in ('{"steps": ["x"]}', '{"steps": "x"}', '["x"]', "{not json"):
+            with open(os.path.join(d, "provision.json"), "w") as f:
+                f.write(bad)
+            self.assertEqual(self.prov.state("alice"), pv.State(), bad)
+        self.assertTrue(self.prov.advance("alice").ready())
+
+    def test_compose_timeout_and_failure_are_errors(self):
+        self.put("hang")
+        self.prov.cmd_timeout = 0.3
+        t0 = time.monotonic()
+        st = self.prov.advance("alice")
+        self.assertLess(time.monotonic() - t0, 4)
+        self.assertEqual(st.current(), "up")
+        self.assertEqual(st.error(), "error: docker compose timed out")
+        os.remove(os.path.join(self.t, "hang"))
+
+        def failing(cmd, **kw):
+            if "compose" in cmd:
+                raise subprocess.CalledProcessError(3, cmd)
+            return self.run_docker(cmd, **kw)
+        self.prov.run = failing
+        self.assertEqual(self.prov.advance("alice").error(),
+                         "error: docker compose up mitm-alice exited with status 3")
+
+    def test_stranded_template_staging_is_removed(self):
+        ff = os.path.join(self.root, "state", "firefox", "alice")
+        os.makedirs(os.path.join(ff, ".template.tmp", "junk"))
+        os.makedirs(os.path.join(ff, "profile"))
+        self.assertTrue(self.prov.advance("alice").ready())
+        self.assertFalse(os.path.exists(os.path.join(ff, ".template.tmp")))
 
 
 if __name__ == "__main__":

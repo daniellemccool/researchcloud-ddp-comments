@@ -83,6 +83,7 @@ def _rm(path):
 class Provisioner:
     ca_timeout = 60.0  # seconds `up` waits for mitmproxy's CA; instance-overridable for tests
     ca_poll = 0.5
+    cmd_timeout = 300.0  # seconds for each docker compose / docker stop
 
     def __init__(self, cfg: DeskConfig, reg: Registry, fourcat: FourCat | None,
                  is_admin: Callable[[str], bool], members: Callable[[], dict[str, bool]] | None = None,
@@ -108,7 +109,9 @@ class Provisioner:
         except ValueError:
             return State()  # unreadable: every step is idempotent, so start over
         steps = data.get("steps") if isinstance(data, dict) else None
-        steps = {k: v for k, v in (steps or {}).items() if k in STEPS and isinstance(v, str)}
+        if not isinstance(steps, dict):
+            return State()  # wrong shape: treated like unparseable JSON
+        steps = {k: v for k, v in steps.items() if k in STEPS and isinstance(v, str)}
         gen, upd = data.get("applied_generation"), data.get("updated")
         return State(steps, gen if isinstance(gen, int) else 0, upd if isinstance(upd, int) else 0)
 
@@ -157,7 +160,8 @@ class Provisioner:
         _check(user)
         with flocked(user_lock(self.cfg.desk_root, user)):
             for c in (f"desk-firefox-{user}", f"desk-mitm-{user}"):
-                self.run(["docker", "stop", c])  # non-zero (already gone) is fine
+                # non-zero (already gone) is fine; a hang raises TimeoutExpired
+                self.run(["docker", "stop", c], capture_output=True, timeout=self.cmd_timeout)
             # Move the state before freeing the row: a crash in between must not
             # leave "ready" state for a user without a live row.
             users_dir = self._dir("users", user)
@@ -167,15 +171,16 @@ class Provisioner:
                 os.makedirs(dest, exist_ok=True)
                 os.replace(src, os.path.join(dest, "provision.json"))
             shutil.rmtree(users_dir, ignore_errors=True)
-            members = self._members()
             with flocked(render_lock(self.cfg.desk_root)):
                 self.reg.retire(user)
-                self.renderer(self.cfg, self.reg, members)
+                self.renderer(self.cfg, self.reg, self._members())
                 self.nginx(self.cfg)
 
     # --- steps -----------------------------------------------------------
 
     def _members(self):
+        """Called under the render lock, right before rendering: an older snapshot
+        must never overwrite a newer map (a revocation would briefly come undone)."""
         return self.members() if self.cfg.gate_mode == "api" and self.members else None
 
     def _fourcat_on(self):
@@ -194,13 +199,13 @@ class Provisioner:
 
     def _step_template(self, user):
         ff = self._dir("firefox", user)
+        staging = os.path.join(ff, ".template.tmp")
+        shutil.rmtree(staging, ignore_errors=True)  # left by a crashed run, even after the rename
         if os.path.isdir(os.path.join(ff, "profile")):
             return
         tpl = self.cfg.template_path
         if not tpl or not os.path.isfile(tpl):
             raise StepFailed("template missing")
-        staging = os.path.join(ff, ".template.tmp")
-        shutil.rmtree(staging, ignore_errors=True)  # left by a crashed run
         with tarfile.open(tpl) as tar:
             prof, rest = [], []
             for m in tar.getmembers():
@@ -247,19 +252,26 @@ class Provisioner:
         fc.write_token(user, fc.login_token(user, pw))
 
     def _step_render(self, user):
-        members = self._members()  # may call the CO API: not under the lock
         with flocked(render_lock(self.cfg.desk_root)):
-            self.renderer(self.cfg, self.reg, members)
+            self.renderer(self.cfg, self.reg, self._members())
             self.nginx(self.cfg)
 
     def _step_up(self, user):
-        compose = ["docker", "compose", "-f", os.path.join(self.cfg.desk_root, "docker-compose.yml"),
-                   "up", "-d"]
-        self.run([*compose, f"mitm-{user}"], check=True)
+        self._compose_up(f"mitm-{user}")
         ca = self._dir("mitm", user, "mitmproxy-ca-cert.pem")
         deadline = time.monotonic() + self.ca_timeout
         while not os.path.isfile(ca):
             if time.monotonic() >= deadline:
                 raise StepFailed("mitm produced no CA")
             time.sleep(self.ca_poll)
-        self.run([*compose, f"firefox-{user}"], check=True)
+        self._compose_up(f"firefox-{user}")
+
+    def _compose_up(self, service):
+        cmd = ["docker", "compose", "-f", os.path.join(self.cfg.desk_root, "docker-compose.yml"),
+               "up", "-d", service]
+        try:
+            self.run(cmd, check=True, capture_output=True, timeout=self.cmd_timeout)
+        except subprocess.TimeoutExpired:
+            raise StepFailed("docker compose timed out") from None
+        except subprocess.CalledProcessError as e:
+            raise StepFailed(f"docker compose up {service} exited with status {e.returncode}") from None

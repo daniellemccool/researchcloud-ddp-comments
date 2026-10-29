@@ -4,10 +4,13 @@ import http.server, os, subprocess, threading, urllib.parse
 GOOD_HASH = "$2b$12$" + "a" * 53
 
 # Every call is appended to $FAKE_DOCKER_CALLS. `compose -f <root>/docker-compose.yml up -d mitm-<u>`
-# drops the CA a real mitmproxy would write, unless the file $FAKE_DOCKER_NO_CA exists.
+# drops the CA a real mitmproxy would write, unless the file $FAKE_DOCKER_NO_CA exists;
+# with $FAKE_DOCKER_HANG present every compose call hangs (exec, so a timeout kill reaches it).
+# With $FAKE_DOCKER_PSQL_FAIL present a psql query (not an UPDATE) exits 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_DOCKER_CALLS"
 if [ "$1" = compose ] && [ "$4" = up ]; then
+  [ -f "$FAKE_DOCKER_HANG" ] && exec sleep 5
   case "$6" in
     mitm-*) [ -f "$FAKE_DOCKER_NO_CA" ] || touch "$(dirname "$3")/state/mitm/${6#mitm-}/mitmproxy-ca-cert.pem";;
   esac
@@ -18,7 +21,7 @@ case "$*" in
   *create_user.py*) [ -f "$FAKE_DOCKER_FAIL" ] && { echo "boom" >&2; exit 1; };;
   *bcrypt*) cat > "$FAKE_DOCKER_STDIN"; if [ -f "$FAKE_DOCKER_HASH" ]; then cat "$FAKE_DOCKER_HASH"; else echo '""" + GOOD_HASH + """'; fi;;
   *UPDATE*) if [ -f "$FAKE_DOCKER_UPDATE" ]; then cat "$FAKE_DOCKER_UPDATE"; else echo "UPDATE 1"; fi;;
-  *psql*) cat "$FAKE_DOCKER_PSQL" 2>/dev/null;;
+  *psql*) [ -f "$FAKE_DOCKER_PSQL_FAIL" ] && exit 1; cat "$FAKE_DOCKER_PSQL" 2>/dev/null;;
 esac
 exit 0
 """
@@ -26,7 +29,7 @@ exit 0
 # Control files the fake reads, relative to the directory passed to fake_docker().
 CONTROL = {"FAKE_DOCKER_CALLS": "calls", "FAKE_DOCKER_PSQL": "psql", "FAKE_DOCKER_STDIN": "stdin",
            "FAKE_DOCKER_HASH": "hash", "FAKE_DOCKER_UPDATE": "update", "FAKE_DOCKER_FAIL": "fail",
-           "FAKE_DOCKER_NO_CA": "no-ca"}
+           "FAKE_DOCKER_NO_CA": "no-ca", "FAKE_DOCKER_HANG": "hang", "FAKE_DOCKER_PSQL_FAIL": "psql-fail"}
 
 
 def fake_docker(t):
