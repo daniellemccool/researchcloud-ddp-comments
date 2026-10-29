@@ -117,7 +117,7 @@ for u in "${USERS[@]}"; do
   fi
   # Hide videos and blur images on tiktok.com (read at Firefox start; re-copied on every render).
   mkdir -p "$DESK/state/firefox/$u/profile/chrome"
-  cp "$REPO/desk/firefox/userContent.css" "$DESK/state/firefox/$u/profile/chrome/userContent.css"
+  cp "$REPO/platforms/tiktok/userContent.css" "$DESK/state/firefox/$u/profile/chrome/userContent.css"
   chown -R 1000:1000 "$DESK/state/mitm/$u" "$DESK/state/firefox/$u" "$DESK/state/captures/$u"
 done
 
