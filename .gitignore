@@ -3,3 +3,5 @@ templates/firefox-profile.tar
 *.pyc
 __pycache__/
 .venv/
+.superpowers/
+dist/
