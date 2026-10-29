@@ -79,7 +79,11 @@ Verified this session unless marked.
   to `<user_info_endpoint>cos/<co_id>/?co_role=<rsc_nginx_co_role>`; 200 means "CO
   member (with that role, if set)". The response carries `username`; Utrecht's
   `nginx_location` role also reads `$upstream_http_src_co_roles` into a `REMOTE_ROLES`
-  header, semicolon-separated. **Not yet observed on our gateway** (§5.4). `if`/`rewrite`
+  header, semicolon-separated. **Observed on our gateway 2026-10-29** (Task 1 probe on
+  `checkjefeedzee`): `src_co_roles` arrives semicolon-separated with no spaces, e.g.
+  `src_co_wallet;src_co_developer;rsc_developers;src_ws_admin;src_co_admin;src_co_students`
+  for an admin and `src_co_students` for a collector; a location that does not set the
+  header yields an empty value, so every gated location must set it. `if`/`rewrite`
   run before `auth_request`, so per-user decisions stay in `map`s. SRC-Nginx owns
   `location = /logout`.
 - **Plugin CO** writes `/etc/rsc/workspace.json` (CO id, user API endpoint, token,
