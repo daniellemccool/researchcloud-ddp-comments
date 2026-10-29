@@ -5,17 +5,20 @@ through return values (`retire` returns an error text, `prune` fills `self.faile
 
 Locks: `up` and the rotate in `sync_admins` hold the user's lock, `render` the render lock,
 and retire goes through the provisioner (user -> render). None of them is called with a
-lock already held: flocked() on a lock this call chain holds would deadlock.
+lock already held: flocked() on a lock this call chain holds would deadlock. `start_pair`
+takes no lock: its callers (`up`, the stub's ensure_started) hold the user's lock.
 """
+import os
 import subprocess
 from typing import Callable
 
+from .coapi import guarded_members
 from .config import DeskConfig
 from .fourcat import FourCat, FourCatError
 from .locks import flocked, render_lock, user_lock
 from .provision import Provisioner, State
 from .registry import Registry
-from .render import write_all
+from .render import drop_legacy_policy, write_all
 
 
 class Sessions:
@@ -44,20 +47,40 @@ class Sessions:
             self.prov.nginx(self.cfg)
         return written
 
-    def _compose_up(self, user) -> None:
-        self.run(["docker", "compose", "-f", f"{self.cfg.desk_root}/docker-compose.yml", "up", "-d",
-                  f"mitm-{user}", f"firefox-{user}"],
-                 check=True, capture_output=True, timeout=self.prov.cmd_timeout)
+    def start_pair(self, user, timeout: float | None = None) -> None:
+        """`docker compose up -d --no-deps mitm-<u> firefox-<u>` (R33), then drop the user's legacy
+        single-file policy, which no container mounts once the pair has been through Compose.
 
-    def up(self, user=None) -> None:
-        """compose up under each user's lock, so it never races a retire or a provisioning run."""
+        Compose recreates a container whose rendered spec drifted (a mount added, an image bumped)
+        and only starts an unchanged one, which `docker start` never does. Takes no lock: the
+        caller holds the user's lock. Raises CalledProcessError or TimeoutExpired on failure."""
+        self.run(["docker", "compose", "-f", os.path.join(self.cfg.desk_root, "docker-compose.yml"),
+                  "up", "-d", "--no-deps", f"mitm-{user}", f"firefox-{user}"],
+                 check=True, capture_output=True, timeout=self.prov.cmd_timeout if timeout is None else timeout)
+        drop_legacy_policy(self.cfg.desk_root, user)
+
+    def up(self, user=None) -> dict[str, str]:
+        """start_pair under each user's lock, so it never races a retire or a provisioning run.
+
+        The row is checked again once the lock is held: a user retired while we waited is skipped
+        (never restarted) and reported in the returned {user: reason}; the others still go up."""
+        skipped = {}
         for u in ([user] if user else sorted(self.reg.live())):
             with flocked(user_lock(self.cfg.desk_root, u)):
-                self._compose_up(u)
+                if u not in self.reg.live():
+                    skipped[u] = "no live session (retired, or never added)"
+                    continue
+                self.start_pair(u)
+        return skipped
 
-    def stop(self, user) -> None:
-        """Stop the firefox container only; mitm stays, as the idle reaper does."""
-        self.run(["docker", "stop", f"desk-firefox-{user}"], timeout=120, capture_output=True)
+    def stop(self, user) -> bool:
+        """Stop the firefox container only; mitm stays, as the idle reaper does.
+        True when docker stop succeeded; False on a non-zero exit or a timeout."""
+        try:
+            r = self.run(["docker", "stop", f"desk-firefox-{user}"], timeout=120, capture_output=True)
+        except subprocess.TimeoutExpired:
+            return False
+        return r.returncode == 0
 
     def running(self) -> dict[str, bool]:
         out = {}
@@ -81,10 +104,7 @@ class Sessions:
 
     def _current_members(self) -> dict[str, bool]:
         """One CO fetch per operation; an empty answer while sessions exist is not believed."""
-        members = self.members()
-        if not members and self.reg.live():
-            raise RuntimeError("CO API returned no members; refusing to retire or sync")
-        return members
+        return guarded_members(self.members, len(self.reg.live()))
 
     def prune(self, members: dict[str, bool] | None = None) -> list[str]:
         """Retire live users who are no longer members; failures land in self.failed."""

@@ -3,9 +3,9 @@
 Per collector, the sidecar proxy: records the platform's capture rules as NDJSON, logs page opens, and is the
 only door from the browser to 4CAT (fourcat.desk, two allowed calls, token injected here, never in the browser).
 
-A captured request goes upstream with Accept-Encoding: identity, so its response is never compressed: the
-Content-Length checked against the rule's max_body_bytes is the real size, and nothing is decompressed
-before that check.
+A captured request goes upstream with Accept-Encoding: identity. A server may compress anyway: such a response
+is refused at responseheaders and recorded as `encoded`, so nothing is ever decompressed here and the
+Content-Length checked against the rule's max_body_bytes is the real size.
 """
 import datetime
 import json
@@ -77,8 +77,8 @@ class Capture:
             ctx.master.shutdown()
 
     def request(self, flow: http.HTTPFlow):
-        if PLATFORM is None:
-            return self._refuse(flow, "no-platform")
+        if PLATFORM is None or not USER:            # misconfigured: refuse even before running() shuts us down
+            return self._refuse(flow, "no-platform" if PLATFORM is None else "no-user")
         try:
             self._request(flow)
         except Exception as e:                      # fail closed: a broken hook must never forward the flow

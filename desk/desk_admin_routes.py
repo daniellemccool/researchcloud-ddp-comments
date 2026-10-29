@@ -6,6 +6,7 @@ export), never a parallel implementation.
 """
 import email.parser
 import os
+import socket
 import subprocess
 import time
 import urllib.error
@@ -17,6 +18,7 @@ from desklib.locks import flocked, user_lock
 from desklib.registry import USER_RE
 
 MAX_UPLOAD = 5 * 1024 * 1024
+UPLOAD_TIMEOUT = 30   # seconds a stalled upload may hold a handler thread
 OPS = ("reconcile", "prune", "stop", "retire", "repair")
 NEEDS_USER = ("stop", "retire", "repair")
 NO_4CAT = "4CAT is not enabled on this desk."
@@ -40,23 +42,30 @@ def csrf_ok(headers) -> bool:
 
 
 def read_upload(handler) -> tuple[int, bytes | str]:
-    """(0, file bytes) from a multipart form's `file` field, else (status, reason)."""
+    """(0, file bytes) from a multipart form's `file` field, else (status, reason).
+
+    The socket gets a timeout first: a drip-fed body ends in 408 instead of pinning the thread."""
     try:
         n = int(handler.headers.get("Content-Length", ""))
     except ValueError:
         return 411, "Content-Length required"
     if n < 0:
         return 400, "bad Content-Length"
-    if n > MAX_UPLOAD:
+    handler.connection.settimeout(UPLOAD_TIMEOUT)
+    try:
+        if n > MAX_UPLOAD:
+            handler.close_connection = True
+            left = n if n <= 8 * MAX_UPLOAD else 0     # drain a modest overshoot so the client can read the 413
+            while left > 0:
+                chunk = handler.rfile.read(min(left, 65536))
+                if not chunk:
+                    break
+                left -= len(chunk)
+            return 413, "upload larger than 5 MB"
+        body = handler.rfile.read(n)
+    except socket.timeout:
         handler.close_connection = True
-        left = n if n <= 8 * MAX_UPLOAD else 0     # drain a modest overshoot so the client can read the 413
-        while left > 0:
-            chunk = handler.rfile.read(min(left, 65536))
-            if not chunk:
-                break
-            left -= len(chunk)
-        return 413, "upload larger than 5 MB"
-    body = handler.rfile.read(n)
+        return 408, "upload timed out"
     ctype = handler.headers.get("Content-Type", "")
     if not ctype.lower().startswith("multipart/form-data"):
         return 400, "expected a multipart form"
@@ -89,7 +98,7 @@ def summarise(op, user, result, sessions) -> str:
         return ("prune: retired " + (" ".join(result) or "-")
                 + "".join(f"; {u}: retire failed: {why}" for u, why in sessions.failed.items()))
     if op == "stop":
-        return f"stopped {user}"
+        return f"stopped {user}" if result else f"could not stop {user}"
     if op == "retire":
         return f"{user}: retire failed: {result}" if result else f"retired {user}"
     return f"{user}: " + ("ready" if result.ready() else f"stuck at {result.current()}: {result.error() or 'incomplete'}")
@@ -140,6 +149,10 @@ def handle_admin(handler, desk, user, method, path, query) -> bool:
 
     def redirect(where="/desk/admin/"):
         send(303, headers=[("Location", where)])
+    if method == "POST":
+        # Only a complete upload reads the body; every other answer leaves it unread, so the
+        # connection must close after the response (never parse leftover bytes as a request).
+        handler.close_connection = True
     if method == "POST" and not csrf_ok(handler.headers):
         say(403, "Refused: this request did not come from the admin page.")
         return True
@@ -215,7 +228,7 @@ def handle_admin(handler, desk, user, method, path, query) -> bool:
             notice = f"{op}{' ' + target if target else ''} failed: {type(e).__name__}: {e}"
         else:
             notice = summarise(op, target, result, s)
-            if op == "stop":
+            if op == "stop" and result:        # a failed stop leaves the reaper's clock alone
                 desk.last_seen.pop(target, None)
         desk.set_notice(user, notice)
         redirect()

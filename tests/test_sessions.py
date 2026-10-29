@@ -106,6 +106,13 @@ class CoApiTests(unittest.TestCase):
         self.assertEqual(coapi.membership(members, cfg),
                          {"lsabajo": False, "jterbraak": False, "dmccool": True})
 
+    def test_guarded_members(self):
+        self.assertEqual(coapi.guarded_members(lambda: {}, 0), {})        # nobody live: empty is believable
+        self.assertEqual(coapi.guarded_members(lambda: {"a": True}, 3), {"a": True})
+        with self.assertRaisesRegex(RuntimeError, "^CO API returned no members; refusing "):
+            coapi.guarded_members(lambda: {}, 1)
+        self.assertTrue(issubclass(coapi.NoMembers, RuntimeError))
+
     def test_workspace_info_reads_json(self):
         with tempfile.TemporaryDirectory() as t:
             put(os.path.join(t, "w.json"), '{"co_token": "a"}')
@@ -203,6 +210,64 @@ class SessionsTests(unittest.TestCase):
         self.s.up("bob")
         self.s.up()
         self.assertEqual(held, [("bob", True), ("alice", True), ("bob", True), ("carol", True)])
+
+    def compose_calls(self):
+        p = os.path.join(self.t, "calls")
+        return [c for c in slurp(p).splitlines() if c.startswith("compose")] if os.path.exists(p) else []
+
+    def test_up_is_compose_up_no_deps_on_the_pair(self):
+        self.assertEqual(self.s.up("bob"), {})
+        self.assertEqual(self.compose_calls(),
+                         [f"compose -f {self.root}/docker-compose.yml up -d --no-deps mitm-bob firefox-bob"])
+
+    def test_up_skips_a_user_retired_meanwhile(self):
+        with flocked(render_lock(self.root)):
+            self.reg.retire("carol")
+        self.assertEqual(self.s.up("carol"), {"carol": "no live session (retired, or never added)"})
+        self.assertEqual(self.compose_calls(), [])
+        with flocked(render_lock(self.root)):
+            self.reg.allocate("carol")
+        real = self.s.run
+
+        def run(cmd, **kw):   # bob is retired while up() works on alice: up() has already listed him
+            if "compose" in cmd and cmd[-1] == "firefox-alice":
+                with flocked(render_lock(self.root)):
+                    self.reg.retire("bob")
+            return real(cmd, **kw)
+        self.s.run = run
+        self.assertEqual(self.s.up(), {"bob": "no live session (retired, or never added)"})
+        self.assertEqual([c.rsplit(" ", 1)[1] for c in self.compose_calls()], ["firefox-alice", "firefox-carol"])
+
+    def test_legacy_policy_survives_render_and_goes_after_up(self):
+        legacy = {u: os.path.join(self.root, "firefox", f"policies-{u}.json") for u in ("alice", "bob")}
+        for p in legacy.values():
+            put(p, "{}")
+        self.s.render()
+        self.assertTrue(all(os.path.exists(p) for p in legacy.values()))   # write_all leaves them
+        self.s.up("alice")
+        self.assertFalse(os.path.exists(legacy["alice"]))                  # alice's pair was recreated
+        self.assertTrue(os.path.exists(legacy["bob"]))                     # bob's not yet
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "firefox", "policy", "alice", "policies.json")))
+
+    def test_failed_up_keeps_the_legacy_policy(self):
+        put(os.path.join(self.root, "firefox", "policies-alice.json"), "{}")
+
+        def fail(cmd, **kw):
+            raise subprocess.CalledProcessError(1, cmd)
+        self.s.run = fail
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.s.up("alice")
+        self.assertTrue(os.path.exists(os.path.join(self.root, "firefox", "policies-alice.json")))
+
+    def test_stop_reports_success(self):
+        self.assertTrue(self.s.stop("alice"))
+        self.s.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
+        self.assertFalse(self.s.stop("alice"))
+
+        def hang(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 120)
+        self.s.run = hang
+        self.assertFalse(self.s.stop("alice"))
 
     def test_demotion_rotates_under_the_user_lock(self):
         held = []

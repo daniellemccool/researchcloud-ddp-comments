@@ -322,6 +322,136 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(self.prov.advance("alice").error(),
                          "error: docker compose create firefox-alice exited with status 3")
 
+    # --- retire's abort path (R30, A1) ---------------------------------------------------------
+
+    def running(self, *names):
+        d = os.path.join(self.t, "containers")
+        os.makedirs(d, exist_ok=True)
+        for n in names:
+            open(os.path.join(d, n), "w").close()
+
+    def assert_retire_aborts(self, message, user="alice"):
+        compose = os.path.join(self.root, "docker-compose.yml")
+        reg_before, compose_before, n = slurp(self.reg.path), slurp(compose), len(self.nginx_calls)
+        with self.assertRaisesRegex(RuntimeError, "^" + message.replace(".", r"\.") + "$"):
+            self.prov.retire(user)
+        self.assertIn(user, self.reg.live())                                   # the row stays live
+        self.assertTrue(os.path.exists(os.path.join(self.root, "state", "users", user, "provision.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "state", "retired", user)))   # not moved
+        self.assertEqual(slurp(self.reg.path), reg_before)                     # no registry write
+        self.assertEqual(slurp(compose), compose_before)                       # no render
+        self.assertEqual(len(self.nginx_calls), n)
+        self.assertTrue(self.prov.state(user).ready())
+
+    def test_retire_aborts_when_a_stop_fails_or_does_not_take(self):
+        self.assertTrue(self.prov.advance("alice").ready())
+        self.running("desk-firefox-alice", "desk-mitm-alice")
+        for mode in ("stop-fail", "still-running"):
+            self.put(mode)
+            self.assert_retire_aborts("could not stop desk-firefox-alice; retire aborted")
+            os.remove(os.path.join(self.t, mode))
+        self.prov.retire("alice")                                              # a stop that works
+        self.assertNotIn("alice", self.reg.live())
+
+    def test_retire_aborts_when_a_stop_times_out(self):
+        self.assertTrue(self.prov.advance("alice").ready())
+
+        def run(cmd, **kw):
+            if cmd[:2] == ["docker", "stop"]:
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+            return self.run_docker(cmd, **kw)
+        self.prov.run = run
+        self.assert_retire_aborts("could not stop desk-firefox-alice; retire aborted")
+
+    def test_retire_aborts_when_docker_cannot_confirm(self):
+        self.assertTrue(self.prov.advance("alice").ready())
+        self.put("inspect-daemon-down")                    # stop "worked", inspect cannot reach the daemon
+        self.assert_retire_aborts("could not confirm desk-firefox-alice stopped; retire aborted")
+
+        def odd(cmd, **kw):                                # exit 0 with output that is neither true nor false
+            if cmd[:2] == ["docker", "inspect"]:
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return self.run_docker(cmd, **kw)
+        os.remove(os.path.join(self.t, "inspect-daemon-down"))
+        self.prov.run = odd
+        self.assert_retire_aborts("could not confirm desk-firefox-alice stopped; retire aborted")
+
+    def test_retire_of_a_never_provisioned_user_completes(self):
+        with locks.flocked(locks.render_lock(self.root)):
+            self.reg.allocate("ghost")                     # a row, but no containers were ever made
+        self.put("inspect-no-such")                        # stop and inspect: "No such container"
+        self.prov.retire("ghost")
+        self.assertNotIn("ghost", self.reg.live())
+        self.assertIn("inspect -f {{.State.Running}} desk-mitm-ghost", self.calls())
+
+    # --- concurrency and lifecycle (A8) ---------------------------------------------------------
+
+    def test_advance_and_retire_race_to_one_coherent_end(self):
+        compose = os.path.join(self.root, "docker-compose.yml")
+        ends = set()
+        for _ in range(4):
+            self.assertTrue(self.prov.advance("alice").ready())
+            gate, errors = threading.Barrier(2), []
+
+            def go(op):
+                gate.wait()
+                try:
+                    op("alice")
+                except Exception as e:  # noqa: BLE001 (any error is a failure of the test)
+                    errors.append(e)
+            ts = [threading.Thread(target=go, args=(op,)) for op in (self.prov.advance, self.prov.retire)]
+            [t.start() for t in ts]; [t.join(30) for t in ts]
+            self.assertEqual(errors, [])
+            users = os.path.join(self.root, "state", "users", "alice")
+            if "alice" in self.reg.live():                 # retire first, then advance re-provisioned
+                ends.add("ready")
+                self.assertTrue(self.prov.state("alice").ready())
+                self.assertIn("  mitm-alice:", slurp(compose))
+            else:                                          # advance (a no-op) first, then retire
+                ends.add("retired")
+                self.assertFalse(os.path.exists(users))
+                self.assertEqual(self.prov.state("alice"), pv.State())
+                self.assertNotIn("mitm-alice", slurp(compose))
+            self.assertTrue(os.path.exists(os.path.join(self.root, "state", "retired", "alice", "provision.json")))
+        self.assertTrue(ends)
+
+    def test_two_users_provision_concurrently(self):
+        out = {}
+        ts = [threading.Thread(target=lambda u=u: out.__setitem__(u, self.prov.advance(u))) for u in ("alice", "bob")]
+        [t.start() for t in ts]; [t.join(30) for t in ts]
+        self.assertTrue(out["alice"].ready() and out["bob"].ready(), out)
+        rows = self.reg.rows()
+        self.assertEqual(sorted(r.user for r in rows), ["alice", "bob"])     # one row each
+        self.assertEqual(sorted(r.index for r in rows), [1, 2])              # distinct indexes
+        compose = slurp(os.path.join(self.root, "docker-compose.yml"))
+        self.assertIn("  mitm-alice:", compose); self.assertIn("  mitm-bob:", compose)
+
+    def test_advance_after_retire_reprovisions(self):
+        """Intended: `desk-sessions add <retired user>` (or their next visit) brings them back."""
+        self.assertTrue(self.prov.advance("alice").ready())
+        self.prov.retire("alice")
+        self.assertNotIn("alice", self.reg.live())
+        st = self.prov.advance("alice")
+        self.assertTrue(st.ready(), st.steps)
+        self.assertEqual(self.reg.live()["alice"].index, 1)                  # the old index, still free
+        self.assertEqual([r.user for r in self.reg.rows()], ["alice"])      # the same row, reactivated
+        self.assertIn("  mitm-alice:", slurp(os.path.join(self.root, "docker-compose.yml")))
+
+    def test_provision_json_is_root_only(self):
+        self.prov.advance("alice")
+        p = os.path.join(self.root, "state", "users", "alice", "provision.json")
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+
+    def test_api_mode_empty_member_list_is_refused_at_render(self):
+        self.cfg.gate_mode = "api"
+        prov = pv.Provisioner(self.cfg, self.reg, self.fc, lambda u: False, members=lambda: {},
+                              run=self.run_docker, nginx=self.nginx_calls.append)
+        st = prov.advance("alice")
+        self.assertEqual(st.current(), "render")
+        self.assertEqual(st.error(), "error: CO API returned no members; refusing to act while sessions exist")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "nginx", "desk-map.conf")))
+        self.assertEqual(self.nginx_calls, [])
+
     def test_stranded_template_staging_is_removed(self):
         ff = os.path.join(self.root, "state", "firefox", "alice")
         os.makedirs(os.path.join(ff, ".template.tmp", "junk"))

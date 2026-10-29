@@ -25,6 +25,21 @@ def co_members(info: dict, urlopen=urllib.request.urlopen) -> list[dict]:
     return data
 
 
+class NoMembers(RuntimeError):
+    """The CO API answered with nobody while the desk has live sessions; the message is fixed text."""
+
+
+def guarded_members(fetch, live_count: int) -> dict:
+    """fetch() once; an empty answer while `live_count` sessions exist is not believed.
+
+    Every caller that acts on membership (retire, admin sync, the nginx maps) goes through here:
+    one flaky CO reply must never revoke every member at once."""
+    members = fetch()
+    if not members and live_count:
+        raise NoMembers("CO API returned no members; refusing to act while sessions exist")
+    return members
+
+
 def membership(members: list[dict], cfg: DeskConfig) -> dict[str, bool]:
     """user -> is_admin, for users holding the collector or the admin role."""
     out = {}

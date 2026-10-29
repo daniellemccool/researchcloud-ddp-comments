@@ -3,7 +3,9 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +43,7 @@ def _check(user):
 # (DESK_FOURCAT_TOKEN_FILE). A directory mount, so a token replaced by rename is seen at once.
 TOKEN_NAME = "4cat-token"
 PROXY_UID = 1000
+TMP_MAX_AGE = 600  # seconds; a `_write` temp file older than this was left by a crash
 
 
 def _secret_dir(desk_root, sub):
@@ -65,22 +68,48 @@ def token_dir(desk_root, user):
 def migrate_legacy_token(desk_root, user) -> bool:
     """Move a single-file token (secrets/4cat-tokens/<user>, the old layout) into <user>/4cat-token.
 
-    Idempotent and crash-safe: the file is first renamed aside to a name no user can have. True if
-    a legacy token was found."""
+    Idempotent and crash-safe: the file is first renamed aside to a name no user can have, then
+    published 0600 (and owned by the proxy's uid when root). True if this call moved or dropped a
+    legacy token. Two callers may race (a render under the render lock, a write_token under the
+    user lock): if the file vanishes under us the other one migrated it, which is success too."""
     tokens = os.path.join(desk_root, "secrets", "4cat-tokens")
     legacy, aside = os.path.join(tokens, _check(user)), os.path.join(tokens, f".{user}.legacy-token")
-    if os.path.isfile(legacy) and not os.path.islink(legacy):
-        os.replace(legacy, aside)
-    if not os.path.isfile(aside):
-        return False
-    dest = os.path.join(token_dir(desk_root, user), TOKEN_NAME)
-    if os.path.exists(dest):
-        os.remove(aside)  # a newer token was written since
-    else:
-        if os.geteuid() == 0:
-            os.chown(aside, PROXY_UID, PROXY_UID)
-        os.replace(aside, dest)
+    try:
+        if os.path.isfile(legacy) and not os.path.islink(legacy):
+            os.replace(legacy, aside)
+        if not os.path.isfile(aside):
+            return False
+        dest = os.path.join(token_dir(desk_root, user), TOKEN_NAME)
+        if os.path.exists(dest):
+            os.remove(aside)  # a newer token was written since
+        else:
+            os.chmod(aside, 0o600)
+            if os.geteuid() == 0:
+                os.chown(aside, PROXY_UID, PROXY_UID)
+            os.replace(aside, dest)
+    except FileNotFoundError:
+        return False  # the concurrent caller got there first: already migrated
     return True
+
+
+def _sweep_tmp(d, now=None) -> None:
+    """Remove `*.tmp` regular files older than TMP_MAX_AGE in d (crashed `_write`s); a younger
+    one may belong to a write in flight and is left alone."""
+    try:
+        names = os.listdir(d)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    cutoff = (time.time() if now is None else now) - TMP_MAX_AGE
+    for name in names:
+        if not name.endswith(".tmp"):
+            continue
+        p = os.path.join(d, name)
+        try:
+            st = os.lstat(p)
+            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                os.remove(p)
+        except FileNotFoundError:
+            pass
 
 
 class FourCat:
@@ -106,8 +135,16 @@ class FourCat:
         return r.stdout or ""
 
     def _psql(self, sql):
-        return self._exec(self.cfg.fourcat_db, "psql", "-U", self.db_user, "-d", self.db_name,
-                          "-tAc", sql, what="psql").strip()
+        """ON_ERROR_STOP: a failed statement exits non-zero (3) instead of 0 with empty output,
+        so a permissions or schema error raises FourCatError rather than reading as "no account"."""
+        return self._exec(self.cfg.fourcat_db, "psql", "-v", "ON_ERROR_STOP=1", "-U", self.db_user,
+                          "-d", self.db_name, "-tAc", sql, what="psql").strip()
+
+    def _sweep(self, user):
+        """The two secrets directories a `_write` for `user` uses: the passwords and the user's tokens."""
+        root = self.cfg.desk_root
+        _sweep_tmp(os.path.join(root, "secrets", "4cat-passwords"))
+        _sweep_tmp(os.path.join(root, "secrets", "4cat-tokens", _check(user)))
 
     def _write(self, path, text, exclusive=False, owner=None):
         """Write via a 0600 temp file in path's directory (which must exist); publish atomically.
@@ -133,6 +170,7 @@ class FourCat:
 
     def ensure_password(self, user):
         path = self.password_path(user)
+        self._sweep(user)
         for _ in range(2):
             try:
                 with open(path) as f:
@@ -180,9 +218,12 @@ class FourCat:
         if not out:
             raise FourCatError(f"no 4CAT account for {user}")
         try:
-            return "admin" in json.loads(out)
+            tags = json.loads(out)
         except ValueError:
             raise FourCatError("unparseable tags") from None
+        if not isinstance(tags, list):  # a jsonb null or object: never a TypeError out of sync_admins
+            raise FourCatError("unexpected tags value")
+        return "admin" in tags
 
     def set_admin(self, user, admin):
         u = _check(user)
@@ -228,6 +269,7 @@ class FourCat:
         """<user>/4cat-token, 0600 and owned by the proxy's uid when root, replaced by rename."""
         migrate_legacy_token(self.cfg.desk_root, user)
         token_dir(self.cfg.desk_root, user)
+        self._sweep(user)
         path = self.token_path(user)
         self._write(path, token, owner=(PROXY_UID, PROXY_UID) if os.geteuid() == 0 else None)
         return path

@@ -1,5 +1,6 @@
 """Tests for desk/desklib/fourcat.py: fake `docker` on PATH plus an in-process fake 4CAT."""
-import os, stat, sys, tempfile, unittest
+import os, stat, sys, tempfile, time, unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "desk"))
@@ -193,6 +194,111 @@ class FourCatTests(unittest.TestCase):
         with open(self.psql, "w") as f:
             f.write('["admin", "x"]\n')
         self.assertTrue(self.fc.is_admin("alice"))
+
+    def test_sql_error_is_an_error_not_no_account(self):
+        self.put("sql-error", "")   # psql prints an ERROR; exits 3 only under ON_ERROR_STOP=1, like real psql
+        for call in (lambda: self.fc.is_admin("alice"), lambda: self.fc.set_admin("alice", True),
+                     lambda: self.fc.account_exists("alice")):
+            with self.assertRaises(fc.FourCatError) as cm:
+                call()
+            self.assertNotIn("no 4CAT account", str(cm.exception))
+            self.assertEqual(str(cm.exception), "psql exited with status 3")   # no SQL or output echoed
+        self.assertIn("psql -v ON_ERROR_STOP=1 -U", self.calls_text())
+
+    def test_tags_must_be_a_list(self):
+        for text in ("null", '{"admin": 1}', '"admin"', "1"):
+            self.put("psql", text + "\n")
+            with self.assertRaisesRegex(fc.FourCatError, "^unexpected tags value$", msg=text):
+                self.fc.is_admin("alice")
+
+    def test_migrated_legacy_token_is_0600(self):
+        tokens = os.path.join(self.cfg.desk_root, "secrets", "4cat-tokens")
+        os.makedirs(tokens)
+        legacy = os.path.join(tokens, "alice")
+        with open(legacy, "w") as f:
+            f.write("old")
+        os.chmod(legacy, 0o644)
+        self.assertTrue(fc.migrate_legacy_token(self.cfg.desk_root, "alice"))
+        self.assertEqual(stat.S_IMODE(os.stat(self.fc.token_path("alice")).st_mode), 0o600)
+        self.assertEqual(slurp(self.fc.token_path("alice")), "old")
+
+    def test_migration_tolerates_a_concurrent_migration(self):
+        tokens = os.path.join(self.cfg.desk_root, "secrets", "4cat-tokens")
+        os.makedirs(tokens)
+        with open(os.path.join(tokens, "alice"), "w") as f:
+            f.write("old")
+        aside, real = os.path.join(tokens, ".alice.legacy-token"), os.replace
+
+        def racing_replace(src, dst):
+            if src == aside:          # the other caller publishes the aside file first
+                real(src, dst)
+            real(src, dst)            # ours then finds it gone: FileNotFoundError
+        with mock.patch.object(fc.os, "replace", racing_replace):
+            self.assertFalse(fc.migrate_legacy_token(self.cfg.desk_root, "alice"))   # no exception
+        self.assertEqual(slurp(self.fc.token_path("alice")), "old")
+        self.assertEqual(sorted(os.listdir(tokens)), ["alice"])
+
+    def test_stale_temp_files_are_swept(self):
+        pw_dir = os.path.join(self.cfg.desk_root, "secrets", "4cat-passwords")
+        tok_dir = fc.token_dir(self.cfg.desk_root, "alice")
+        os.makedirs(pw_dir)
+        old_t = os.path.join(pw_dir, "alice.deadbeef.tmp")
+        new_t = os.path.join(pw_dir, "bob.cafebabe.tmp")
+        old_k = os.path.join(tok_dir, "4cat-token.deadbeef.tmp")
+        for p in (old_t, new_t, old_k):
+            with open(p, "w") as f:
+                f.write("half")
+        hour_ago = time.time() - 3600
+        os.utime(old_t, (hour_ago, hour_ago)); os.utime(old_k, (hour_ago, hour_ago))
+        self.fc.ensure_password("alice")
+        self.assertFalse(os.path.exists(old_t)); self.assertFalse(os.path.exists(old_k))
+        self.assertTrue(os.path.exists(new_t))     # young: may be a write in flight
+        os.utime(new_t, (hour_ago, hour_ago))
+        with open(old_k, "w") as f:
+            f.write("half")
+        os.utime(old_k, (hour_ago, hour_ago))
+        self.fc.write_token("bob", "tok-bob")      # sweeps the passwords dir and bob's token dir
+        self.assertFalse(os.path.exists(new_t))
+        self.assertTrue(os.path.exists(old_k))     # alice's token dir is not bob's to sweep
+
+    def test_ensure_password_reads_the_race_winner(self):
+        real = os.link
+
+        def lose(src, dst):
+            with open(dst, "w") as f:    # the other provisioning run publishes first
+                f.write("winner-pw")
+            real_err = FileExistsError(17, "File exists")
+            raise real_err
+        with mock.patch.object(fc.os, "link", lose):
+            self.assertEqual(self.fc.ensure_password("alice"), ("winner-pw", False))
+        self.assertIs(os.link, real)
+        d = os.path.dirname(self.fc.password_path("alice"))
+        self.assertEqual(os.listdir(d), ["alice"])   # our temp file was cleaned up
+
+    def test_rotate_failing_at_login_converges(self):
+        old, _ = self.fc.ensure_password("alice")
+        self.fc.write_token("alice", "old-token")
+        PASSWORDS["alice"] = old
+        self.addCleanup(PASSWORDS.__setitem__, "alice", "pw-alice")
+        real_set = self.fc.set_password
+
+        def set_password(user, password):     # the DB: what the fake 4CAT checks logins against
+            real_set(user, password)
+            PASSWORDS[user] = password
+        self.fc.set_password = set_password
+        up = self.cfg.fourcat_url
+        self.cfg.fourcat_url = "http://127.0.0.1:1"      # 4CAT down for this one rotate
+        with self.assertRaises(fc.FourCatError):
+            self.fc.rotate("alice")
+        new = slurp(self.fc.password_path("alice"))
+        self.assertNotEqual(new, old)
+        self.assertEqual(PASSWORDS["alice"], new)                       # DB and file agree, both new
+        self.assertEqual(slurp(os.path.join(self.t, "stdin")), new)     # the hash was of the new one
+        self.assertEqual(slurp(self.fc.token_path("alice")), "old-token")   # the proxy keeps working
+        self.cfg.fourcat_url = up
+        self.fc.rotate("alice")                                          # the retry converges
+        self.assertEqual(slurp(self.fc.password_path("alice")), PASSWORDS["alice"])
+        self.assertEqual(slurp(self.fc.token_path("alice")), "tok-alice")
 
     def test_rotate_changes_password_and_token(self):
         old, _ = self.fc.ensure_password("alice")

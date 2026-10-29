@@ -74,6 +74,7 @@ def _service_pair(cfg: DeskConfig, u: str, index: int, port: int, token: bool) -
 
 
 def render_compose(cfg: DeskConfig, reg: Registry, token_exists: Callable[[str], bool]) -> str:
+    cfg.validate()   # every interpolated value, however the config was built
     live = reg.live()
     parts = [HEADER, "name: desk"]
     if live:
@@ -100,6 +101,7 @@ def _map(key: str, var: str, default: str, entries: list[tuple[str, str]]) -> li
 def render_maps(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = None) -> str:
     """In api mode $desk_member/$desk_admin list every role-holder in `members`, registered
     or not (a first visit must reach the stub to be provisioned); the VNC maps stay live-only."""
+    cfg.validate()   # the roles become regexes and the 4CAT netloc a map value
     live = reg.live()
     stub, fourcat = _stub(cfg), _fourcat_hostport(cfg)
     if cfg.gate_mode == "api":
@@ -180,6 +182,7 @@ def render_fourcat_conf(cfg: DeskConfig) -> str:
 # --- Firefox policy --------------------------------------------------------
 
 def render_policy(cfg: DeskConfig) -> str:
+    cfg.validate()   # the version lands inside a JSON string: VERSION_RE keeps it there
     with open(os.path.join(cfg.repo_dir, "desk", "firefox", "policies.json")) as f:
         return f.read().replace("{{ZEESCHUIMER_VERSION}}", cfg.zeeschuimer_version)
 
@@ -206,8 +209,27 @@ def _write_atomic(path: str, text: str) -> str:
     return path
 
 
+def _copy_atomic(src: str, dst: str) -> str:
+    """Copy src to dst by temp file + rename in dst's directory (0644): a reader under a
+    directory mount sees the old file or the new one, never a half-written one."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst), prefix=".tmp.")
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    return dst
+
+
 def _sync_dir(src: str, dest: str) -> None:
-    """Make `dest` match `src` without replacing `dest` (it is bind-mounted into running proxies)."""
+    """Make `dest` match `src` without replacing `dest` (it is bind-mounted into running proxies).
+    Each file is replaced by rename inside dest; files src no longer has are deleted."""
     os.makedirs(dest, exist_ok=True)
     want = set()
     for dirpath, dirs, files in os.walk(src):
@@ -216,7 +238,7 @@ def _sync_dir(src: str, dest: str) -> None:
         for name in files:
             r = os.path.normpath(os.path.join(rel, name))
             want.add(r)
-            shutil.copyfile(os.path.join(src, r), os.path.join(dest, r))
+            _copy_atomic(os.path.join(src, r), os.path.join(dest, r))
     for dirpath, dirs, files in os.walk(dest, topdown=False):
         rel = os.path.relpath(dirpath, dest)
         for name in files:
@@ -235,39 +257,36 @@ def _chown_tree(path: str) -> None:
             shutil.chown(os.path.join(dirpath, name), 1000, 1000, follow_symlinks=False)
 
 
-def _drop_legacy_policies(root: str) -> None:
-    """Remove firefox/policies-<u>.json, the single-file-mount layout (now firefox/policy/<u>/)."""
-    try:
-        names = os.listdir(os.path.join(root, "firefox"))
-    except FileNotFoundError:
-        return
-    for name in names:
-        p = os.path.join(root, "firefox", name)
-        if name.startswith("policies-") and name.endswith(".json") and os.path.isfile(p):
+def drop_legacy_policy(root: str, user: str) -> None:
+    """Remove firefox/policies-<user>.json, the single-file-mount layout (now firefox/policy/<user>/).
+
+    Called only after that user's pair was (re)created by `compose up` (R33): until then an
+    existing container may still have the old file bind-mounted."""
+    if not isinstance(user, str) or not USER_RE.fullmatch(user):
+        raise ValueError(f"invalid username: {user!r}")
+    p = os.path.join(root, "firefox", f"policies-{user}.json")
+    if os.path.lexists(p) and not os.path.isdir(p):
+        try:
             os.remove(p)
+        except FileNotFoundError:
+            pass
 
 
 def write_all(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = None) -> list[str]:
+    """Render everything. Order: token migration and the per-user policy and state directories
+    first, the Compose file last, so every directory the Compose file mounts exists before any
+    `compose up` can read it. Legacy firefox/policies-<u>.json files are left alone here."""
     from .fourcat import migrate_legacy_token
     from .platform import load_dir
+    cfg.validate()   # before anything is written
     root = cfg.desk_root
     platform = load_dir(cfg.platforms_dir, cfg.platform)
     live = reg.live()
     for u in live:
         migrate_legacy_token(root, u)  # before the compose: its token mount needs the directory
-    written = [
-        _write_atomic(os.path.join(root, "docker-compose.yml"), render_compose(
-            cfg, reg, lambda u: os.path.isdir(os.path.join(root, "secrets", "4cat-tokens", u)))),
-        _write_atomic(os.path.join(root, "nginx", "desk-map.conf"), render_maps(cfg, reg, members)),
-        _write_atomic(os.path.join(root, "nginx", "desk.conf"), render_desk_conf(cfg)),
-        _write_atomic(os.path.join(root, "nginx", "fourcat.conf"), render_fourcat_conf(cfg)),
-    ]
+    written = []
     policy = render_policy(cfg)
-    dest = os.path.join(root, "platform")
-    _sync_dir(platform.dir, dest)
-    written.append(dest)
     css_src = os.path.join(platform.dir, "userContent.css")
-    _drop_legacy_policies(root)
     for u in live:
         written.append(_write_atomic(os.path.join(root, "firefox", "policy", u, "policies.json"), policy))
         dirs = [os.path.join(root, "state", kind, u) for kind in ("mitm", "firefox", "captures")]
@@ -278,13 +297,22 @@ def write_all(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = 
             pass  # not templated yet: a chrome/ dir here would defeat the "untar if empty" step
         elif cfg.hide_media and os.path.isfile(css_src):
             os.makedirs(os.path.dirname(css), exist_ok=True)
-            shutil.copyfile(css_src, css)
-            written.append(css)
+            written.append(_copy_atomic(css_src, css))
         elif not cfg.hide_media and os.path.exists(css):
             os.remove(css)
         if os.geteuid() == 0:
             for d in dirs:
                 _chown_tree(d)
+    dest = os.path.join(root, "platform")
+    _sync_dir(platform.dir, dest)
+    written.append(dest)
+    written += [
+        _write_atomic(os.path.join(root, "nginx", "desk-map.conf"), render_maps(cfg, reg, members)),
+        _write_atomic(os.path.join(root, "nginx", "desk.conf"), render_desk_conf(cfg)),
+        _write_atomic(os.path.join(root, "nginx", "fourcat.conf"), render_fourcat_conf(cfg)),
+        _write_atomic(os.path.join(root, "docker-compose.yml"), render_compose(
+            cfg, reg, lambda u: os.path.isdir(os.path.join(root, "secrets", "4cat-tokens", u)))),
+    ]
     return written
 
 

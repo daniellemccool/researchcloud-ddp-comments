@@ -13,18 +13,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fakes  # noqa: E402
 from test_provision import make_template  # noqa: E402
 
-# The stub's own docker calls: container state lives in $FAKE_DOCKER_STATE, a Firefox exec and a
-# `start` obey $FAKE_DOCKER_MODE (fail; hang for the exec only); `compose up -d <svc>` also marks
-# desk-<svc> running (`create` does not). Everything else (compose, 4CAT execs) goes to the shared fake.
+# The stub's own docker calls: container state lives in $FAKE_DOCKER_STATE. A Firefox exec, a
+# `compose up` and a `stop` obey $FAKE_DOCKER_MODE (fail; hang for the exec only); `compose up`
+# marks every mitm-/firefox- service it names running (`create` does not). Everything else
+# (the rest of compose, 4CAT execs) goes to the shared fake.
 OUTER_DOCKER = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_DOCKER_CALLS"
-[ "$1" = compose ] && [ "$4" = up ] && touch "$FAKE_DOCKER_STATE/desk-${@: -1}"
+mode="$(cat "$FAKE_DOCKER_MODE" 2>/dev/null)"
+if [ "$1" = compose ] && [ "$4" = up ]; then
+  [ "$mode" = fail ] && { echo "boom" >&2; exit 1; }
+  for svc in "${@:5}"; do
+    case "$svc" in mitm-*|firefox-*) touch "$FAKE_DOCKER_STATE/desk-$svc";; esac
+  done
+fi
 case "$1" in
   ps) printf 'desk-firefox-alice\\tUp 2 hours\\ndesk-mitm-alice\\tUp 2 hours\\n'; exit 0;;
   inspect) [ -f "$FAKE_DOCKER_STATE/${@: -1}" ] && echo true || echo false; exit 0;;
-  start) [ "$(cat "$FAKE_DOCKER_MODE" 2>/dev/null)" = fail ] && { echo "boom" >&2; exit 1; }
-         touch "$FAKE_DOCKER_STATE/$2"; exit 0;;
-  stop) rm -f "$FAKE_DOCKER_STATE/${@: -1}"; exit 0;;
+  stop) [ "$mode" = fail ] && { echo "boom" >&2; exit 1; }
+        rm -f "$FAKE_DOCKER_STATE/${@: -1}"; exit 0;;
 esac
 case "$*" in
   *" su-exec "*)
@@ -136,6 +142,13 @@ class StubHarness(unittest.TestCase):
 
     def docker_calls(self):
         return fakes.docker_calls(self.t)
+
+    def starts(self):
+        """The `compose up -d --no-deps` pair starts (R33), the only way a pair is started on open."""
+        return [c for c in self.docker_calls() if " up -d --no-deps " in c]
+
+    def start_call(self, user):
+        return f"compose -f {self.root}/docker-compose.yml up -d --no-deps mitm-{user} firefox-{user}"
 
     def log(self):
         p = os.path.join(self.root, "state", "desk-log.ndjson")
@@ -307,7 +320,7 @@ class StubTest(StubHarness):
         s, body = self.mem("GET", "/desk/")
         self.assertEqual(s, 200); self.assertIn("The desk is busy, try again in a few minutes.", body)
         self.assertNotIn("<iframe", body)
-        self.assertFalse(any(c.startswith("start") for c in self.docker_calls()))
+        self.assertEqual(self.starts(), [])
         self.assertIn("'/desk/vnc/'", self.mem("GET", "/desk/", user="bob")[1])   # a running user still gets in
 
     # claiming
@@ -354,7 +367,8 @@ class StubTest(StubHarness):
         self.assertEqual(self.claimed("alice"), [str(v) for v in range(101, 111)])
 
     def test_other_claim_sizes_refused(self):
-        for n in ("7", "100", "0", "abc"):
+        # %C2%B9 is "¹" and %D9%A5 is "٥": str.isdigit() says yes to both, int("¹") raises
+        for n in ("7", "100", "0", "abc", "%C2%B9", "%D9%A5", "5%0A"):
             self.assertEqual(self.mem("POST", f"/desk/claim?n={n}")[0], 400, n)
         self.assertEqual(self.claimed("alice"), [])
 
@@ -551,6 +565,16 @@ class StubTest(StubHarness):
         self.assertEqual(self.mem("GET", "/desk/admin/", admin="0")[0], 403)
         self.assertEqual(self.req("GET", "/desk/admin/", user="alice", admin="1")[0], 403)   # not a member
 
+    def test_member_non_admin_post_to_admin_routes_is_403(self):
+        sess = self.desk_obj().sessions
+        before = slurp(os.path.join(self.root, "pool.csv"))
+        with mock.patch.object(sess, "prune") as pr:
+            for p in ("/desk/admin/sessions?op=prune", "/desk/admin/pool"):
+                self.assertEqual(self.mem("POST", p, admin="0")[0], 403, p)
+            pr.assert_not_called()
+        self.assertEqual(slurp(os.path.join(self.root, "pool.csv")), before)
+        self.assertEqual(self.docker_calls(), [])
+
     def test_admin_without_trailing_slash_redirects(self):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         c.request("GET", "/desk/admin", headers={"REMOTE_USER": "alice", "X-Desk-Member": "1", "X-Desk-Admin": "1"})
@@ -573,21 +597,29 @@ class StubTest(StubHarness):
         return os.path.exists(os.path.join(self.state, name))
 
     def test_page_starts_own_stopped_session_only(self):
+        for u in ("alice", "bob"):   # the single-file policy layout, still on disk
+            put(os.path.join(self.root, "firefox", f"policies-{u}.json"), "{}")
         self.assertEqual(self.mem("GET", "/desk/")[0], 200)
         self.assertTrue(self.running("desk-mitm-alice")); self.assertTrue(self.running("desk-firefox-alice"))
         self.assertFalse(self.running("desk-firefox-bob"))
-        self.assertFalse(any(c.startswith("start") and "bob" in c for c in self.docker_calls()))
+        self.assertEqual(self.starts(), [self.start_call("alice")])   # compose up, so drift is recreated
+        self.assertFalse(any(c.startswith("start") for c in self.docker_calls()))   # never a bare docker start
+        # alice's pair went through Compose, so her legacy policy goes; bob's waits for his own start
+        self.assertFalse(os.path.exists(os.path.join(self.root, "firefox", "policies-alice.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "firefox", "policies-bob.json")))
 
     def test_start_failure_is_reported(self):
+        put(os.path.join(self.root, "firefox", "policies-alice.json"), "{}")
         put(self.mode, "fail")
         s, body = self.mem("GET", "/desk/")
         self.assertEqual(s, 200)
         self.assertIn("Your browser could not be started; try again in a minute or ask Jo.", body)
         self.assertNotIn("'/desk/vnc/'", body)
         self.assertNotIn("alice", self.desk_obj().last_seen)
-        # mitm is up since provisioning; the Firefox start is the one that fails
-        self.assertEqual([c for c in self.docker_calls() if c.startswith("start")], ["start desk-firefox-alice"])
+        # mitm is up since provisioning; the pair's compose up is what fails
+        self.assertEqual(self.starts(), [self.start_call("alice")])
         self.assertFalse(self.running("desk-firefox-alice"))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "firefox", "policies-alice.json")))   # kept
         put(self.mode, "")
         self.assertIn("'/desk/vnc/'", self.mem("GET", "/desk/")[1])   # the next visit starts it
 
@@ -606,7 +638,7 @@ class StubTest(StubHarness):
 
     def test_start_on_open_waits_for_retire(self):
         calls, (s, body) = self.hold_alice_lock_during_visit()
-        self.assertFalse([c for c in calls if c.startswith(("start", "inspect"))], calls)   # nothing while held
+        self.assertFalse([c for c in calls if c.startswith("inspect") or " up -d " in c], calls)   # nothing while held
         self.assertEqual(s, 200); self.assertIn("'/desk/vnc/'", body)
         self.assertTrue(self.running("desk-firefox-alice"))
 
@@ -619,7 +651,7 @@ class StubTest(StubHarness):
         calls, (s, body) = self.hold_alice_lock_during_visit(retire_meanwhile)
         self.assertEqual(s, 200); self.assertNotIn("'/desk/vnc/'", body)
         self.assertIn("Your desk is changing", body)
-        self.assertFalse([c for c in self.docker_calls() if c.startswith("start")])   # a retired desk stays down
+        self.assertEqual(self.starts(), [])   # a retired desk stays down
         self.assertFalse(self.running("desk-firefox-alice"))
 
     def test_ensure_started_holds_user_lock_then_start_lock(self):
@@ -641,7 +673,7 @@ class StubTest(StubHarness):
     def test_page_does_not_restart_running_session(self):
         put(os.path.join(self.state, "desk-mitm-alice"), ""); put(os.path.join(self.state, "desk-firefox-alice"), "")
         self.mem("GET", "/desk/")
-        self.assertFalse(any(c.startswith("start") for c in self.docker_calls()))
+        self.assertEqual(self.starts(), [])   # a fully running pair is never recreated under the user
 
     def test_page_waits_for_screen_before_loading_it(self):
         _, body = self.mem("GET", "/desk/")
@@ -684,6 +716,20 @@ class StubTest(StubHarness):
         self.assertFalse(self.running("desk-firefox-alice"))
         self.assertTrue(self.running("desk-mitm-alice"))
         self.assertEqual(self.log()[-1]["action"], "stop")
+
+    def test_reaper_logs_a_stop_only_when_it_worked(self):
+        put(os.path.join(self.state, "desk-firefox-alice"), "")
+        d = self.desk_obj(); d.last_seen["alice"] = 1000
+        put(self.mode, "fail")                      # docker stop exits 1
+        d.reap(now=1000 + 901)
+        self.assertTrue(self.running("desk-firefox-alice"))
+        self.assertEqual([e for e in self.log() if e["action"] == "stop"], [])   # no false record
+        self.assertEqual(d.last_seen["alice"], 1000)                              # the next sweep retries
+        put(self.mode, "")
+        d.reap(now=1000 + 960)
+        self.assertFalse(self.running("desk-firefox-alice"))
+        self.assertEqual([e["user"] for e in self.log() if e["action"] == "stop"], ["alice"])
+        self.assertNotIn("alice", d.last_seen)
 
     def test_reaper_keeps_session_with_screen_connected(self):
         put(os.path.join(self.state, "desk-firefox-alice"), "")

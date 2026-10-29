@@ -12,21 +12,26 @@ ENV_KEYS = ["DESK_USER", "DESK_SESSION", "DESK_CAPTURES", "DESK_FOURCAT_ENABLED"
 
 
 class Headers:
-    """Case-insensitive, just enough of mitmproxy's Headers."""
+    """Case-insensitive and multi-valued, just enough of mitmproxy's Headers: a list of values per
+    name (several Set-Cookie lines); [] joins them, `=` replaces them all, del and pop remove all."""
     def __init__(self, items=None):
         self._d = {}
-        for k, v in (items or {}).items():
-            self[k] = v
+        for k, v in (items.items() if isinstance(items, dict) else items or ()):
+            self.add(k, v)
 
-    def __setitem__(self, k, v): self._d[k.lower()] = (k, v)
-    def __getitem__(self, k): return self._d[k.lower()][1]
+    def add(self, k, v): self._d.setdefault(k.lower(), []).append(v)
+    def get_all(self, k): return list(self._d.get(k.lower(), []))
+    def __setitem__(self, k, v): self._d[k.lower()] = [v]
+    def __getitem__(self, k): return ", ".join(self._d[k.lower()])
     def __delitem__(self, k): del self._d[k.lower()]
     def __contains__(self, k): return k.lower() in self._d
-    def get(self, k, default=None): return self._d[k.lower()][1] if k.lower() in self._d else default
+    def get(self, k, default=None): return self[k] if k in self else default
 
     def pop(self, k, *default):
-        if k.lower() in self._d:
-            return self._d.pop(k.lower())[1]
+        if k in self:
+            v = self[k]
+            del self[k]
+            return v
         if default:
             return default[0]
         raise KeyError(k)
@@ -171,6 +176,19 @@ class AddonTests(unittest.TestCase):
         self.assertNotIn("Set-Cookie", flow.response.headers)
         self.assertEqual(self.records("fourcat.ndjson")[0]["path"], "/api/check-query/")
 
+    def test_fourcat_response_loses_every_set_cookie(self):
+        flow = Flow(Req("fourcat.desk", "/api/check-query/"))
+        self.addon.request(flow)
+        two = [("Set-Cookie", "remember_token=x; Path=/"), ("Set-Cookie", "session=y; Path=/")]
+        flow.response = FakeResponse(headers=two)
+        self.assertEqual(len(flow.response.headers.get_all("Set-Cookie")), 2)
+        self.addon.responseheaders(flow)
+        self.assertEqual(flow.response.headers.get_all("Set-Cookie"), [])
+        for k, v in two:
+            flow.response.headers.add(k, v)
+        self.addon.response(flow)
+        self.assertEqual(flow.response.headers.get_all("Set-Cookie"), [])
+
     def test_fourcat_root_is_403(self):
         flow = Flow(Req("fourcat.desk", "/"))
         self.addon.request(flow)
@@ -300,6 +318,17 @@ class AddonTests(unittest.TestCase):
             mod.addons[0].running()
             self.assertEqual(self.rec.shutdowns, 1, repr(user))
         self.assertIn("DESK_USER", self.rec.errors[-1])
+
+    def test_empty_desk_user_refuses_every_request_before_running(self):
+        for user in ("", "  "):
+            addon = self.load(DESK_USER=user).addons[0]     # running() has not been called
+            for host, path, method in (("example.com", "/", "GET"), ("www.tiktok.com", "/api/comment/list/", "GET"),
+                                       ("fourcat.desk", "/api/import-dataset/", "POST")):
+                flow = Flow(Req(host, path, method, headers={"Cookie": "a=1"}))
+                addon.request(flow)
+                self.assertEqual(flow.response.status_code, 403, (repr(user), host))
+                self.assertEqual(flow.request.headers.get("Cookie"), "a=1")   # nothing injected
+        self.assertEqual(self.rec.shutdowns, 0)
 
     def test_healthy_running_does_not_shut_down(self):
         self.addon.running()

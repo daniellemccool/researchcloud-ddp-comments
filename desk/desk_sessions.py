@@ -39,7 +39,7 @@ def build_sessions(desk_root: str, is_admin=None) -> Sessions:
 def cmd_init(a) -> int:
     root = a.desk_root
     try:
-        cfg = load_config(root)
+        cfg = load_config(root, validate=False)   # init repairs a bad desk.json; validated below
     except FileNotFoundError:
         cfg = DeskConfig(desk_root=root, repo_dir=a.repo, platform=a.platform,
                          collector_role=a.collector_role, admin_role=a.admin_role, contact=a.contact)
@@ -95,6 +95,13 @@ def cmd_reconcile(s, a) -> int:
     return 1 if "failed" in out else 0
 
 
+def cmd_up(s, a) -> int:
+    skipped = s.up(a.user)
+    for u, why in skipped.items():
+        print(f"{u}: skipped: {why}", file=sys.stderr)
+    return 1 if a.user and skipped else 0
+
+
 def cmd_status(s, a) -> int:
     for r in s.status():
         state = "ready" if r["ready"] else f"at {r['step']}" + (f" ({r['error']})" if r["error"] else "")
@@ -136,10 +143,10 @@ def main(argv=None) -> int:
         s = build_sessions(a.desk_root)
         if a.cmd == "render":
             print("\n".join(s.render()))
-        elif a.cmd == "up":
-            s.up(a.user)
         elif a.cmd == "stop":
-            s.stop(a.user)
+            if not s.stop(a.user):
+                print(f"desk-sessions stop: could not stop {a.user}", file=sys.stderr)
+                return 1
         else:
             return globals()["cmd_" + a.cmd](s, a)
         return 0

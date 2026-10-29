@@ -7,7 +7,16 @@ GOOD_HASH = "$2b$12$" + "a" * 53
 # drops the CA a real mitmproxy would write, unless the file $FAKE_DOCKER_NO_CA exists;
 # `compose ... create <svc>` succeeds; with $FAKE_DOCKER_HANG present every compose up/create
 # hangs (exec, so a timeout kill reaches it).
-# With $FAKE_DOCKER_PSQL_FAIL present a psql query (not an UPDATE) exits 1.
+# Containers: `compose up` marks each mitm-/firefox- service it names running (a file
+# $FAKE_DOCKER_CONTAINERS/desk-<svc>); `stop` clears it; `inspect` prints true/false from it.
+# Stop/inspect failure modes, each switched on by its control file:
+#   stop-fail            stop exits 1 and the container keeps running
+#   still-running        stop exits 0 but the container keeps running
+#   inspect-daemon-down  inspect exits 1: "Cannot connect to the Docker daemon ..."
+#   inspect-no-such      stop and inspect exit 1: "No such container: <name>"
+# With $FAKE_DOCKER_PSQL_FAIL present a psql query (not an UPDATE) exits 1. With
+# $FAKE_DOCKER_SQL_ERROR present every psql call prints an SQL error and, like real psql, exits
+# 3 under -v ON_ERROR_STOP=1 and 0 without it.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_DOCKER_CALLS"
 if [ "$1" = compose ] && { [ "$4" = up ] || [ "$4" = create ]; }; then
@@ -15,9 +24,33 @@ if [ "$1" = compose ] && { [ "$4" = up ] || [ "$4" = create ]; }; then
   case "$6" in
     mitm-*) [ -f "$FAKE_DOCKER_NO_CA" ] || touch "$(dirname "$3")/state/mitm/${6#mitm-}/mitmproxy-ca-cert.pem";;
   esac
+  if [ "$4" = up ]; then
+    mkdir -p "$FAKE_DOCKER_CONTAINERS"
+    for svc in "${@:5}"; do
+      case "$svc" in mitm-*|firefox-*) touch "$FAKE_DOCKER_CONTAINERS/desk-$svc";; esac
+    done
+  fi
   exit 0
 fi
-[ "$1" = stop ] && exit 0
+name="${@: -1}"
+if [ "$1" = stop ]; then
+  [ -f "$FAKE_DOCKER_INSPECT_NO_SUCH" ] && { echo "Error response from daemon: No such container: $name" >&2; exit 1; }
+  [ -f "$FAKE_DOCKER_STOP_FAIL" ] && { echo "Error response from daemon: cannot stop container: $name" >&2; exit 1; }
+  [ -f "$FAKE_DOCKER_STILL_RUNNING" ] || rm -f "$FAKE_DOCKER_CONTAINERS/$name"
+  exit 0
+fi
+if [ "$1" = inspect ]; then
+  [ -f "$FAKE_DOCKER_INSPECT_DOWN" ] && { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1; }
+  [ -f "$FAKE_DOCKER_INSPECT_NO_SUCH" ] && { echo "Error: No such container: $name" >&2; exit 1; }
+  [ -f "$FAKE_DOCKER_CONTAINERS/$name" ] && echo true || echo false
+  exit 0
+fi
+case "$*" in
+  *psql*) if [ -f "$FAKE_DOCKER_SQL_ERROR" ]; then
+            echo "ERROR:  permission denied for table users" >&2
+            case "$*" in *ON_ERROR_STOP=1*) exit 3;; *) exit 0;; esac
+          fi;;
+esac
 case "$*" in
   *create_user.py*) [ -f "$FAKE_DOCKER_FAIL" ] && { echo "boom" >&2; exit 1; };;
   *bcrypt*) cat > "$FAKE_DOCKER_STDIN"; if [ -f "$FAKE_DOCKER_HASH" ]; then cat "$FAKE_DOCKER_HASH"; else echo '""" + GOOD_HASH + """'; fi;;
@@ -30,7 +63,10 @@ exit 0
 # Control files the fake reads, relative to the directory passed to fake_docker().
 CONTROL = {"FAKE_DOCKER_CALLS": "calls", "FAKE_DOCKER_PSQL": "psql", "FAKE_DOCKER_STDIN": "stdin",
            "FAKE_DOCKER_HASH": "hash", "FAKE_DOCKER_UPDATE": "update", "FAKE_DOCKER_FAIL": "fail",
-           "FAKE_DOCKER_NO_CA": "no-ca", "FAKE_DOCKER_HANG": "hang", "FAKE_DOCKER_PSQL_FAIL": "psql-fail"}
+           "FAKE_DOCKER_NO_CA": "no-ca", "FAKE_DOCKER_HANG": "hang", "FAKE_DOCKER_PSQL_FAIL": "psql-fail",
+           "FAKE_DOCKER_SQL_ERROR": "sql-error", "FAKE_DOCKER_CONTAINERS": "containers",
+           "FAKE_DOCKER_STOP_FAIL": "stop-fail", "FAKE_DOCKER_STILL_RUNNING": "still-running",
+           "FAKE_DOCKER_INSPECT_DOWN": "inspect-daemon-down", "FAKE_DOCKER_INSPECT_NO_SUCH": "inspect-no-such"}
 
 
 def fake_docker(t):

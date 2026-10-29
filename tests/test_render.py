@@ -1,10 +1,10 @@
 """Tests for desk/desklib/render.py: Compose, nginx maps and locations, Firefox policy."""
-import os, re, shutil, subprocess, sys, tempfile, unittest
+import json, os, re, shutil, stat, subprocess, sys, tempfile, unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "desk"))
 from desklib import locks, render  # noqa: E402
-from desklib.config import DeskConfig  # noqa: E402
+from desklib.config import DeskConfig, load_config, save_config  # noqa: E402
 from desklib.registry import Registry  # noqa: E402
 
 
@@ -277,13 +277,16 @@ class OtherTests(RenderBase):
         for name in ("policies-alice.json", "policies-gone.json"):   # the single-file layout
             with open(os.path.join(ff, name), "w") as f:
                 f.write("{}")
+        legacy = ["policies-alice.json", "policies-gone.json", "policy"]
         render.write_all(self.cfg, self.reg)
-        self.assertEqual(os.listdir(ff), ["policy"])
+        # the legacy files stay: a container not yet recreated may still mount one (R33);
+        # Sessions.start_pair removes a user's file after their pair went through compose up
+        self.assertEqual(sorted(os.listdir(ff)), legacy)
         self.assertEqual(sorted(os.listdir(os.path.join(ff, "policy"))), ["alice", "bob"])
         pol = os.path.join(ff, "policy", "alice", "policies.json")
         d_ino, f_ino = os.stat(os.path.dirname(pol)).st_ino, os.stat(pol).st_ino
         render.write_all(self.cfg, self.reg)   # idempotent; the file is replaced, its directory kept
-        self.assertEqual(os.listdir(ff), ["policy"])
+        self.assertEqual(sorted(os.listdir(ff)), legacy)
         self.assertEqual(os.listdir(os.path.dirname(pol)), ["policies.json"])
         self.assertEqual(os.stat(os.path.dirname(pol)).st_ino, d_ino)
         self.assertNotEqual(os.stat(pol).st_ino, f_ino)
@@ -291,16 +294,78 @@ class OtherTests(RenderBase):
             self.assertEqual(f.read(), render.render_policy(self.cfg))
 
     def test_write_all_keeps_platform_dir_inode(self):
+        os.makedirs(os.path.join(self.root, "state/firefox/alice/profile"))
         render.write_all(self.cfg, self.reg)
         d = os.path.join(self.root, "platform")
-        ino = os.stat(d).st_ino
+        pj = os.path.join(d, "platform.json")
+        css = os.path.join(self.root, "state/firefox/alice/profile/chrome/userContent.css")
+        ino, f_ino, css_dir_ino, css_ino = (os.stat(d).st_ino, os.stat(pj).st_ino,
+                                           os.stat(os.path.dirname(css)).st_ino, os.stat(css).st_ino)
         stale = os.path.join(d, "stale.txt")
         open(stale, "w").close()
         render.write_all(self.cfg, self.reg)
         render.write_all(self.cfg, self.reg)
-        self.assertEqual(os.stat(d).st_ino, ino)
+        self.assertEqual(os.stat(d).st_ino, ino)               # the mounted directory stays
+        self.assertNotEqual(os.stat(pj).st_ino, f_ino)         # each file is replaced by rename, never
+        self.assertEqual(os.stat(os.path.dirname(css)).st_ino, css_dir_ino)   # rewritten in place
+        self.assertNotEqual(os.stat(css).st_ino, css_ino)
+        self.assertEqual(stat.S_IMODE(os.stat(pj).st_mode), 0o644)   # readable by the proxy's uid
         self.assertFalse(os.path.exists(stale))
-        self.assertTrue(os.path.isfile(os.path.join(d, "platform.json")))
+        self.assertFalse([n for n in os.listdir(d) if n.startswith(".tmp.")])
+        with open(pj) as a, open(os.path.join(REPO, "platforms", "tiktok", "platform.json")) as b:
+            self.assertEqual(a.read(), b.read())
+
+    def test_render_paths_validate_the_config(self):
+        bad = self.make_cfg(collector_role="src_co_a.b")   # built directly: load_config never saw it
+        for fn in (lambda: render.render_maps(bad, self.reg), lambda: render.render_compose(bad, self.reg, bool),
+                   lambda: render.render_policy(bad), lambda: render.write_all(bad, self.reg)):
+            with self.assertRaises(ValueError):
+                fn()
+        self.assertEqual(os.listdir(self.root), ["sessions.tsv"])   # write_all wrote nothing
+
+    def test_load_config_validates(self):
+        save_config(self.make_cfg(admin_role="src_co_a;b"))   # a hand-edited desk.json, in effect
+        with self.assertRaisesRegex(ValueError, "admin_role"):
+            load_config(self.root)
+        self.assertEqual(load_config(self.root, validate=False).admin_role, "src_co_a;b")   # init can repair it
+
+    def test_validate_rejects_every_unsafe_interpolated_value(self):
+        bad = {
+            "collector_role": ["src_co_a.b", "src_co_a\n", "src_co_a;b"],
+            "fourcat_url": ["http://a;b", "ftp://x", "http://x/path", "http://x?q=1", "http://x#f",
+                            "http://user@x", "http://x\n", "http://x:port", "http:// x", "", 8080],
+            "fourcat_upstream": ["http://frontend:5000\n      - EVIL=1", "frontend:5000", "http://f}:5000"],
+            "zeeschuimer_version": ['1.0", "Locked": false, "x": "', "-1", "", "1.0\n", 1],
+            "platform": ["../tiktok", "TikTok", "tik/tok"],
+            "mitm_image": ["img latest", "img\n", "img;x"],
+            "ff_image": ["a b", ""],
+            "repo_dir": ["relative/path", "/x y", "/x\n"],
+            "contact": ["<b>x</b>", "a\nb", "a\rb", None],
+            "stub_port": ["8110", "8110; }", True, 0, 70000, 8110.0],
+            "idle_seconds": ["900", 1.5, True],
+            "max_running": [None, "2"],
+            "timer_minutes": [False],
+            "hide_media": [1, "yes"],
+            "fourcat_enabled": [0],
+            "batch_sizes": [[5, True], [], "5,10", [0]],
+        }
+        for name, values in bad.items():
+            for v in values:
+                with self.assertRaises(ValueError, msg=f"{name}={v!r}"):
+                    self.make_cfg(**{name: v}).validate()
+        self.make_cfg(fourcat_url="https://4cat.example.org/", fourcat_upstream="http://frontend:5000",
+                      zeeschuimer_version="1.14.2-rc1", mitm_image="registry.example/mitm@sha256:abc",
+                      contact="Jo (jo@example.org)").validate()
+
+    def test_policy_is_json_with_the_proxy_locked(self):
+        p = json.loads(render.render_policy(self.cfg))
+        self.assertIs(p["policies"]["Proxy"]["Locked"], True)
+        self.assertEqual(p["policies"]["Proxy"]["HTTPProxy"], "mitm:8080")
+        hostile = self.make_cfg(zeeschuimer_version='1.0", "Locked": false, "x": "')
+        with self.assertRaises(ValueError):   # rejected before any rendering happens
+            hostile.validate()
+        with self.assertRaises(ValueError):
+            render.render_policy(hostile)
 
     def test_written_compose_is_complete(self):
         render.write_all(self.cfg, self.reg)

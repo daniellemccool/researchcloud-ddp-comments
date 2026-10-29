@@ -1,9 +1,10 @@
 """HTTP tests for the admin overview (desk_admin_routes.py): queue upload, session actions, 4CAT credentials, exports."""
-import http.client, io, json, os, sys, unittest, zipfile
+import http.client, io, json, os, socket, sys, unittest, zipfile
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_desk_stub as base  # noqa: E402  (module import: StubTest itself must not be re-collected here)
+import desk_admin_routes as routes  # noqa: E402  (importable: test_desk_stub put desk/ on sys.path)
 from desklib import locks, pool  # noqa: E402
 from desklib.platform import load_dir  # noqa: E402
 
@@ -219,6 +220,64 @@ class AdminTest(base.StubHarness):
         self.assertNotIn("9500", [r.id for r in pool.read_rows(self.root, "video")])
 
 
+    def raw_post(self, path, body: bytes, extra=b""):
+        """One POST on a raw socket; returns everything the server sent before closing (or after 3 s)."""
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=3)
+        try:
+            s.sendall(b"POST " + path.encode() + b" HTTP/1.1\r\nHost: 127.0.0.1\r\nREMOTE_USER: alice\r\n"
+                      b"X-Desk-Member: 1\r\nX-Desk-Admin: 1\r\n" + extra +
+                      b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+            out, closed = b"", False
+            try:
+                while chunk := s.recv(65536):
+                    out += chunk
+                closed = True                      # EOF: the server closed the connection
+            except socket.timeout:
+                pass
+            return out, closed
+        finally:
+            s.close()
+
+    def test_refused_post_with_a_body_closes_the_connection(self):
+        # As if the stub spoke HTTP/1.1 keep-alive (it speaks 1.0 today): the unread body must die
+        # with the connection, never be parsed as a second, forged request.
+        self.srv.RequestHandlerClass.protocol_version = "HTTP/1.1"
+        smuggled = (b"GET /desk/admin/ HTTP/1.1\r\nREMOTE_USER: x\r\nX-Desk-Member: 1\r\nX-Desk-Admin: 1\r\n"
+                    b"Sec-Fetch-Site: same-origin\r\n\r\n")
+        for path, extra in (("/desk/admin/sessions?op=prune", b"Sec-Fetch-Site: cross-site\r\n"),   # CSRF 403
+                            ("/desk/admin/sessions?op=explode", b"Sec-Fetch-Site: same-origin\r\n"),  # 400
+                            ("/desk/admin/nope", b"Sec-Fetch-Site: same-origin\r\n")):               # 404
+            out, closed = self.raw_post(path, smuggled, extra)
+            self.assertTrue(closed, path)
+            self.assertEqual(out.count(b"HTTP/1.1 "), 1, out)        # one response, not two
+            self.assertIn(b"\r\nConnection: close\r\n", out)
+        self.assertNotIn("x", self.desk_obj().admin_flags)            # the forged request never ran
+
+    def test_failed_stop_is_reported_and_keeps_last_seen(self):
+        d = self.desk_obj()
+        base.put(os.path.join(self.state, "desk-firefox-bob"), "")
+        d.last_seen["bob"] = 123
+        base.put(self.mode, "fail")                                   # docker stop exits 1
+        self.areq("POST", "/desk/admin/sessions?op=stop&user=bob")
+        body = self.areq("GET", "/desk/admin/")[1]
+        self.assertEqual(body.split('role="status">', 1)[1].split("</p>", 1)[0], "could not stop bob")
+        self.assertEqual(d.last_seen["bob"], 123)
+        base.put(self.mode, "")
+        self.areq("POST", "/desk/admin/sessions?op=stop&user=bob")
+        self.assertIn("stopped bob", self.areq("GET", "/desk/admin/")[1])
+        self.assertNotIn("bob", d.last_seen)
+
+    def test_malformed_multipart_is_400(self):
+        for ctype in ("multipart/form-data", "multipart/form-data; boundary=", "multipart/form-data; boundary=zz"):
+            s, body, _ = self.areq("POST", "/desk/admin/pool", body=b"\x00garbage\r\n--x\r\n", ctype=ctype)
+            self.assertEqual(s, 400, ctype); self.assertIn("no file field in the form", body)
+
+    def test_csrf_refusal_reads_no_body(self):
+        h = FakeUploadHandler({"Sec-Fetch-Site": "cross-site", "Content-Length": "10",
+                               "Content-Type": "multipart/form-data; boundary=x"})
+        self.assertTrue(routes.handle_admin(h, None, "alice", "POST", "/desk/admin/pool", {}))
+        self.assertEqual((h.sent[0], h.rfile.reads, h.close_connection), (403, [], True))
+
     def notice_after(self, op, **result):
         sess = self.desk_obj().sessions
         with mock.patch.object(sess, op, **result):
@@ -270,6 +329,38 @@ class AdminTest(base.StubHarness):
         self.assertEqual(s, 500); self.assertIn("export failed", body)
         self.assertIn("state/captures/alice/locked.ndjson", body); self.assertNotIn(self.root, body)
         self.assertEqual(h["x-frame-options"], "DENY")
+
+
+class FakeRfile:
+    def __init__(self, exc=None):
+        self.reads, self.exc = [], exc
+
+    def read(self, n=-1):
+        self.reads.append(n)
+        if self.exc:
+            raise self.exc
+        return b""
+
+
+class FakeUploadHandler:
+    """Just what handle_admin/read_upload touch on a BaseHTTPRequestHandler."""
+    def __init__(self, headers, exc=None):
+        self.headers, self.rfile, self.close_connection, self.sent = headers, FakeRfile(exc), False, None
+        self.timeouts = []
+        self.connection = mock.Mock(settimeout=self.timeouts.append)
+
+    def _send(self, status, body="", ctype="", headers=()):
+        self.sent = (status, body)
+
+
+class UploadUnitTest(unittest.TestCase):
+    def test_stalled_upload_is_408_and_closes(self):
+        h = FakeUploadHandler({"Content-Length": "100", "Content-Type": "multipart/form-data; boundary=x"},
+                              exc=socket.timeout("timed out"))
+        self.assertEqual(routes.read_upload(h), (408, "upload timed out"))
+        self.assertEqual(h.timeouts, [30])                 # set before the read
+        self.assertEqual(h.rfile.reads, [100])
+        self.assertTrue(h.close_connection)
 
 
 class PoolUnitTest(unittest.TestCase):

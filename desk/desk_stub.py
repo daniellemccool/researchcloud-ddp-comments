@@ -21,7 +21,7 @@ state/access.ndjson. Everything outside /desk/ is 403.
 A reaper thread stops a Firefox that has had no screen connection (nginx's websocket to
 its noVNC port, seen with `ss`) for idle_seconds. Stopping loses nothing.
 """
-import argparse, csv, html, http.client, json, os, subprocess, sys, threading, time
+import argparse, csv, html, http.client, json, os, re, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -39,6 +39,8 @@ STARTED, BUSY, START_FAILED, GONE = "started", "busy", "start-failed", "gone"   
 
 
 class Desk:
+    start_timeout = 120   # seconds for one `compose up` of a pair (a recreate included)
+
     def __init__(self, sessions, exec_timeout, admin_flags):
         self.sessions, self.exec_timeout = sessions, exec_timeout
         self.cfg, self.reg, self.prov = sessions.cfg, sessions.reg, sessions.prov
@@ -107,8 +109,11 @@ class Desk:
     def ensure_started(self, user):
         """Start the user's stopped pair unless max_running other sessions are up.
 
-        Returns STARTED, BUSY (at the cap), START_FAILED (a `docker start` failed or timed out)
+        Returns STARTED, BUSY (at the cap), START_FAILED (the `compose up` failed or timed out)
         or GONE (retired, or no longer ready, while we waited for the user lock).
+        The pair goes up through `Sessions.start_pair` (`compose up -d --no-deps`, R33), so a
+        container whose spec drifted is recreated; a pair that is fully running is left alone
+        (Compose would recreate a drifted running container under the user's feet).
         Locks, in this order only: the user's flock (a retire, compose up or provisioning
         run finishes first), then start_lock, so the count and the start are one unit and two
         arrivals cannot both take the last slot. Nothing under start_lock takes a user lock."""
@@ -122,11 +127,11 @@ class Desk:
                     running = {}            # can't count: the cap is a soft guard, let the user in
                 if not running.get(user) and sum(running.values()) >= self.cfg.max_running:
                     return BUSY
-                for name in (f"desk-mitm-{user}", f"desk-firefox-{user}"):
-                    if not self.running(name):
-                        r = self._docker("start", name)
-                        if r is None or r.returncode != 0:
-                            return START_FAILED
+                if not (self.running(f"desk-mitm-{user}") and self.running(f"desk-firefox-{user}")):
+                    try:
+                        self.sessions.start_pair(user, timeout=self.start_timeout)
+                    except (subprocess.SubprocessError, OSError):
+                        return START_FAILED
                 self.last_seen[user] = time.time()
                 return STARTED
 
@@ -175,10 +180,11 @@ class Desk:
                 continue
             if now - self.last_seen[user] > idle:
                 try:
-                    self.sessions.stop(user)
-                except subprocess.SubprocessError:
-                    continue            # a hung stop must not end the sweep; the next one retries
-
+                    stopped = self.sessions.stop(user)
+                except (subprocess.SubprocessError, OSError):
+                    stopped = False
+                if not stopped:
+                    continue            # failed: no event, last_seen kept, the next sweep retries
                 self.last_seen.pop(user, None)
                 self.append({"t": int(now), "user": user, "action": "stop", "kind": "", "id": "", "code": "",
                              "idle_s": int(idle)})
@@ -300,6 +306,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
         for k, v in headers:
             self.send_header(k, v)
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -371,6 +379,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, self._page(user))
 
     def do_POST(self):
+        # Most POST answers never read the body (refusals, claims, opens). Close after the response
+        # whatever the protocol version, so unread body bytes can never be parsed as a next request.
+        self.close_connection = True
         path, q = self._route()
         ident = self._identity(path)
         if ident is None:
@@ -385,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404)
         if path == "/desk/claim":
             n = q.get("n", [str(d.cfg.batch_sizes[0])])[0]
-            if not n.isdigit() or int(n) not in d.cfg.batch_sizes:
+            if not re.fullmatch(r"[0-9]+", n) or int(n) not in d.cfg.batch_sizes:   # ASCII digits only
                 return self._send(400)
             if not d.prov.state(user).ready():
                 return self._send(409)   # a hand-made POST must not claim before the desk exists

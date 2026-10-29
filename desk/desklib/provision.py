@@ -22,6 +22,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Callable
 
+from .coapi import NoMembers, guarded_members
 from .config import DeskConfig
 from .fourcat import FourCat, FourCatError
 from .locks import flocked, render_lock, user_lock
@@ -63,7 +64,7 @@ def _check(user):
 
 
 def _describe(e: Exception) -> str:
-    if isinstance(e, (StepFailed, NeedsAdopt, FourCatError, OSError, tarfile.TarError)):
+    if isinstance(e, (StepFailed, NeedsAdopt, FourCatError, NoMembers, OSError, tarfile.TarError)):
         return str(e) or type(e).__name__
     if isinstance(e, RegistryFull):
         return "registry full"
@@ -125,7 +126,7 @@ class Provisioner:
             with os.fdopen(fd, "w") as f:
                 json.dump(asdict(st), f, indent=2, sort_keys=True)
                 f.write("\n")
-            os.chmod(tmp, 0o644)
+            os.chmod(tmp, 0o600)  # free-form error narratives: root only
             os.replace(tmp, path)
         except BaseException:
             _rm(tmp)
@@ -156,34 +157,42 @@ class Provisioner:
             self._save(user, st)
         return self.advance(user)
 
-    def _still_running(self, name) -> bool:
-        """True unless docker says the container is not running (or does not exist)."""
-        r = self.run(["docker", "inspect", "-f", "{{.State.Running}}", name],
-                     capture_output=True, text=True, timeout=self.cmd_timeout)
-        return r.returncode == 0 and (r.stdout or "").strip() == "true"
+    def _container_state(self, name) -> str:
+        """"stopped" (docker says not running, or no such container), "running", or "unknown"
+        (docker could not tell: daemon down, permission denied, a timeout, unexpected output)."""
+        try:
+            r = self.run(["docker", "inspect", "-f", "{{.State.Running}}", name], check=False,
+                         capture_output=True, text=True, timeout=self.cmd_timeout)
+        except (subprocess.SubprocessError, OSError):
+            return "unknown"
+        if r.returncode == 0:
+            return {"false": "stopped", "true": "running"}.get((r.stdout or "").strip(), "unknown")
+        err = (r.stderr or "").lower()
+        return "stopped" if ("no such object" in err or "no such container" in err) else "unknown"
 
     def retire(self, user) -> None:
         """Stop both containers, verify they stopped, then free the row.
 
-        A stop that hangs or fails, or a container still running afterwards, raises
-        RuntimeError("could not stop <name>; retire aborted") before anything is moved
-        or freed: the row stays live and the user keeps their state."""
+        Before anything is moved or freed (the row stays live, the user keeps their state):
+        a stop that hangs, or a container still running afterwards, raises
+        RuntimeError("could not stop <name>; retire aborted"); an inspect that cannot say
+        (daemon down, timeout) raises RuntimeError("could not confirm <name> stopped; retire
+        aborted"). Only "not running" or "no such container/object" count as stopped."""
         _check(user)
         with flocked(user_lock(self.cfg.desk_root, user)):
             names = (f"desk-firefox-{user}", f"desk-mitm-{user}")
             for c in names:
-                # non-zero (already gone) is fine here: the inspect below decides
                 try:
-                    self.run(["docker", "stop", c], capture_output=True, timeout=self.cmd_timeout)
-                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                    # check=False: a non-zero stop (already gone, daemon down) is judged by the inspect below
+                    self.run(["docker", "stop", c], check=False, capture_output=True, timeout=self.cmd_timeout)
+                except (subprocess.TimeoutExpired, OSError):
                     raise RuntimeError(f"could not stop {c}; retire aborted") from None
             for c in names:
-                try:
-                    running = self._still_running(c)
-                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-                    running = True  # cannot confirm the stop
-                if running:
+                state = self._container_state(c)
+                if state == "running":
                     raise RuntimeError(f"could not stop {c}; retire aborted")
+                if state != "stopped":
+                    raise RuntimeError(f"could not confirm {c} stopped; retire aborted")
             # Move the state before freeing the row: a crash in between must not
             # leave "ready" state for a user without a live row.
             users_dir = self._dir("users", user)
@@ -202,8 +211,11 @@ class Provisioner:
 
     def _members(self):
         """Called under the render lock, right before rendering: an older snapshot
-        must never overwrite a newer map (a revocation would briefly come undone)."""
-        return self.members() if self.cfg.gate_mode == "api" and self.members else None
+        must never overwrite a newer map (a revocation would briefly come undone).
+        An empty CO answer while sessions exist raises NoMembers, as in Sessions."""
+        if self.cfg.gate_mode != "api" or not self.members:
+            return None
+        return guarded_members(self.members, len(self.reg.live()))
 
     def _fourcat_on(self):
         return self.fourcat is not None and self.cfg.fourcat_enabled
