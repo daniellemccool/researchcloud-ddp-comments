@@ -1,162 +1,76 @@
 #!/usr/bin/env python3
-"""The desk: a bottomless queue beside each user's own streamed Firefox.
+"""The desk: a bottomless queue beside each collector's own streamed Firefox.
 
-    python3 desk_stub.py --desk /data/onlinehate_zeeschuimer/desk --port 8110 [--batch 5] [--idle 900]
+    python3 desk_stub.py --desk-root <desk root> [--port 8110] [--no-reaper]
 
-nginx (desk.conf, rendered by make-sessions.sh) authenticates via SRAM and passes
-REMOTE_USER and X-Desk-Admin on every request, overwriting anything the client sent.
-Users must be in <desk>/sessions.tsv. All users draw from one shared <desk>/pool.csv
-(video_id,bucket,note; grown with pool-add.py): "Get N more videos" claims the next
-unclaimed rows, and is refused until every row of the user's current claims is opened
-or marked with a problem code. A row click execs into desk-firefox-<user> only, and only
-for ids that user claimed. Claims, opens and problems go to <desk>/state/desk-log.ndjson,
-which is the only record of who has what. Everything outside /desk/ is 403: nginx sends
-requests here when a user may not reach the real target.
+Everything else comes from <desk root>/desk.json (desklib.config) and the platform
+definition it names. nginx authenticates via SRAM and sets REMOTE_USER, X-Desk-Roles,
+X-Desk-Member and X-Desk-Admin on every request, overwriting anything the client sent.
+Membership is nginx's decision: a request without X-Desk-Member: 1 is refused before
+anything else happens. A member's first visit provisions their session (desklib.provision)
+in a background thread while the page refreshes; once ready, opening /desk/ starts their
+own stopped containers unless max_running sessions are already up.
 
-Sessions run only while used: opening /desk/ starts the user's own stopped containers
-(the page loads the screen once /desk/status says it answers), and a reaper thread stops
-a Firefox that has had no screen connection (nginx's websocket to its noVNC port, seen
-with `ss`) for --idle seconds. Stopping loses nothing; /config lives on the volume.
+All collectors draw from one shared <desk root>/pool.csv (id,kind,bucket,note): "Get N
+more" claims the next unclaimed rows, refused until every row of the current claims is
+opened or marked with a problem code. A row click execs into desk-firefox-<user> only,
+and only for items that user claimed. Claims, opens and problems go to
+state/desk-log.ndjson, the only record of who has what; roles-header changes go to
+state/access.ndjson. Everything outside /desk/ is 403.
+
+A reaper thread stops a Firefox that has had no screen connection (nginx's websocket to
+its noVNC port, seen with `ss`) for idle_seconds. Stopping loses nothing.
 """
-import argparse, csv, html, http.client, json, os, subprocess, threading, time
+import argparse, html, http.client, json, os, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-# Problem codes agreed with the research group; the labels are what students see.
-PROBLEMS = [
-    ("U", "Video unavailable or removed"),
-    ("P", "Private video"),
-    ("L", "Needs a login to view"),
-    ("W", "Login wall cut the comments short"),
-    ("R", "Not available in this region"),
-    ("C", "Captcha or blank page: stop for today and tell Isabelle"),
-    ("X", "Something else (add a note)"),
-]
-PROBLEM_CODES = {c for c, _ in PROBLEMS}
-LABELS = dict(PROBLEMS)
-PROBLEM_OPTIONS = '<option value="">Problem…</option>' + "".join(
-    f'<option value="{c}">{html.escape(l)}</option>' for c, l in PROBLEMS)
-PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>desk — %%USER%%</title>
-<style>
-:root{--ink:#1d2329;--muted:#6b7480;--line:#e3e6ea;--bg:#f6f7f9;--accent:#1f6feb;--ok:#1a7f37;--warn:#b35900}
-*{box-sizing:border-box}
-body{margin:0;font:14px/1.4 system-ui,sans-serif;color:var(--ink);display:flex;height:100vh;overflow:hidden}
-aside{width:340px;flex:0 0 340px;display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--bg)}
-header{padding:12px 14px;border-bottom:1px solid var(--line);background:#fff}
-header b{font-size:15px}.who{color:var(--muted);font-size:12px}
-.progress{margin-top:6px;font-size:12px;color:var(--muted)}
-.bar{height:6px;background:var(--line);border-radius:3px;margin-top:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--ok)}
-details{padding:8px 14px;border-bottom:1px solid var(--line);background:#fff;font-size:13px}
-details summary{cursor:pointer;color:var(--accent)}details ol{margin:6px 0 2px 18px;padding:0}
-.list{flex:1;overflow:auto;padding:10px 10px 4px}
-.next{display:block;width:100%;padding:10px;margin:0 0 10px;font:inherit;font-weight:600;color:#fff;background:var(--accent);border:0;border-radius:6px;cursor:pointer}
-.next:disabled{background:#9aa4b0;cursor:default}
-ul.rows{list-style:none;margin:0;padding:0}
-ul.rows li{background:#fff;border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:0 0 6px}
-ul.rows li.current{border-color:var(--accent);box-shadow:0 0 0 2px #1f6feb33}
-.row{display:flex;gap:8px;align-items:baseline}
-.row a{flex:1;color:var(--ink);text-decoration:none;font-weight:600}.row a:hover{color:var(--accent)}
-.mark{width:1.2em;text-align:center}
-li[data-state=done] .mark::before{content:"\2713";color:var(--ok)}
-li[data-state=problem] .mark::before{content:"\26A0";color:var(--warn)}
-li[data-state=todo] .mark::before{content:"\25CB";color:var(--muted)}
-.sub{display:flex;gap:8px;align-items:center;margin-top:4px;font-size:12px;color:var(--muted)}
-.sub select{font:inherit;font-size:12px;max-width:150px}
-.msg{font-size:12px}.msg.warn{color:var(--warn)}.timer{font-variant-numeric:tabular-nums;font-weight:600;color:var(--accent)}
-.timer.up{color:var(--ok)}
-.more{padding:8px 0}.more button{font:inherit;padding:6px 10px;margin-right:6px;border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:6px;cursor:pointer}
-.hint{font-size:12px;color:var(--muted);margin:6px 2px}
-.enable{font:inherit;font-size:12px;padding:2px 8px;border:1px solid var(--ok);background:#fff;color:var(--ok);border-radius:4px;cursor:pointer}
-footer{padding:10px 14px;border-top:1px solid var(--line);background:#fff8e6;font-size:12px}
-#starting{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:15px}
-</style></head>
-<body>
-<aside>
-<header><b>Your videos</b> <span class="who">%%USER%%</span>%%PROGRESS%%</header>
-<details%%OPEN_HELP%%><summary>How to collect</summary><ol>
-<li>Click <b>Open next video</b> (or a video in the list). It opens in the browser on the right.</li>
-<li>Open the comments and scroll until no more load, or until the timer reaches 0:00. Don't open replies.</li>
-<li>If the video won't show or comments won't load, pick what happened under <b>Problem…</b>.</li>
-<li>When every video is done, get more.</li>
-</ol></details>
-<div class="list">%%BODY%%</div>
-<footer><b>Before you leave:</b> press <button class="enable" onclick="enableUploads()">Enable uploads</button> and log in if asked (once a day).
-Then click <b>Z</b> in the browser's toolbar, press <b>to 4CAT</b> on <i>TikTok (comments)</i>, then on <i>TikTok</i>, and wait until both say they're done.
-<div id="enablemsg" class="msg"></div></footer>
-</aside>
-<div id="starting">Starting your browser…</div>
-<iframe id="screen" style="flex:1 1 auto;height:100vh;border:0;min-width:0;display:none" allow="clipboard-read; clipboard-write"></iframe>
-<script>
-const SECONDS=180;let timer=null;
-async function waitScreen(){try{const r=await fetch('status');if(r.ok&&(await r.json()).ready){
- const f=document.getElementById('screen');f.src='/desk/vnc/';f.style.display='';
- document.getElementById('starting').style.display='none';return;}}catch(e){}setTimeout(waitScreen,2000);}
-waitScreen();
-function li(id){return document.getElementById('r'+id);}
-function setMsg(id,text,warn){const m=li(id).querySelector('.msg');m.textContent=text;m.className='msg'+(warn?' warn':'');}
-function startTimer(id){if(timer)clearInterval(timer.h);document.querySelectorAll('.timer').forEach(t=>t.textContent='');
- document.querySelectorAll('li.current').forEach(x=>x.classList.remove('current'));li(id).classList.add('current');
- const t=li(id).querySelector('.timer');const end=Date.now()+SECONDS*1000;t.className='timer';
- const tick=()=>{const s=Math.max(0,Math.round((end-Date.now())/1000));
-  t.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
-  if(s===0){clearInterval(timer.h);t.textContent='time’s up — next video';t.className='timer up';}};
- timer={h:setInterval(tick,1000)};tick();}
-async function open_(id){const r=await fetch('open?id='+id,{method:'POST'});
- if(r.ok){const l=li(id);if(l.dataset.state!=='problem')l.dataset.state='done';l.classList.add('done');setMsg(id,'');startTimer(id);refresh();}
- else{setMsg(id,'could not open; tell the operator',true);}}
-function openNext(){const n=document.querySelector('ul.rows li[data-state=todo]');if(n)open_(n.id.slice(1));}
-async function problem(id,sel){const k=sel.value;if(!k)return;let note='';
- if(k==='X'){note=prompt('What went wrong? (a few words)')||'';if(!note.trim()){sel.value='';return;}}
- const r=await fetch('problem?id='+id+'&code='+k+'&note='+encodeURIComponent(note.trim()),{method:'POST'});
- if(r.ok){li(id).dataset.state='problem';setMsg(id,sel.options[sel.selectedIndex].text+(note?': '+note.trim():''),true);refresh();}
- else{setMsg(id,'could not save; tell the operator',true);}
- sel.value='';}
-function refresh(){const rows=[...document.querySelectorAll('ul.rows li')];const done=rows.filter(r=>r.dataset.state!=='todo').length;
- const p=document.getElementById('prog');if(p)p.textContent=done+' of '+rows.length+' done';
- const b=document.getElementById('barfill');if(b)b.style.width=(rows.length?100*done/rows.length:0)+'%';
- const nx=document.getElementById('next');if(nx)nx.disabled=!rows.some(r=>r.dataset.state==='todo');
- if(rows.length&&done===rows.length&&!document.getElementById('getmore'))setTimeout(()=>location.reload(),1500);}
-async function enableUploads(){const m=document.getElementById('enablemsg');m.textContent='Opening the login in your browser…';
- const r=await fetch('enable-uploads',{method:'POST'});
- m.textContent=r.ok?'Look at the browser on the right: log in if asked, until it says uploads are enabled.':'could not open; tell the operator';
- m.className='msg'+(r.ok?'':' warn');}
-async function more(n){await fetch('claim?n='+n,{method:'POST'});location.reload();}
-</script></body></html>"""
-UPLOADS_READY = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Uploads enabled</title></head>
-<body style="font:16px/1.5 system-ui,sans-serif;margin:3em;max-width:36em;color:#1d2329">
-<h1 style="color:#1a7f37;font-size:22px">&#10003; Uploads are enabled for %%USER%%</h1>
-<p>This browser can now send to 4CAT for the next 12 hours.</p>
-<p>Click <b>Z</b> in the toolbar and press <b>to 4CAT</b> (first on <i>TikTok (comments)</i>, then on <i>TikTok</i>),
-or carry on with <b>Open next video</b> in the list on the left.</p></body></html>"""
-FORBIDDEN = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>desk</title></head>
-<body style="font:16px system-ui;margin:3em">You are not registered for the desk; ask Danielle.</body></html>"""
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import desk_page as page  # noqa: E402
+from desk_sessions import build_sessions  # noqa: E402
+from desklib import pool  # noqa: E402
+from desklib.config import load_config  # noqa: E402
+from desklib.platform import item_url, load_dir, problems  # noqa: E402
+from desklib.registry import USER_RE  # noqa: E402
+
+REGISTRY_FULL = "error: registry full"
 
 
 class Desk:
-    def __init__(self, root, exec_timeout, batch, idle, public_url="https://checkjefeedzee.onlinehate.src.surf-hosted.nl"):
-        self.root, self.exec_timeout, self.batch, self.idle = root, exec_timeout, batch, idle
-        self.public_url = public_url.rstrip("/")
-        self.sizes = sorted({batch, 10})   # the claim buttons on the page; nothing else is accepted
-        self.log_path = os.path.join(root, "state", "desk-log.ndjson")
-        self.lock = threading.Lock()
-        self.start_lock = threading.Lock()
-        self.access_path = os.path.join(root, "state", "access.ndjson")
-        self.last_roles = {}  # user -> last roles header seen, so access.ndjson records changes only
-        self.last_seen = {}   # user -> last time their screen was connected or their page loaded
-        self.port_base = 5800
+    def __init__(self, sessions, exec_timeout, admin_flags):
+        self.sessions, self.exec_timeout = sessions, exec_timeout
+        self.cfg, self.reg, self.prov = sessions.cfg, sessions.reg, sessions.prov
+        self.root = self.cfg.desk_root
+        self.platform = load_dir(self.cfg.platforms_dir, self.cfg.platform)
+        self.problems = {p.code: p for p in problems(self.platform, self.cfg.contact)}
+        self.log_path = os.path.join(self.root, "state", "desk-log.ndjson")
+        self.access_path = os.path.join(self.root, "state", "access.ndjson")
+        self.lock, self.start_lock, self.prov_lock = threading.Lock(), threading.Lock(), threading.Lock()
+        self.admin_flags = admin_flags  # user -> X-Desk-Admin of their last request (is_admin in roles mode)
+        self.last_roles = {}    # user -> last roles header seen, so access.ndjson records changes only
+        self.last_seen = {}     # user -> last time their screen was connected or their page loaded
+        self.provisioning = set()  # users with an advance() thread running
 
-    def sessions(self):
-        """user -> noVNC port (5800 + registry index), as make-sessions.sh renders it."""
-        try:
-            with open(os.path.join(self.root, "sessions.tsv")) as f:
-                rows = [l.split("\t") for l in f.read().splitlines() if "\t" in l]
-            return {u: self.port_base + int(n) for u, n in rows}
-        except (FileNotFoundError, ValueError):
-            return {}
+    # --- provisioning ----------------------------------------------------
 
-    def users(self):
-        return list(self.sessions())
+    def kick(self, user):
+        """Run prov.advance(user) in a daemon thread unless one is already running for user."""
+        with self.prov_lock:
+            if user in self.provisioning:
+                return
+            self.provisioning.add(user)
+
+        def run():
+            try:
+                self.prov.advance(user)
+            except Exception:   # advance records step errors itself; anything else retries on the next visit
+                pass
+            finally:
+                with self.prov_lock:
+                    self.provisioning.discard(user)
+        threading.Thread(target=run, daemon=True).start()
+
+    # --- containers ------------------------------------------------------
 
     @staticmethod
     def _docker(*args, timeout=30):
@@ -179,7 +93,7 @@ class Desk:
     def ready(self, user):
         """True once noVNC answers HTTP 200. A bare TCP accept is not enough: Docker's
         port proxy accepts before the container's server listens, then resets."""
-        port = self.sessions().get(user)
+        port = self.reg.port(user)
         if not port or not self.running(f"desk-firefox-{user}"):
             return False
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
@@ -206,36 +120,46 @@ class Desk:
         return ports
 
     def reap(self, now=None):
-        """Stop Firefox sessions with no screen connection for longer than self.idle."""
+        """Stop Firefox sessions with no screen connection for longer than idle_seconds."""
         now = time.time() if now is None else now
+        idle = self.cfg.idle_seconds
         conns = self.connected_ports()
         if conns is None:
             return                      # can't tell who is watching: stop nothing
-        for user, port in self.sessions().items():
-            name = f"desk-firefox-{user}"
-            if not self.running(name):
+        for user, row in self.reg.live().items():
+            if not self.running(f"desk-firefox-{user}"):
                 self.last_seen.pop(user, None)
                 continue
-            if port in conns or user not in self.last_seen:
+            if self.reg.port_base + row.index in conns or user not in self.last_seen:
                 self.last_seen[user] = now
                 continue
-            if now - self.last_seen[user] > self.idle:
-                self._docker("stop", name, timeout=60)
+            if now - self.last_seen[user] > idle:
+                try:
+                    self.sessions.stop(user)
+                except subprocess.SubprocessError:
+                    continue            # a hung stop must not end the sweep; the next one retries
+
                 self.last_seen.pop(user, None)
-                self.append({"t": int(now), "user": user, "action": "stop", "video_id": "", "code": "",
-                             "idle_s": int(self.idle)})
+                self.append({"t": int(now), "user": user, "action": "stop", "kind": "", "id": "", "code": "",
+                             "idle_s": int(idle)})
+
+    # --- pool and log ----------------------------------------------------
+
+    def valid(self, kind, item_id):
+        k = self.platform.item_kinds.get(kind)
+        return k is not None and isinstance(item_id, str) and bool(k.id_re.fullmatch(item_id))
 
     def pool(self):
-        rows, seen = [], set()
+        """Pool rows whose kind and id this platform can open, in file order (none if the header is unknown)."""
         try:
-            with open(os.path.join(self.root, "pool.csv"), newline="") as f:
-                for r in csv.DictReader(f):
-                    v = (r.get("video_id") or "").strip()
-                    if v.isdigit() and v not in seen:
-                        seen.add(v); rows.append(dict(r, video_id=v))
-        except FileNotFoundError:
-            pass
-        return rows
+            rows = pool.read_rows(self.root, self.platform.default_kind)
+        except ValueError:
+            return []
+        return [r for r in rows if self.valid(r.kind, r.id)]
+
+    def key(self, e):
+        """(kind, id) of a log event; legacy events carry video_id and no kind."""
+        return (e.get("kind") or self.platform.default_kind, e.get("id") or e.get("video_id"))
 
     def events(self):
         try:
@@ -264,40 +188,40 @@ class Desk:
             with open(self.access_path, "a") as f:
                 f.write(json.dumps({"t": int(time.time()), "user": user, "roles": roles, "path": path}) + "\n")
 
+    def taken(self, events):
+        return {self.key(e) for e in events if e.get("action") == "claim"}
+
     def view(self, user, events=None):
-        """The user's claims in order, with batch numbers, and which of them are done."""
-        claims, done, problems, opened = [], set(), {}, set()
+        """The user's claims in order as ((kind, id), batch), and which of them are done."""
+        claims, done, problems_, opened = [], set(), {}, set()
         for e in self.events() if events is None else events:
             if e.get("user") != user:
                 continue
-            a = e.get("action")
+            a, k = e.get("action"), self.key(e)
             if a == "claim":
-                claims.append((e["video_id"], e.get("batch", 0)))
+                claims.append((k, e.get("batch", 0)))
             elif a == "open" and e.get("exec_rc") == 0:
-                opened.add(e["video_id"]); done.add(e["video_id"])
+                opened.add(k); done.add(k)
             elif a == "problem":
-                problems[e["video_id"]] = (e["code"], e.get("note", "")); done.add(e["video_id"])
-        return claims, done, opened, problems
+                problems_[k] = (e.get("code", ""), e.get("note", "")); done.add(k)
+        return claims, done, opened, problems_
 
-    def claim(self, user, n=None):
-        """Claim the next n (default self.batch) for user. Returns the claimed ids, or 'busy' / 'empty'."""
-        n = n or self.batch
+    def claim(self, user, n):
+        """Claim the next n for user. Returns the claimed keys, or 'busy' / 'empty'."""
         with self.lock:
             events = self.events()
             claims, done, _, _ = self.view(user, events)
-            if any(v not in done for v, _ in claims):
+            if any(k not in done for k, _ in claims):
                 return "busy"
-            taken = {e["video_id"] for e in events if e.get("action") == "claim"}
-            nxt = [r["video_id"] for r in self.pool() if r["video_id"] not in taken][:n]
+            taken = self.taken(events)
+            nxt = [(r.kind, r.id) for r in self.pool() if (r.kind, r.id) not in taken][:n]
             if not nxt:
                 return "empty"
-            b = max((n for _, n in claims), default=0) + 1
+            b = max((b for _, b in claims), default=0) + 1
             t = int(time.time())
-            self._append([{"t": t, "user": user, "action": "claim", "video_id": v, "batch": b, "code": ""} for v in nxt])
+            self._append([{"t": t, "user": user, "action": "claim", "kind": k, "id": i, "batch": b, "code": ""}
+                          for k, i in nxt])
             return nxt
-
-    def open_video(self, user, vid):
-        return self.open_url(user, f"https://www.tiktok.com/@x/video/{vid}/")
 
     def open_url(self, user, url):
         cmd = ["docker", "exec", "-e", "DISPLAY=:0", "-e", "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus.base",
@@ -316,7 +240,8 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # keep journald quiet; the NDJSON log is the record
         pass
 
-    def _send(self, status, body=b"", ctype="text/html; charset=utf-8"):
+    def _send(self, status, body="", ctype="text/html; charset=utf-8"):
+        body = body.encode() if isinstance(body, str) else body
         self.send_response(status)
         if body:
             self.send_header("Content-Type", ctype)
@@ -324,11 +249,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _user(self):
-        u = (self.headers.get("REMOTE_USER") or "").strip()
-        if u:
-            self.desk.note_access(u, self.headers.get("X-Desk-Roles", ""), urlparse(self.path).path)
-        return u if u and u in self.desk.users() else None
+    def _say(self, status, text, refresh=None):
+        return self._send(status, page.message(text, refresh))
+
+    def _forbidden(self):
+        return self._say(403, f"You are not registered for the desk; ask {self.desk.cfg.contact}.")
+
+    def _identity(self, path):
+        """(user, admin) for a member on a /desk/ path, else None. Logs roles changes first."""
+        user = (self.headers.get("REMOTE_USER") or "").strip()
+        if user:
+            self.desk.note_access(user, self.headers.get("X-Desk-Roles", ""), path)
+        if not user or not USER_RE.fullmatch(user) or not path.startswith("/desk/"):
+            return None
+        if self.headers.get("X-Desk-Member") != "1":
+            return None
+        admin = self.headers.get("X-Desk-Admin") == "1"
+        self.desk.admin_flags[user] = admin
+        return user, admin
 
     def _route(self):
         u = urlparse(self.path)
@@ -336,138 +274,147 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path, _ = self._route()
-        user = self._user()
-        if user is None or not path.startswith("/desk/"):
-            return self._send(403, FORBIDDEN.encode())
+        ident = self._identity(path)
+        if ident is None:
+            return self._forbidden()
+        user, admin = ident
         if path == "/desk/":
-            self.desk.ensure_started(user)
-            return self._send(200, self._page(user).encode())
+            return self._home(user)
         if path == "/desk/status":
-            body = json.dumps({"ready": self.desk.ready(user)}).encode()
-            return self._send(200, body, "application/json")
-        if path == "/desk/uploads-ready/":
-            # Reached from inside the user's streamed Firefox, after SRAM: that browser can now upload.
-            return self._send(200, UPLOADS_READY.replace("%%USER%%", html.escape(user)).encode())
+            return self._send(200, json.dumps({"ready": self.desk.ready(user)}), "application/json")
         if path == "/desk/admin":
             self.send_response(301); self.send_header("Location", "/desk/admin/")
             self.send_header("Content-Length", "0"); self.end_headers()
             return
         if path == "/desk/admin/":
-            if self.headers.get("X-Desk-Admin") != "1":
-                return self._send(403, FORBIDDEN.encode())
-            return self._send(200, self._admin().encode())
+            return self._send(200, self._admin()) if admin else self._forbidden()
         return self._send(404)
+
+    def _home(self, user):
+        d, contact = self.desk, self.desk.cfg.contact
+        profile = os.path.join(d.root, "state", "firefox", user, "profile")
+        if d.cfg.template_path is None and not os.path.isdir(profile):
+            return self._say(503, f"The desk is not ready yet; ask {contact}.")
+        st = d.prov.state(user)
+        if not st.ready():
+            if st.error() == REGISTRY_FULL:
+                return self._say(200, f"The desk is full; ask {contact}.")
+            if st.error():
+                return self._say(200, f"Setup failed at {st.current()}; ask {contact}.")
+            d.kick(user)
+            return self._say(200, f"Setting up your desk — {st.current()}", refresh=3)
+        try:
+            running = d.sessions.running()
+        except (subprocess.SubprocessError, OSError):
+            running = {}                # can't count: the cap is a soft guard, let the user in
+        if not running.get(user) and sum(running.values()) >= d.cfg.max_running:
+            return self._say(200, "The desk is busy, try again in a few minutes.")
+        d.ensure_started(user)
+        return self._send(200, self._page(user))
 
     def do_POST(self):
         path, q = self._route()
-        user = self._user()
-        if user is None or not path.startswith("/desk/"):
-            return self._send(403, FORBIDDEN.encode())
+        ident = self._identity(path)
+        if ident is None:
+            return self._forbidden()
+        user, _ = ident
+        d = self.desk
         if path == "/desk/claim":
-            n = q.get("n", [str(self.desk.batch)])[0]
-            if not n.isdigit() or int(n) not in self.desk.sizes:
+            n = q.get("n", [str(d.cfg.batch_sizes[0])])[0]
+            if not n.isdigit() or int(n) not in d.cfg.batch_sizes:
                 return self._send(400)
-            return self._send(409 if isinstance(self.desk.claim(user, int(n)), str) else 204)
-        if path == "/desk/enable-uploads":
-            rc, err = self.desk.open_url(user, self.desk.public_url + "/desk/uploads-ready/")
-            self.desk.append({"t": int(time.time()), "user": user, "action": "enable-uploads", "video_id": "", "code": "",
-                              "exec_rc": rc, "exec_err": err})
-            return self._send(204 if rc == 0 else 500)
-        vid = q.get("id", [""])[0]
-        claims, _, _, _ = self.desk.view(user)
-        if not vid.isdigit() or vid not in {v for v, _ in claims}:
+            return self._send(409 if isinstance(d.claim(user, int(n)), str) else 204)
+        kind = q.get("kind", [""])[0] or d.platform.default_kind
+        item_id = q.get("id", [""])[0]
+        claims, _, _, _ = d.view(user)
+        if not d.valid(kind, item_id) or (kind, item_id) not in {k for k, _ in claims}:
             return self._send(404)
-        ev = {"t": int(time.time()), "user": user, "video_id": vid, "code": ""}
+        ev = {"t": int(time.time()), "user": user, "kind": kind, "id": item_id, "code": ""}
         if path == "/desk/open":
-            rc, err = self.desk.open_video(user, vid)
+            rc, err = d.open_url(user, item_url(d.platform, kind, item_id))
             ev.update(action="open", exec_rc=rc, exec_err=err)
-            self.desk.append(ev)
+            d.append(ev)
             return self._send(204 if rc == 0 else 500)
         if path == "/desk/problem":
-            code = q.get("code", [""])[0].strip().upper()
+            code = q.get("code", [""])[0].strip()
+            code = code if code in d.problems else code.upper()
             note = " ".join(q.get("note", [""])[0].split())[:300]
-            if code not in PROBLEM_CODES or (code == "X" and not note):
+            p = d.problems.get(code)
+            if p is None or (p.note and not note):
                 return self._send(400)
             ev.update(action="problem", code=code, note=note)
-            self.desk.append(ev)
+            d.append(ev)
             return self._send(204)
         return self._send(404)
 
     def _page(self, user):
-        claims, done, opened, problems = self.desk.view(user)
-        notes = {r["video_id"]: r.get("note") or "" for r in self.desk.pool()}
+        d, cfg, plat = self.desk, self.desk.cfg, self.desk.platform
+        events = d.events()
+        claims, done, opened, probs = d.view(user, events)
+        rows = d.pool()
+        notes = {(r.kind, r.id): r.note for r in rows}
         latest = max((b for _, b in claims), default=0)
-        shown = [v for v, b in claims if b == latest or v not in done]
+        shown = [k for k, b in claims if b == latest or k not in done]
         earlier = len(claims) - len(shown)
+        noun = html.escape(plat.default_kind)
+        options = page.problem_options(d.problems.values())
         items = []
-        for i, v in enumerate(shown, 1):
-            state = "problem" if v in problems else "done" if v in opened else "todo"
-            cls = ' class="done"' if v in opened else ""
+        for n, k in enumerate(shown, 1):
+            state = "problem" if k in probs else "done" if k in opened else "todo"
             msg = ""
-            if v in problems:
-                code, pnote = problems[v]
-                msg = "— " + html.escape(LABELS.get(code, code)) + (f": {html.escape(pnote)}" if pnote else "")
-            title = html.escape(notes[v]) if notes.get(v) else f"Video {i}"
-            items.append(
-                f'<li id="r{v}"{cls} data-state="{state}"><div class="row"><span class="mark"></span>'
-                f'<a href="#" onclick="open_(\'{v}\');return false">{title}</a><span class="timer"></span></div>'
-                f'<div class="sub"><span>{v}</span><select onchange="problem(\'{v}\',this)">{PROBLEM_OPTIONS}</select></div>'
-                f'<div class="msg{" warn" if msg else ""}">{msg}</div></li>')
-        n_done = sum(1 for v in shown if v in done)
-        progress = ""
-        if shown:
-            pct = round(100 * n_done / len(shown))
-            progress = (f'<div class="progress"><span id="prog">{n_done} of {len(shown)} done</span>'
-                        f'<div class="bar"><i id="barfill" style="width:{pct}%"></i></div></div>')
+            if k in probs:
+                code, pnote = probs[k]
+                label = d.problems[code].label if code in d.problems else code
+                msg = "— " + html.escape(label) + (f": {html.escape(pnote)}" if pnote else "")
+            title = notes.get(k) or f"{k[0].capitalize()} {n}"
+            items.append(page.row(k[0], k[1], state, k in opened, title, msg, options, cfg.timer_minutes > 0))
+        n_done = sum(1 for k in shown if k in done)
         body = ""
         if shown:
-            body += f'<button id="next" class="next" onclick="openNext()"{" disabled" if n_done == len(shown) else ""}>Open next video</button>'
+            body += (f'<button id="next" class="next" onclick="openNext()"'
+                     f'{" disabled" if n_done == len(shown) else ""}>Open next {noun}</button>')
             body += '<ul class="rows">' + "".join(items) + "</ul>"
         if earlier:
             body += f'<p class="hint">{earlier} done earlier</p>'
-        taken = {e["video_id"] for e in self.desk.events() if e.get("action") == "claim"}
-        if any(v not in done for v in shown):
+        taken = d.taken(events)
+        if any(k not in done for k in shown):
             body += '<p class="hint">Finish these first: open each one, or mark a problem. Then you can get more.</p>'
-        elif any(r["video_id"] not in taken for r in self.desk.pool()):
+        elif any((r.kind, r.id) not in taken for r in rows):
             body += '<div class="more" id="getmore">' + "".join(
-                f'<button onclick="more({n})">Get {n} more videos</button>' for n in self.desk.sizes) + "</div>"
+                f'<button onclick="more({n})">Get {n} more {noun}s</button>' for n in cfg.batch_sizes) + "</div>"
         else:
-            body += '<p class="hint" id="getmore">No more videos right now; tell the operator.</p>'
-        return (PAGE.replace("%%USER%%", html.escape(user)).replace("%%PROGRESS%%", progress)
-                .replace("%%OPEN_HELP%%", "" if claims else " open").replace("%%BODY%%", body))
+            body += f'<p class="hint" id="getmore">No more {noun}s right now; tell the operator.</p>'
+        return page.desk(user=user, platform=plat, noun=plat.default_kind, seconds=cfg.timer_minutes * 60,
+                         note_codes=[p.code for p in d.problems.values() if p.note],
+                         progress_html=page.progress(n_done, len(shown)) if shown else "",
+                         body=body, open_help=not claims,
+                         footer_hint=plat.upload_hint if cfg.fourcat_enabled else None)
 
     def _admin(self):
-        try:
-            ps = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
-                                capture_output=True, text=True, timeout=10).stdout
-        except subprocess.TimeoutExpired:
-            ps = ""
-        status = dict(l.split("\t", 1) for l in ps.splitlines() if "\t" in l)
-        events = self.desk.events()
-        pool = self.desk.pool()
-        taken = {e["video_id"] for e in events if e.get("action") == "claim"}
-        free = sum(1 for r in pool if r["video_id"] not in taken)
-        rows = []
-        for u in self.desk.users():
-            claims, done, _, _ = self.desk.view(u, events)
+        d = self.desk
+        r = d._docker("ps", "-a", "--format", "{{.Names}}\t{{.Status}}", timeout=10)
+        status = dict(l.split("\t", 1) for l in (r.stdout if r else "").splitlines() if "\t" in l)
+        events = d.events()
+        rows = d.pool()
+        taken = d.taken(events)
+        free = sum(1 for r in rows if (r.kind, r.id) not in taken)
+        out = []
+        for u in sorted(d.reg.live()):
+            claims, done, _, _ = d.view(u, events)
             mine = [e for e in events if e.get("user") == u]
             last = time.strftime("%H:%M", time.localtime(mine[-1]["t"])) if mine else "—"
-            open_rows = sum(1 for v, _ in claims if v not in done)
-            rows.append(f"<tr><td>{html.escape(u)}</td><td>{html.escape(status.get(f'desk-firefox-{u}', 'missing'))}</td>"
-                        f"<td>{html.escape(status.get(f'desk-mitm-{u}', 'missing'))}</td>"
-                        f"<td>{len(claims)}</td><td>{len(claims) - open_rows}</td><td>{open_rows}</td><td>{last}</td>"
-                        f'<td><a href="/desk/admin/vnc/{html.escape(u)}/" target="_blank">watch</a></td></tr>')
-        return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>desk admin</title></head>"
-                "<body style=\"font:14px system-ui;margin:2em\"><h1>Desk sessions</h1>"
-                f"<p>{free} of {len(pool)} videos unclaimed in the pool.</p>"
-                "<table cellpadding=\"6\"><tr><th>user</th><th>firefox</th><th>mitm</th><th>claimed</th>"
-                "<th>done</th><th>open</th><th>last event</th><th>screen</th></tr>" + "".join(rows) +
-                "</table><p><a href=\"/\">4CAT</a></p></body></html>")
+            open_rows = sum(1 for k, _ in claims if k not in done)
+            out.append((u, status.get(f"desk-firefox-{u}", "missing"), status.get(f"desk-mitm-{u}", "missing"),
+                        len(claims), len(claims) - open_rows, open_rows, last))
+        return page.admin(out, free, len(rows), d.platform.default_kind)
 
 
-def make_server(root, port, exec_timeout=15, batch=5, idle=900, reaper=True,
-                public_url="https://checkjefeedzee.onlinehate.src.surf-hosted.nl"):
-    desk = Desk(root, exec_timeout, batch, idle, public_url)
+def make_server(desk_root, port, *, reaper=True, exec_timeout=15, sessions=None):
+    admin_flags = {}
+    if sessions is None:
+        roles = load_config(desk_root).gate_mode == "roles"
+        sessions = build_sessions(desk_root, is_admin=(lambda u: admin_flags.get(u, False)) if roles else None)
+    desk = Desk(sessions, exec_timeout, admin_flags)
     handler = type("BoundHandler", (Handler,), {"desk": desk})
     if reaper:
         def loop():
@@ -483,11 +430,8 @@ def make_server(root, port, exec_timeout=15, batch=5, idle=900, reaper=True,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--desk", default="/data/onlinehate_zeeschuimer/desk")
+    ap.add_argument("--desk-root", required=True, help="the desk's directory, holding desk.json")
     ap.add_argument("--port", type=int, default=8110)
-    ap.add_argument("--batch", type=int, default=5)
-    ap.add_argument("--idle", type=int, default=900, help="stop a session after this many seconds without a screen")
-    ap.add_argument("--public-url", default="https://checkjefeedzee.onlinehate.src.surf-hosted.nl",
-                    help="the desk's public origin, opened inside a session for the uploads login")
+    ap.add_argument("--no-reaper", action="store_true", help="never stop idle sessions")
     a = ap.parse_args()
-    make_server(a.desk, a.port, batch=a.batch, idle=a.idle, public_url=a.public_url).serve_forever()
+    make_server(a.desk_root, a.port, reaper=not a.no_reaper).serve_forever()

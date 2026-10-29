@@ -1,12 +1,12 @@
 # /etc/systemd/system/desk-stub.service — the desk page and queue for every user's session.
 # Root for the Docker socket (it execs into desk-firefox-<user>); listens on 127.0.0.1 only.
+# Everything but the desk root comes from <desk root>/desk.json.
 [Unit]
 Description=ddp-comments desk
 After=docker.service
 RequiresMountsFor=/data/onlinehate_zeeschuimer
 [Service]
-WorkingDirectory=/data/onlinehate_zeeschuimer/desk
-ExecStart=/usr/bin/python3 /data/onlinehate_zeeschuimer/desk/desk_stub.py --desk /data/onlinehate_zeeschuimer/desk --port 8110 --batch 5 --idle 900
+ExecStart=/usr/bin/python3 /opt/ddp-comments/desk/desk_stub.py --desk-root /data/onlinehate_zeeschuimer/desk
 Restart=always
 [Install]
 WantedBy=multi-user.target
