@@ -12,7 +12,7 @@ import urllib.parse
 from typing import Callable
 
 from .config import DeskConfig
-from .registry import Registry
+from .registry import USER_RE, Registry
 
 MITM_COMMAND = ("mitmdump --set block_global=false --set connection_strategy=lazy "
                 "--set stream_large_bodies=1m --set rawtcp=false --set body_size_limit=32m "
@@ -40,8 +40,8 @@ def _service_pair(cfg: DeskConfig, u: str, index: int, port: int, token: bool) -
             "./platform:/platform:ro",
             f"./state/mitm/{u}:/home/mitmproxy/.mitmproxy",
             f"./state/captures/{u}:/captures/{u}"]
-    if token:
-        vols.append(f"./secrets/4cat-tokens/{u}:/run/desk/4cat-token:ro")
+    if token:  # a directory: a token replaced by rename is visible to the running proxy
+        vols.append(f"./secrets/4cat-tokens/{u}:/run/desk:ro")
     out = [f"  mitm-{u}:",
            f"    image: {cfg.mitm_image}",
            f"    container_name: desk-mitm-{u}",
@@ -62,7 +62,7 @@ def _service_pair(cfg: DeskConfig, u: str, index: int, port: int, token: bool) -
             "    volumes:",
             f"      - ./state/firefox/{u}:/config",
             f"      - ./state/mitm/{u}:/mitm-ca:ro",
-            f"      - ./firefox/policies-{u}.json:/usr/lib/firefox/distribution/policies.json:ro",
+            f"      - ./firefox/policy/{u}:/usr/lib/firefox/distribution:ro",
             "    environment:",
             "      - DISPLAY_WIDTH=1280", "      - DISPLAY_HEIGHT=900", "      - WEB_AUDIO=0",
             "      - KEEP_APP_RUNNING=1", "      - DARK_MODE=0", "      - FF_OPEN_URL=about:blank",
@@ -98,10 +98,12 @@ def _map(key: str, var: str, default: str, entries: list[tuple[str, str]]) -> li
 
 
 def render_maps(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = None) -> str:
+    """In api mode $desk_member/$desk_admin list every role-holder in `members`, registered
+    or not (a first visit must reach the stub to be provisioned); the VNC maps stay live-only."""
     live = reg.live()
     stub, fourcat = _stub(cfg), _fourcat_hostport(cfg)
     if cfg.gate_mode == "api":
-        members = {u: a for u, a in (members or {}).items() if u in live}
+        members = {u: a for u, a in (members or {}).items() if isinstance(u, str) and USER_RE.fullmatch(u)}
         member_map = _map("$username", "$desk_member", "0", [(u, "1") for u in members])
         admin_map = _map("$username", "$desk_admin", "0", [(u, "1") for u, a in members.items() if a])
     else:
@@ -184,15 +186,9 @@ def render_policy(cfg: DeskConfig) -> str:
 
 # --- Writing ---------------------------------------------------------------
 
-def _write(path: str, text: str) -> str:
-    """In place: for files that are bind-mounted individually (the policies)."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(text)
-    return path
-
-
 def _write_atomic(path: str, text: str) -> str:
+    """Temp file + rename in path's directory. Every mounted file sits in a directory mount
+    (never a single-file bind mount), so a running container sees the new inode."""
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp.")
@@ -239,14 +235,29 @@ def _chown_tree(path: str) -> None:
             shutil.chown(os.path.join(dirpath, name), 1000, 1000, follow_symlinks=False)
 
 
+def _drop_legacy_policies(root: str) -> None:
+    """Remove firefox/policies-<u>.json, the single-file-mount layout (now firefox/policy/<u>/)."""
+    try:
+        names = os.listdir(os.path.join(root, "firefox"))
+    except FileNotFoundError:
+        return
+    for name in names:
+        p = os.path.join(root, "firefox", name)
+        if name.startswith("policies-") and name.endswith(".json") and os.path.isfile(p):
+            os.remove(p)
+
+
 def write_all(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = None) -> list[str]:
+    from .fourcat import migrate_legacy_token
     from .platform import load_dir
     root = cfg.desk_root
     platform = load_dir(cfg.platforms_dir, cfg.platform)
     live = reg.live()
+    for u in live:
+        migrate_legacy_token(root, u)  # before the compose: its token mount needs the directory
     written = [
         _write_atomic(os.path.join(root, "docker-compose.yml"), render_compose(
-            cfg, reg, lambda u: os.path.isfile(os.path.join(root, "secrets", "4cat-tokens", u)))),
+            cfg, reg, lambda u: os.path.isdir(os.path.join(root, "secrets", "4cat-tokens", u)))),
         _write_atomic(os.path.join(root, "nginx", "desk-map.conf"), render_maps(cfg, reg, members)),
         _write_atomic(os.path.join(root, "nginx", "desk.conf"), render_desk_conf(cfg)),
         _write_atomic(os.path.join(root, "nginx", "fourcat.conf"), render_fourcat_conf(cfg)),
@@ -256,8 +267,9 @@ def write_all(cfg: DeskConfig, reg: Registry, members: dict[str, bool] | None = 
     _sync_dir(platform.dir, dest)
     written.append(dest)
     css_src = os.path.join(platform.dir, "userContent.css")
+    _drop_legacy_policies(root)
     for u in live:
-        written.append(_write(os.path.join(root, "firefox", f"policies-{u}.json"), policy))
+        written.append(_write_atomic(os.path.join(root, "firefox", "policy", u, "policies.json"), policy))
         dirs = [os.path.join(root, "state", kind, u) for kind in ("mitm", "firefox", "captures")]
         for d in dirs:
             os.makedirs(d, exist_ok=True)

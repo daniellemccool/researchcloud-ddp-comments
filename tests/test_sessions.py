@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(REPO, "desk"))
 from desklib import coapi, pool, provision as pv  # noqa: E402
 from desklib.fourcat import FourCatError  # noqa: E402
 from desklib.config import DeskConfig, load_config, save_config  # noqa: E402
-from desklib.locks import flocked, pool_lock, render_lock  # noqa: E402
+from desklib.locks import flocked, pool_lock, render_lock, user_lock  # noqa: E402
 from desklib.registry import Registry  # noqa: E402
 from desklib.sessions import Sessions  # noqa: E402
 
@@ -21,12 +21,13 @@ API = [
     {"username": "Bad Name", "roles": ["src_co_students"]},
 ]
 
-# docker stand-in: logs every call; `inspect` answers by a state dir; `stop` clears it.
+# docker stand-in: logs every call; `inspect` answers by a state dir; `stop` clears it, unless the
+# file $FAKE_DOCKER_STOP_STUCK exists (a container that ignores the stop).
 DOCKER = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_DOCKER_CALLS"
 case "$1" in
   inspect) [ -f "$FAKE_DOCKER_STATE/${@: -1}" ] && echo true || echo false;;
-  stop) rm -f "$FAKE_DOCKER_STATE/${@: -1}";;
+  stop) [ -f "$FAKE_DOCKER_STOP_STUCK" ] || rm -f "$FAKE_DOCKER_STATE/${@: -1}";;
 esac
 exit 0
 """
@@ -83,7 +84,8 @@ def docker_env(t):
     put(os.path.join(bindir, "docker"), DOCKER)
     os.chmod(os.path.join(bindir, "docker"), 0o755)
     return dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"],
-                FAKE_DOCKER_CALLS=os.path.join(t, "calls"), FAKE_DOCKER_STATE=os.path.join(t, "state"))
+                FAKE_DOCKER_CALLS=os.path.join(t, "calls"), FAKE_DOCKER_STATE=os.path.join(t, "state"),
+                FAKE_DOCKER_STOP_STUCK=os.path.join(t, "stop-stuck"))
 
 
 class CoApiTests(unittest.TestCase):
@@ -149,9 +151,93 @@ class SessionsTests(unittest.TestCase):
         def hang(*a, **kw):
             raise subprocess.TimeoutExpired(a[0], 1)
         self.prov.run = hang
-        self.assertIn("timed out", self.s.retire("carol"))
+        self.assertEqual(self.s.retire("carol"), "could not stop desk-firefox-carol; retire aborted")
         self.assertEqual(self.s.prune(), [])
-        self.assertEqual(sorted(self.s.failed), ["carol"])
+        self.assertEqual(self.s.failed, {"carol": "could not stop desk-firefox-carol; retire aborted"})
+        self.assertIn("carol", self.reg.live())
+
+    def provision_json(self, user, where="users"):
+        return os.path.join(self.root, "state", where, user, "provision.json")
+
+    def test_retire_aborts_when_a_container_keeps_running(self):
+        for c in ("desk-firefox-carol", "desk-mitm-carol"):
+            put(os.path.join(self.t, "state", c), "")
+        put(os.path.join(self.t, "stop-stuck"), "")
+        with self.assertRaisesRegex(RuntimeError, r"^could not stop desk-firefox-carol; retire aborted$"):
+            self.prov.retire("carol")
+        self.assertIn("carol", self.reg.live())                     # the row stays live
+        self.assertTrue(os.path.exists(self.provision_json("carol")))  # and the state is not moved
+        self.assertFalse(os.path.exists(self.provision_json("carol", "retired")))
+        self.assertEqual(self.rendered, [])                          # nothing re-rendered
+        self.assertEqual(self.s.retire("carol"), "could not stop desk-firefox-carol; retire aborted")
+        os.remove(os.path.join(self.t, "state", "desk-firefox-carol"))   # only the proxy is stuck now
+        self.assertEqual(self.s.retire("carol"), "could not stop desk-mitm-carol; retire aborted")
+        self.assertIn("carol", self.reg.live())
+        os.remove(os.path.join(self.t, "stop-stuck"))                # a stop that works
+        self.assertIsNone(self.s.retire("carol"))
+        self.assertNotIn("carol", self.reg.live())
+        self.assertFalse(os.path.exists(self.provision_json("carol")))
+        self.assertTrue(os.path.exists(self.provision_json("carol", "retired")))
+        calls = slurp(os.path.join(self.t, "calls")).splitlines()
+        self.assertIn("inspect -f {{.State.Running}} desk-mitm-carol", calls)
+
+    def test_prune_reports_a_stuck_stop(self):
+        put(os.path.join(self.t, "state", "desk-mitm-carol"), "")
+        put(os.path.join(self.t, "stop-stuck"), "")
+        self.assertEqual(self.s.prune(), [])
+        self.assertEqual(self.s.failed, {"carol": "could not stop desk-mitm-carol; retire aborted"})
+
+    def test_up_holds_the_user_lock(self):
+        held = []
+
+        def run(cmd, **kw):
+            if "compose" in cmd:
+                user = cmd[-1].split("-", 1)[1]
+                try:
+                    with flocked(user_lock(self.root, user), timeout=0.05):
+                        held.append((user, False))
+                except TimeoutError:
+                    held.append((user, True))
+            return self.run_cmd(cmd, **kw)
+        self.s.run = run
+        self.s.up("bob")
+        self.s.up()
+        self.assertEqual(held, [("bob", True), ("alice", True), ("bob", True), ("carol", True)])
+
+    def test_demotion_rotates_under_the_user_lock(self):
+        held = []
+
+        def rotate(u):
+            try:
+                with flocked(user_lock(self.root, u), timeout=0.05):
+                    held.append(False)
+            except TimeoutError:
+                held.append(True)
+        self.fc.rotate = rotate
+        self.assertEqual(self.s.sync_admins(self.members)["admin_cleared"], ["alice"])
+        self.assertEqual(held, [True])
+
+    def test_reconcile_renders_even_when_nobody_retired(self):
+        self.members = {"alice": False, "bob": True, "carol": False}   # nobody leaves; bob promoted
+        out = self.s.reconcile()
+        self.assertEqual(out["retired"], [])
+        self.assertEqual(self.rendered, [])   # no retire, so the provisioner never rendered
+        m = slurp(os.path.join(self.root, "nginx", "desk-map.conf"))
+        admin = m.split("map $username $desk_admin", 1)[1].split("}", 1)[0]
+        self.assertIn('"bob" 1;', admin)
+        self.assertNotIn("alice", admin)
+        self.members = {"alice": True, "bob": True, "carol": False, "dana": False}   # roles change again
+        self.s.reconcile()
+        m = slurp(os.path.join(self.root, "nginx", "desk-map.conf"))
+        admin = m.split("map $username $desk_admin", 1)[1].split("}", 1)[0]
+        self.assertIn('"alice" 1;', admin)
+        self.assertIn('"dana" 1;', m.split("map $username $desk_member", 1)[1].split("}", 1)[0])
+
+    def test_render_refuses_an_empty_member_list(self):
+        self.members = {}
+        with self.assertRaisesRegex(RuntimeError, "CO API returned no members"):
+            self.s.render()
+        self.assertFalse(os.path.exists(os.path.join(self.root, "nginx", "desk-map.conf")))
 
     def test_stop_status_and_no_fourcat(self):
         put(os.path.join(self.t, "state", "desk-firefox-alice"), "")
@@ -173,11 +259,20 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(sorted(self.reg.live()), ["alice", "bob", "carol"])
         self.assertFalse(os.path.exists(os.path.join(self.t, "calls")))
 
-    def test_reconcile_fetches_members_once(self):
+    def test_reconcile_decides_on_one_fetch_and_renders_from_a_fresh_one(self):
         n = []
-        self.s.members = lambda: n.append(1) or self.members
+
+        def members():
+            try:
+                with flocked(render_lock(self.root), timeout=0.01):
+                    n.append("unlocked")
+            except TimeoutError:
+                n.append("under render lock")
+            return self.members
+        self.s.members = members
         self.s.reconcile()
-        self.assertEqual(len(n), 1)
+        # one fetch for every prune/sync decision, one under the render lock for the maps
+        self.assertEqual(n, ["unlocked", "under render lock"])
 
     def test_demotion_rotates_before_clearing_and_retries(self):
         self.fc.rotate_fails = True

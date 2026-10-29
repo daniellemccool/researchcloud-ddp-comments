@@ -13,6 +13,7 @@ import urllib.error
 import desk_page as page
 from desklib import export, pool
 from desklib.fourcat import FourCatError
+from desklib.locks import flocked, user_lock
 from desklib.registry import USER_RE
 
 MAX_UPLOAD = 5 * 1024 * 1024
@@ -228,7 +229,9 @@ def handle_admin(handler, desk, user, method, path, query) -> bool:
             send(400)
             return True
         try:
-            fourcat.rotate(target)
+            # the user lock: a provisioning run or retire may be writing the same token files
+            with flocked(user_lock(desk.root, target)):
+                fourcat.rotate(target)
         except ACTION_ERRORS as e:
             if own:
                 send(500, page.admin_shell("Your 4CAT password",

@@ -33,8 +33,8 @@ def _read(desk_root: str, default_kind: str) -> tuple[list[PoolRow], bool]:
             text = f.read()
     except FileNotFoundError:
         return [], False
-    if text and not text.endswith("\n"):
-        text = text[:text.rfind("\n") + 1]     # a cut-off last line is never a row
+    # Every writer swaps in a whole file (_replace), so a final line without a newline is a
+    # complete row (a hand-edited file often ends that way), never a write in progress.
     reader = csv.DictReader(io.StringIO(text, newline=""))
     names = reader.fieldnames
     if names is not None and "id" not in names and "video_id" not in names:

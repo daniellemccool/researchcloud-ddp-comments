@@ -156,12 +156,34 @@ class Provisioner:
             self._save(user, st)
         return self.advance(user)
 
+    def _still_running(self, name) -> bool:
+        """True unless docker says the container is not running (or does not exist)."""
+        r = self.run(["docker", "inspect", "-f", "{{.State.Running}}", name],
+                     capture_output=True, text=True, timeout=self.cmd_timeout)
+        return r.returncode == 0 and (r.stdout or "").strip() == "true"
+
     def retire(self, user) -> None:
+        """Stop both containers, verify they stopped, then free the row.
+
+        A stop that hangs or fails, or a container still running afterwards, raises
+        RuntimeError("could not stop <name>; retire aborted") before anything is moved
+        or freed: the row stays live and the user keeps their state."""
         _check(user)
         with flocked(user_lock(self.cfg.desk_root, user)):
-            for c in (f"desk-firefox-{user}", f"desk-mitm-{user}"):
-                # non-zero (already gone) is fine; a hang raises TimeoutExpired
-                self.run(["docker", "stop", c], capture_output=True, timeout=self.cmd_timeout)
+            names = (f"desk-firefox-{user}", f"desk-mitm-{user}")
+            for c in names:
+                # non-zero (already gone) is fine here: the inspect below decides
+                try:
+                    self.run(["docker", "stop", c], capture_output=True, timeout=self.cmd_timeout)
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                    raise RuntimeError(f"could not stop {c}; retire aborted") from None
+            for c in names:
+                try:
+                    running = self._still_running(c)
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                    running = True  # cannot confirm the stop
+                if running:
+                    raise RuntimeError(f"could not stop {c}; retire aborted")
             # Move the state before freeing the row: a crash in between must not
             # leave "ready" state for a user without a live row.
             users_dir = self._dir("users", user)

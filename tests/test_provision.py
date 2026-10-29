@@ -102,7 +102,7 @@ class ProvisionTests(unittest.TestCase):
         self.assertFalse(create[0].endswith(" -a"))
         compose = slurp(os.path.join(self.root, "docker-compose.yml"))
         self.assertIn("  mitm-alice:", compose)
-        self.assertIn("./secrets/4cat-tokens/alice:/run/desk/4cat-token:ro", compose)
+        self.assertIn("./secrets/4cat-tokens/alice:/run/desk:ro", compose)
         self.assertEqual(self.nginx_calls, [self.cfg])
         up = self.calls("compose")
         cf = os.path.join(self.root, "docker-compose.yml")

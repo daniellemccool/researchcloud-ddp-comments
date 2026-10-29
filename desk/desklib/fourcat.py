@@ -37,6 +37,52 @@ def _check(user):
     return user
 
 
+# The proxy mounts secrets/4cat-tokens/<user>/ at /run/desk and reads /run/desk/4cat-token
+# (DESK_FOURCAT_TOKEN_FILE). A directory mount, so a token replaced by rename is seen at once.
+TOKEN_NAME = "4cat-token"
+PROXY_UID = 1000
+
+
+def _secret_dir(desk_root, sub):
+    d = desk_root
+    for part in ("secrets", sub):
+        d = os.path.join(d, part)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)  # defeat the umask
+    return d
+
+
+def token_dir(desk_root, user):
+    """secrets/4cat-tokens/<user>/, created: mode 0750, owned by the proxy's uid when we are root."""
+    d = os.path.join(_secret_dir(desk_root, "4cat-tokens"), _check(user))
+    os.makedirs(d, mode=0o750, exist_ok=True)
+    os.chmod(d, 0o750)
+    if os.geteuid() == 0:
+        os.chown(d, PROXY_UID, PROXY_UID)
+    return d
+
+
+def migrate_legacy_token(desk_root, user) -> bool:
+    """Move a single-file token (secrets/4cat-tokens/<user>, the old layout) into <user>/4cat-token.
+
+    Idempotent and crash-safe: the file is first renamed aside to a name no user can have. True if
+    a legacy token was found."""
+    tokens = os.path.join(desk_root, "secrets", "4cat-tokens")
+    legacy, aside = os.path.join(tokens, _check(user)), os.path.join(tokens, f".{user}.legacy-token")
+    if os.path.isfile(legacy) and not os.path.islink(legacy):
+        os.replace(legacy, aside)
+    if not os.path.isfile(aside):
+        return False
+    dest = os.path.join(token_dir(desk_root, user), TOKEN_NAME)
+    if os.path.exists(dest):
+        os.remove(aside)  # a newer token was written since
+    else:
+        if os.geteuid() == 0:
+            os.chown(aside, PROXY_UID, PROXY_UID)
+        os.replace(aside, dest)
+    return True
+
+
 class FourCat:
     def __init__(self, cfg, run=subprocess.run, urlopen=urllib.request.urlopen,
                  db_user="fourcat", db_name="fourcat"):
@@ -47,7 +93,7 @@ class FourCat:
         return os.path.join(self.cfg.desk_root, "secrets", "4cat-passwords", _check(user))
 
     def token_path(self, user):
-        return os.path.join(self.cfg.desk_root, "secrets", "4cat-tokens", _check(user))
+        return os.path.join(self.cfg.desk_root, "secrets", "4cat-tokens", _check(user), TOKEN_NAME)
 
     def _exec(self, container, *args, input=None, what="docker exec"):
         cmd = ["docker", "exec", *(["-i"] if input is not None else []), container, *args]
@@ -63,24 +109,18 @@ class FourCat:
         return self._exec(self.cfg.fourcat_db, "psql", "-U", self.db_user, "-d", self.db_name,
                           "-tAc", sql, what="psql").strip()
 
-    def _secret_dir(self, sub):
-        d = self.cfg.desk_root
-        for part in ("secrets", sub):
-            d = os.path.join(d, part)
-            os.makedirs(d, mode=0o700, exist_ok=True)
-            os.chmod(d, 0o700)  # defeat the umask
-        return d
+    def _write(self, path, text, exclusive=False, owner=None):
+        """Write via a 0600 temp file in path's directory (which must exist); publish atomically.
 
-    def _write(self, path, text, exclusive=False):
-        """Write via a 0600 temp file in the same directory; publish atomically.
-
-        exclusive: os.link (FileExistsError if someone else won); else os.replace."""
-        self._secret_dir(os.path.basename(os.path.dirname(path)))
+        exclusive: os.link (FileExistsError if someone else won); else os.replace.
+        owner: (uid, gid) given to the temp file before it is published."""
         tmp = f"{path}.{secrets.token_hex(4)}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(text)
+            if owner is not None:
+                os.chown(tmp, *owner)
             if exclusive:
                 os.link(tmp, path)
             else:
@@ -104,7 +144,7 @@ class FourCat:
                 pass
             pw = secrets.token_urlsafe(24)
             try:
-                self._write(path, pw, exclusive=True)
+                self._write_password(user, pw, exclusive=True)
                 return pw, True
             except FileExistsError:
                 continue  # lost a race: read the winner's file
@@ -180,16 +220,21 @@ class FourCat:
             raise LoginFailed(f"login refused for {user}")
         raise FourCatError(f"unexpected login response status {status}")
 
+    def _write_password(self, user, pw, exclusive=False):
+        _secret_dir(self.cfg.desk_root, "4cat-passwords")
+        self._write(self.password_path(user), pw, exclusive=exclusive)
+
     def write_token(self, user, token):
+        """<user>/4cat-token, 0600 and owned by the proxy's uid when root, replaced by rename."""
+        migrate_legacy_token(self.cfg.desk_root, user)
+        token_dir(self.cfg.desk_root, user)
         path = self.token_path(user)
-        self._write(path, token)
-        if os.geteuid() == 0:
-            os.chown(path, 1000, 1000)
+        self._write(path, token, owner=(PROXY_UID, PROXY_UID) if os.geteuid() == 0 else None)
         return path
 
     def rotate(self, user):
         pw = secrets.token_urlsafe(24)
         self.set_password(user, pw)
-        self._write(self.password_path(user), pw)  # DB already changed: the file must follow
+        self._write_password(user, pw)  # DB already changed: the file must follow
         token = self.login_token(user, pw)
         self.write_token(user, token)

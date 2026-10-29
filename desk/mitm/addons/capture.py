@@ -2,6 +2,10 @@
 
 Per collector, the sidecar proxy: records the platform's capture rules as NDJSON, logs page opens, and is the
 only door from the browser to 4CAT (fourcat.desk, two allowed calls, token injected here, never in the browser).
+
+A captured request goes upstream with Accept-Encoding: identity, so its response is never compressed: the
+Content-Length checked against the rule's max_body_bytes is the real size, and nothing is decompressed
+before that check.
 """
 import datetime
 import json
@@ -82,6 +86,7 @@ class Capture:
         if cr.resolves_internal(req.host):
             return self._refuse(flow, "resolved-internal")
         if decision is cr.Decision.CAPTURE:
+            req.headers["Accept-Encoding"] = "identity"     # the size check sees the real body size
             flow.metadata["desk"] = ("capture", rule)
 
     def responseheaders(self, flow: http.HTTPFlow):

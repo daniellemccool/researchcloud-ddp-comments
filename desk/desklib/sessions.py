@@ -2,13 +2,17 @@
 
 No argparse and no printing here. A failed docker call or 4CAT step is reported
 through return values (`retire` returns an error text, `prune` fills `self.failed`).
+
+Locks: `up` and the rotate in `sync_admins` hold the user's lock, `render` the render lock,
+and retire goes through the provisioner (user -> render). None of them is called with a
+lock already held: flocked() on a lock this call chain holds would deadlock.
 """
 import subprocess
 from typing import Callable
 
 from .config import DeskConfig
 from .fourcat import FourCat, FourCatError
-from .locks import flocked, render_lock
+from .locks import flocked, render_lock, user_lock
 from .provision import Provisioner, State
 from .registry import Registry
 from .render import write_all
@@ -31,8 +35,11 @@ class Sessions:
         return self.prov.repair(user)
 
     def render(self) -> list[str]:
+        """Re-render under the render lock. In api mode the members are fetched here, under the
+        lock (an older snapshot must never overwrite a newer map), and an empty answer while
+        sessions exist is refused like everywhere else: it would revoke every member at once."""
         with flocked(render_lock(self.cfg.desk_root)):
-            members = self.members() if self.cfg.gate_mode == "api" else None
+            members = self._current_members() if self.cfg.gate_mode == "api" else None
             written = write_all(self.cfg, self.reg, members)
             self.prov.nginx(self.cfg)
         return written
@@ -43,8 +50,10 @@ class Sessions:
                  check=True, capture_output=True, timeout=self.prov.cmd_timeout)
 
     def up(self, user=None) -> None:
+        """compose up under each user's lock, so it never races a retire or a provisioning run."""
         for u in ([user] if user else sorted(self.reg.live())):
-            self._compose_up(u)
+            with flocked(user_lock(self.cfg.desk_root, u)):
+                self._compose_up(u)
 
     def stop(self, user) -> None:
         """Stop the firefox container only; mitm stays, as the idle reaper does."""
@@ -66,6 +75,8 @@ class Sessions:
             return "docker timed out"
         except subprocess.CalledProcessError as e:
             return f"docker exited with status {e.returncode}"
+        except RuntimeError as e:  # "could not stop <name>; retire aborted": the row stays live
+            return str(e) or type(e).__name__
         return None
 
     def _current_members(self) -> dict[str, bool]:
@@ -115,9 +126,10 @@ class Sessions:
             try:
                 if bool(self.fourcat.is_admin(u)) == want:
                     continue
-                if not want:
-                    self.fourcat.rotate(u)
-                self.fourcat.set_admin(u, want)
+                with flocked(user_lock(self.cfg.desk_root, u)):  # rotate rewrites the token files
+                    if not want:
+                        self.fourcat.rotate(u)
+                    self.fourcat.set_admin(u, want)
             except (FourCatError, subprocess.SubprocessError, OSError) as e:
                 self.failed[u] = str(e) or type(e).__name__
                 continue
@@ -127,6 +139,8 @@ class Sessions:
         return out
 
     def reconcile(self) -> dict:
+        """prune, sync_admins, then always a re-render: role changes must reach the nginx maps
+        even when nobody was retired (render() reads the members again, under the render lock)."""
         members = self._current_members()
         retired = self.prune(members)
         failed = dict(self.failed)
@@ -134,6 +148,7 @@ class Sessions:
         failed.update(self.failed)
         if failed:
             out["failed"] = failed
+        self.render()
         return out
 
     def status(self) -> list[dict]:

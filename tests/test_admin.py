@@ -4,7 +4,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_desk_stub as base  # noqa: E402  (module import: StubTest itself must not be re-collected here)
-from desklib import pool  # noqa: E402
+from desklib import locks, pool  # noqa: E402
 from desklib.platform import load_dir  # noqa: E402
 
 BOUNDARY = "XdeskX"
@@ -144,6 +144,20 @@ class AdminTest(base.StubHarness):
         self.assertEqual(self.areq("POST", "/desk/admin/4cat/rotate")[0], 400)
         self.assertEqual(self.areq("POST", "/desk/admin/4cat/rotate?user=Bad%20Name")[0], 400)
 
+    def test_rotate_holds_the_target_user_lock(self):
+        fc, held = self.desk_obj().sessions.fourcat, []
+
+        def rotate(u):
+            try:
+                with locks.flocked(locks.user_lock(self.root, u), timeout=0.05):
+                    held.append((u, False))
+            except TimeoutError:
+                held.append((u, True))
+        with mock.patch.object(fc, "rotate", rotate):
+            self.assertEqual(self.areq("POST", "/desk/admin/4cat/rotate?user=bob")[0], 303)
+            self.assertEqual(self.areq("POST", "/desk/admin/4cat/password")[0], 303)   # own reissue
+        self.assertEqual(held, [("bob", True), ("alice", True)])
+
     def test_export_zip_contains_captures_and_log(self):
         base.put(os.path.join(self.root, "state", "captures", "alice", "a.ndjson"), '{"x":1}\n')
         base.put(os.path.join(self.root, "state", "captures", "bob", "sub", "b.ndjson"), '{"y":2}\n')
@@ -277,20 +291,20 @@ class PoolUnitTest(unittest.TestCase):
                 f.write("video_id,bucket,note\r\n11,a,x")          # legacy header, no final newline
             before = os.stat(path).st_ino
             rows, _ = pool.parse_selection("id\n22\n", self.platform)
-            self.assertEqual(pool.add_rows(root, rows, self.platform), (1, 1))  # the unterminated "11" row is cut off
+            self.assertEqual(pool.add_rows(root, rows, self.platform), (1, 2))  # the unterminated "11" row is kept
             self.assertNotEqual(os.stat(path).st_ino, before)       # a new file was swapped in, not appended to
             with open(path, "rb") as f:
                 data = f.read()
             self.assertTrue(data.endswith(b"\n")); self.assertTrue(data.startswith(b"id,kind,bucket,note"))
-            self.assertEqual([r.id for r in pool.read_rows(root, "video")], ["22"])
+            self.assertEqual([r.id for r in pool.read_rows(root, "video")], ["11", "22"])
             self.assertEqual([n for n in os.listdir(root) if n.startswith(".pool.csv.")], [])
 
-    def test_read_drops_a_cut_off_last_line(self):
+    def test_read_keeps_a_last_line_without_newline(self):
         import tempfile
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:   # writes are whole-file swaps: this is a complete row
             with open(os.path.join(root, "pool.csv"), "w", newline="") as f:
                 f.write("id,kind,bucket,note\r\n9001234567,video,,\r\n90")
-            self.assertEqual([r.id for r in pool.read_rows(root, "video")], ["9001234567"])
+            self.assertEqual([r.id for r in pool.read_rows(root, "video")], ["9001234567", "90"])
 
     def test_add_rows_creates_file_with_header_and_dedupes(self):
         import tempfile

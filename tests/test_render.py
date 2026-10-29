@@ -77,9 +77,42 @@ class ComposeTests(RenderBase):
 
     def test_compose_token_mount_only_when_token_exists(self):
         c = self.compose(tokens=lambda u: u == "alice")
-        self.assertIn("./secrets/4cat-tokens/alice:/run/desk/4cat-token:ro",
+        self.assertIn("./secrets/4cat-tokens/alice:/run/desk:ro",
                       block(c, "  mitm-alice:", "  firefox-alice:"))
-        self.assertNotIn("4cat-token:ro", block(c, "  mitm-bob:", "  firefox-bob:"))
+        self.assertNotIn("4cat-tokens", block(c, "  mitm-bob:", "  firefox-bob:"))
+
+    def written_compose(self):
+        render.write_all(self.cfg, self.reg)
+        with open(os.path.join(self.root, "docker-compose.yml")) as f:
+            return f.read()
+
+    def test_token_mount_follows_the_token_directory(self):
+        os.makedirs(os.path.join(self.root, "secrets", "4cat-tokens", "alice"))
+        c = self.written_compose()
+        self.assertIn("./secrets/4cat-tokens/alice:/run/desk:ro", block(c, "  mitm-alice:", "  firefox-alice:"))
+        self.assertNotIn("4cat-tokens", block(c, "  mitm-bob:", "  firefox-bob:"))
+
+    def test_legacy_token_file_moves_into_its_directory(self):
+        tokens = os.path.join(self.root, "secrets", "4cat-tokens")
+        os.makedirs(tokens)
+        with open(os.path.join(tokens, "bob"), "w") as f:   # the single-file layout
+            f.write("tok-bob")
+        for _ in range(2):   # idempotent
+            c = self.written_compose()
+            self.assertIn("./secrets/4cat-tokens/bob:/run/desk:ro", block(c, "  mitm-bob:", "  firefox-bob:"))
+            with open(os.path.join(tokens, "bob", "4cat-token")) as f:
+                self.assertEqual(f.read(), "tok-bob")
+            self.assertEqual(sorted(os.listdir(tokens)), ["bob"])
+        self.assertNotIn("4cat-tokens", block(c, "  mitm-alice:", "  firefox-alice:"))
+
+    def test_no_single_file_bind_mounts(self):
+        c = self.compose(tokens=lambda u: True)
+        self.assertIn("./firefox/policy/alice:/usr/lib/firefox/distribution:ro", c)
+        self.assertIn("./secrets/4cat-tokens/alice:/run/desk:ro", c)
+        mounts = re.findall(r"(?m)^      - ([./]\S*:/\S*)$", c)
+        self.assertEqual(len(mounts), 2 * (5 + 1 + 3))   # per user: 5 mitm + the token dir, 3 firefox
+        for m in mounts:   # every container path is a directory, never a file
+            self.assertNotRegex(m.split(":")[1], r"\.(json|pem|txt|css)$|4cat-token$", m)
 
     def test_compose_without_fourcat(self):
         c = self.compose(self.make_cfg(fourcat_enabled=False))
@@ -136,13 +169,27 @@ class MapTests(RenderBase):
 
     def test_maps_api_mode(self):
         cfg = self.make_cfg(gate_mode="api")
-        m = render.render_maps(cfg, self.reg, {"alice": True, "bob": False})
+        m = render.render_maps(cfg, self.reg, {"alice": True, "bob": False, "carol": True, "Bad Name": True})
         member = block(m, "map $username $desk_member", "}")
-        self.assertIn('"alice" 1;', member)
-        self.assertIn('"bob" 1;', member)
+        for u in ("alice", "bob", "carol"):   # every role-holder, registered or not
+            self.assertIn(f'"{u}" 1;', member)
+        self.assertNotIn("Bad Name", m)
         admin = block(m, "map $username $desk_admin", "}")
         self.assertIn('"alice" 1;', admin)
+        self.assertIn('"carol" 1;', admin)
         self.assertNotIn("bob", admin)
+        for vnc in ('map "$desk_member:$username"', 'map "$desk_admin:$desk_target"'):
+            v = block(m, vnc, "}")   # the VNC maps stay live-only
+            self.assertIn('"1:alice" 127.0.0.1:5801;', v)
+            self.assertNotIn("carol", v)
+
+    def test_api_mode_new_member_is_a_member_before_provisioning(self):
+        cfg = self.make_cfg(gate_mode="api")
+        m = render.render_maps(cfg, self.reg, {"alice": False, "dana": False})
+        self.assertNotIn("dana", self.reg.live())
+        self.assertIn('"dana" 1;', block(m, "map $username $desk_member", "}"))
+        self.assertNotIn("dana", block(m, "map $username $desk_admin", "}"))
+        self.assertNotIn("dana", block(m, 'map "$desk_member:$username"', "}"))
 
     def test_maps_retired_user_absent(self):
         with locks.flocked(locks.render_lock(self.root)):
@@ -150,7 +197,12 @@ class MapTests(RenderBase):
         self.assertNotIn("bob", render.render_maps(self.cfg, self.reg))
         self.assertNotIn("bob", self.compose())
         cfg = self.make_cfg(gate_mode="api")
-        self.assertNotIn("bob", render.render_maps(cfg, self.reg, {"alice": True, "bob": True}))
+        m = render.render_maps(cfg, self.reg, {"alice": True, "bob": True})
+        # still a role-holder, so still a member (a visit re-provisions), but no screen to reach
+        self.assertIn('"bob" 1;', block(m, "map $username $desk_member", "}"))
+        for vnc in ('map "$desk_member:$username"', 'map "$desk_admin:$desk_target"'):
+            self.assertNotIn("bob", block(m, vnc, "}"))
+        self.assertNotIn("bob", render.render_maps(cfg, self.reg, {"alice": True}))
 
 
 class LocationTests(RenderBase):
@@ -211,13 +263,32 @@ class OtherTests(RenderBase):
         css = os.path.join(r, "state/firefox/alice/profile/chrome/userContent.css")
         self.assertFalse(os.path.exists(os.path.join(r, "state/firefox/bob/profile")))
         for rel in ("docker-compose.yml", "nginx/desk-map.conf", "nginx/desk.conf", "nginx/fourcat.conf",
-                    "firefox/policies-alice.json", "firefox/policies-bob.json", "platform/platform.json",
+                    "firefox/policy/alice/policies.json", "firefox/policy/bob/policies.json", "platform/platform.json",
                     "state/firefox/alice/profile/chrome/userContent.css",
                     "state/mitm/bob", "state/captures/alice"):
             self.assertTrue(os.path.exists(os.path.join(r, rel)), rel)
         self.assertIn(os.path.join(r, "docker-compose.yml"), paths)
         render.write_all(self.make_cfg(hide_media=False), self.reg)
         self.assertFalse(os.path.exists(css))
+
+    def test_policy_moves_to_a_directory_per_user(self):
+        ff = os.path.join(self.root, "firefox")
+        os.makedirs(ff)
+        for name in ("policies-alice.json", "policies-gone.json"):   # the single-file layout
+            with open(os.path.join(ff, name), "w") as f:
+                f.write("{}")
+        render.write_all(self.cfg, self.reg)
+        self.assertEqual(os.listdir(ff), ["policy"])
+        self.assertEqual(sorted(os.listdir(os.path.join(ff, "policy"))), ["alice", "bob"])
+        pol = os.path.join(ff, "policy", "alice", "policies.json")
+        d_ino, f_ino = os.stat(os.path.dirname(pol)).st_ino, os.stat(pol).st_ino
+        render.write_all(self.cfg, self.reg)   # idempotent; the file is replaced, its directory kept
+        self.assertEqual(os.listdir(ff), ["policy"])
+        self.assertEqual(os.listdir(os.path.dirname(pol)), ["policies.json"])
+        self.assertEqual(os.stat(os.path.dirname(pol)).st_ino, d_ino)
+        self.assertNotEqual(os.stat(pol).st_ino, f_ino)
+        with open(pol) as f:
+            self.assertEqual(f.read(), render.render_policy(self.cfg))
 
     def test_write_all_keeps_platform_dir_inode(self):
         render.write_all(self.cfg, self.reg)

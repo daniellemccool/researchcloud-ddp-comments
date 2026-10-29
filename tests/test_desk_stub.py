@@ -6,22 +6,24 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "desk"))
 import desk_stub  # noqa: E402
 from desk_sessions import build_sessions  # noqa: E402
+from desklib import locks  # noqa: E402
 from desklib.config import DeskConfig, save_config  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fakes  # noqa: E402
 from test_provision import make_template  # noqa: E402
 
-# The stub's own docker calls: container state lives in $FAKE_DOCKER_STATE, a Firefox exec obeys
-# $FAKE_DOCKER_MODE (fail / hang); `compose up -d <svc>` also marks desk-<svc> running (`create`
-# does not). Everything else (compose, 4CAT execs) goes to the shared fake.
+# The stub's own docker calls: container state lives in $FAKE_DOCKER_STATE, a Firefox exec and a
+# `start` obey $FAKE_DOCKER_MODE (fail; hang for the exec only); `compose up -d <svc>` also marks
+# desk-<svc> running (`create` does not). Everything else (compose, 4CAT execs) goes to the shared fake.
 OUTER_DOCKER = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_DOCKER_CALLS"
 [ "$1" = compose ] && [ "$4" = up ] && touch "$FAKE_DOCKER_STATE/desk-${@: -1}"
 case "$1" in
   ps) printf 'desk-firefox-alice\\tUp 2 hours\\ndesk-mitm-alice\\tUp 2 hours\\n'; exit 0;;
   inspect) [ -f "$FAKE_DOCKER_STATE/${@: -1}" ] && echo true || echo false; exit 0;;
-  start) touch "$FAKE_DOCKER_STATE/$2"; exit 0;;
+  start) [ "$(cat "$FAKE_DOCKER_MODE" 2>/dev/null)" = fail ] && { echo "boom" >&2; exit 1; }
+         touch "$FAKE_DOCKER_STATE/$2"; exit 0;;
   stop) rm -f "$FAKE_DOCKER_STATE/${@: -1}"; exit 0;;
 esac
 case "$*" in
@@ -161,6 +163,20 @@ class StubTest(StubHarness):
         self.mem("GET", "/desk/", roles="")
         self.assertEqual([(a["user"], a["roles"]) for a in self.access()],
                          [("alice", "src_co_students;src_co_admin"), ("alice", "")])
+
+    def test_failed_access_append_is_retried_and_reported_once(self):
+        os.makedirs(os.path.join(self.root, "state", "access.ndjson"))   # a directory: every append fails
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(3):
+                self.assertEqual(self.mem("GET", "/desk/", roles="src_co_students")[0], 200)
+        self.assertEqual(len(err.getvalue().splitlines()), 1, err.getvalue())
+        self.assertIn("access log: IsADirectoryError", err.getvalue())
+        self.assertNotIn("alice", self.desk_obj().last_roles)   # not recorded, so it is tried again
+        os.rmdir(os.path.join(self.root, "state", "access.ndjson"))
+        self.mem("GET", "/desk/", roles="src_co_students")
+        self.assertEqual([(a["user"], a["roles"]) for a in self.access()], [("alice", "src_co_students")])
+        self.assertEqual(self.desk_obj().last_roles["alice"], "src_co_students")
 
     def test_missing_remote_user_is_403(self):
         self.assertEqual(self.req("GET", "/desk/", member="1")[0], 403)
@@ -561,6 +577,66 @@ class StubTest(StubHarness):
         self.assertTrue(self.running("desk-mitm-alice")); self.assertTrue(self.running("desk-firefox-alice"))
         self.assertFalse(self.running("desk-firefox-bob"))
         self.assertFalse(any(c.startswith("start") and "bob" in c for c in self.docker_calls()))
+
+    def test_start_failure_is_reported(self):
+        put(self.mode, "fail")
+        s, body = self.mem("GET", "/desk/")
+        self.assertEqual(s, 200)
+        self.assertIn("Your browser could not be started; try again in a minute or ask Jo.", body)
+        self.assertNotIn("'/desk/vnc/'", body)
+        self.assertNotIn("alice", self.desk_obj().last_seen)
+        # mitm is up since provisioning; the Firefox start is the one that fails
+        self.assertEqual([c for c in self.docker_calls() if c.startswith("start")], ["start desk-firefox-alice"])
+        self.assertFalse(self.running("desk-firefox-alice"))
+        put(self.mode, "")
+        self.assertIn("'/desk/vnc/'", self.mem("GET", "/desk/")[1])   # the next visit starts it
+
+    def hold_alice_lock_during_visit(self, while_held=lambda: None):
+        """GET /desk/ for alice while this thread holds her user lock; returns (calls while held, response)."""
+        out = []
+        with locks.flocked(locks.user_lock(self.root, "alice")):
+            th = threading.Thread(target=lambda: out.append(self.mem("GET", "/desk/")))
+            th.start()
+            time.sleep(0.5)
+            held_calls = list(self.docker_calls())
+            self.assertTrue(th.is_alive())   # the request waits on the lock
+            while_held()
+        th.join(10)
+        return held_calls, out[0]
+
+    def test_start_on_open_waits_for_retire(self):
+        calls, (s, body) = self.hold_alice_lock_during_visit()
+        self.assertFalse([c for c in calls if c.startswith(("start", "inspect"))], calls)   # nothing while held
+        self.assertEqual(s, 200); self.assertIn("'/desk/vnc/'", body)
+        self.assertTrue(self.running("desk-firefox-alice"))
+
+        def retire_meanwhile():   # what Provisioner.retire does under that lock (after its stops)
+            os.remove(os.path.join(self.users_dir("alice"), "provision.json"))
+            with locks.flocked(locks.render_lock(self.root)):
+                self.desk_obj().reg.retire("alice")
+        os.remove(os.path.join(self.state, "desk-firefox-alice")); os.remove(os.path.join(self.state, "desk-mitm-alice"))
+        os.remove(self.calls)
+        calls, (s, body) = self.hold_alice_lock_during_visit(retire_meanwhile)
+        self.assertEqual(s, 200); self.assertNotIn("'/desk/vnc/'", body)
+        self.assertIn("Your desk is changing", body)
+        self.assertFalse([c for c in self.docker_calls() if c.startswith("start")])   # a retired desk stays down
+        self.assertFalse(self.running("desk-firefox-alice"))
+
+    def test_ensure_started_holds_user_lock_then_start_lock(self):
+        d, seen = self.desk_obj(), []
+        real = d.sessions.running
+
+        def probe():
+            try:
+                with locks.flocked(locks.user_lock(self.root, "alice"), timeout=0.05):
+                    seen.append("user lock free")
+            except TimeoutError:
+                seen.append("user lock held")
+            seen.append("start_lock held" if d.start_lock.locked() else "start_lock free")
+            return real()
+        with mock.patch.object(d.sessions, "running", probe):
+            self.assertIn("'/desk/vnc/'", self.mem("GET", "/desk/")[1])
+        self.assertEqual(seen, ["user lock held", "start_lock held"])
 
     def test_page_does_not_restart_running_session(self):
         put(os.path.join(self.state, "desk-mitm-alice"), ""); put(os.path.join(self.state, "desk-firefox-alice"), "")

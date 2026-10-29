@@ -29,12 +29,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import desk_page as page  # noqa: E402
 from desk_admin_routes import handle_admin  # noqa: E402
 from desk_sessions import build_sessions  # noqa: E402
-from desklib import pool  # noqa: E402
+from desklib import locks, pool  # noqa: E402
 from desklib.config import load_config  # noqa: E402
 from desklib.platform import item_url, load_dir, problems  # noqa: E402
 from desklib.registry import USER_RE  # noqa: E402
 
 REGISTRY_FULL = "error: registry full"
+STARTED, BUSY, START_FAILED, GONE = "started", "busy", "start-failed", "gone"   # ensure_started
 
 
 class Desk:
@@ -48,7 +49,8 @@ class Desk:
         self.access_path = os.path.join(self.root, "state", "access.ndjson")
         self.lock, self.start_lock, self.prov_lock = threading.Lock(), threading.Lock(), threading.Lock()
         self.admin_flags = admin_flags  # user -> X-Desk-Admin of their last request (is_admin in roles mode)
-        self.last_roles = {}    # user -> last roles header seen, so access.ndjson records changes only
+        self.last_roles = {}    # user -> last roles header recorded, so access.ndjson records changes only
+        self.access_failing = False  # the last access.ndjson append failed (reported once on stderr)
         self.last_seen = {}     # user -> last time their screen was connected or their page loaded
         self.provisioning = set()  # users with an advance() thread running
         self.pool_error = None     # why the last pool.csv read failed, if it did
@@ -103,20 +105,30 @@ class Desk:
         return bool(r) and r.stdout.strip() == "true"
 
     def ensure_started(self, user):
-        """Start the user's stopped pair unless max_running other sessions are up; False if busy.
-        The count and the start are one unit, so two arrivals cannot both take the last slot."""
-        with self.start_lock:
-            try:
-                running = self.sessions.running()
-            except (subprocess.SubprocessError, OSError):
-                running = {}            # can't count: the cap is a soft guard, let the user in
-            if not running.get(user) and sum(running.values()) >= self.cfg.max_running:
-                return False
-            for name in (f"desk-mitm-{user}", f"desk-firefox-{user}"):
-                if not self.running(name):
-                    self._docker("start", name)
-            self.last_seen[user] = time.time()
-            return True
+        """Start the user's stopped pair unless max_running other sessions are up.
+
+        Returns STARTED, BUSY (at the cap), START_FAILED (a `docker start` failed or timed out)
+        or GONE (retired, or no longer ready, while we waited for the user lock).
+        Locks, in this order only: the user's flock (a retire, compose up or provisioning
+        run finishes first), then start_lock, so the count and the start are one unit and two
+        arrivals cannot both take the last slot. Nothing under start_lock takes a user lock."""
+        with locks.flocked(locks.user_lock(self.root, user)):
+            if user not in self.reg.live() or not self.prov.state(user).ready():
+                return GONE
+            with self.start_lock:
+                try:
+                    running = self.sessions.running()
+                except (subprocess.SubprocessError, OSError):
+                    running = {}            # can't count: the cap is a soft guard, let the user in
+                if not running.get(user) and sum(running.values()) >= self.cfg.max_running:
+                    return BUSY
+                for name in (f"desk-mitm-{user}", f"desk-firefox-{user}"):
+                    if not self.running(name):
+                        r = self._docker("start", name)
+                        if r is None or r.returncode != 0:
+                            return START_FAILED
+                self.last_seen[user] = time.time()
+                return STARTED
 
     def ready(self, user):
         """True once noVNC answers HTTP 200. A bare TCP accept is not enough: Docker's
@@ -210,14 +222,24 @@ class Desk:
             self._append([ev])
 
     def note_access(self, user: str, roles: str, path: str) -> None:
-        """Append {t, user, roles, path} to state/access.ndjson when the user's roles header changed."""
+        """Append {t, user, roles, path} to state/access.ndjson when the user's roles header changed.
+
+        The change counts as recorded only once the append succeeded; a failed append is retried
+        on the next request and reported on stderr once (until an append succeeds again)."""
         with self.lock:
             if self.last_roles.get(user) == roles:
                 return
+            try:
+                os.makedirs(os.path.dirname(self.access_path), exist_ok=True)
+                with open(self.access_path, "a") as f:
+                    f.write(json.dumps({"t": int(time.time()), "user": user, "roles": roles, "path": path}) + "\n")
+            except OSError as e:
+                if not self.access_failing:
+                    print(f"access log: {type(e).__name__}: {e.strerror or e}", file=sys.stderr, flush=True)
+                    self.access_failing = True
+                return
+            self.access_failing = False
             self.last_roles[user] = roles
-            os.makedirs(os.path.dirname(self.access_path), exist_ok=True)
-            with open(self.access_path, "a") as f:
-                f.write(json.dumps({"t": int(time.time()), "user": user, "roles": roles, "path": path}) + "\n")
 
     def taken(self, events):
         return {self.key(e) for e in events if e.get("action") == "claim"}
@@ -339,8 +361,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._say(200, f"Setup failed at {st.current()}; ask {contact}.")
             d.kick(user)
             return self._say(200, f"Setting up your desk — {st.current()}", refresh=3)
-        if not d.ensure_started(user):
+        started = d.ensure_started(user)
+        if started == BUSY:
             return self._say(200, "The desk is busy, try again in a few minutes.")
+        if started == START_FAILED:
+            return self._say(200, f"Your browser could not be started; try again in a minute or ask {contact}.")
+        if started == GONE:     # changed under us (retired or repaired): reload and look again
+            return self._say(200, "Your desk is changing; this page reloads in a moment.", refresh=3)
         return self._send(200, self._page(user))
 
     def do_POST(self):

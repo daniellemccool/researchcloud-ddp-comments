@@ -151,8 +151,36 @@ class FourCatTests(unittest.TestCase):
     def test_write_token_mode(self):
         p = self.fc.write_token("alice", "tok-alice")
         self.assertEqual(p, self.fc.token_path("alice"))
+        self.assertEqual(p, os.path.join(self.cfg.desk_root, "secrets", "4cat-tokens", "alice", "4cat-token"))
+        self.assertEqual(os.path.basename(p), "4cat-token")   # the addon reads /run/desk/4cat-token
         self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(p)).st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(os.path.dirname(p))).st_mode), 0o700)
         self.assertEqual(slurp(p), "tok-alice")
+
+    def test_write_token_replaces_by_rename_in_its_directory(self):
+        p = self.fc.write_token("alice", "tok-1")
+        d_ino, f_ino = os.stat(os.path.dirname(p)).st_ino, os.stat(p).st_ino
+        self.fc.write_token("alice", "tok-2")
+        self.assertEqual(slurp(p), "tok-2")
+        self.assertEqual(os.stat(os.path.dirname(p)).st_ino, d_ino)   # the mounted directory stays
+        self.assertNotEqual(os.stat(p).st_ino, f_ino)                   # a new inode, renamed in
+        self.assertEqual(os.listdir(os.path.dirname(p)), ["4cat-token"])
+
+    def test_write_token_migrates_a_legacy_token_file(self):
+        tokens = os.path.join(self.cfg.desk_root, "secrets", "4cat-tokens")
+        os.makedirs(tokens)
+        with open(os.path.join(tokens, "alice"), "w") as f:   # the old single-file layout
+            f.write("old")
+        self.fc.write_token("alice", "tok-new")
+        self.assertEqual(slurp(self.fc.token_path("alice")), "tok-new")
+        self.assertEqual(os.listdir(tokens), ["alice"])
+        self.assertFalse(fc.migrate_legacy_token(self.cfg.desk_root, "alice"))   # nothing left to move
+
+    def test_token_constant_matches_the_addon(self):
+        with open(os.path.join(REPO, "desk", "mitm", "addons", "capture.py")) as f:
+            self.assertIn('"DESK_FOURCAT_TOKEN_FILE", "/run/desk/4cat-token"', f.read())
+        self.assertEqual(fc.TOKEN_NAME, "4cat-token")
 
     def test_set_admin_sql(self):
         self.fc.set_admin("alice", True)
