@@ -1,34 +1,56 @@
 #!/usr/bin/env python3
-"""Append a selection.csv's videos to the desk's shared pool, skipping ids already in it.
+"""Append a selection file's items to the desk's shared pool, skipping ones already in it.
 
-    pool-add.py [--desk DIR] selection.csv
+    pool-add.py --desk DIR selection.csv
 
-Reads video_id,bucket,note (other columns ignored; non-numeric ids skipped) and appends
-new rows to <desk>/pool.csv in file order. Claimed rows stay in the pool; the desk log
-records who claimed what.
+DIR is an initialised desk root (desk.json present), which names the platform and so the item
+kinds. The selection needs an id column (also "Video ID" / video_id); kind, bucket and note are
+optional (a missing kind means the platform's default). Excel exports (BOM, CRLF, ';') are fine.
+New rows go to <desk>/pool.csv in file order, deduped on (kind, id); rows that cannot be used are
+listed with their line number. Claimed rows stay in the pool; the desk log records who claimed what.
+
+Exit 0 when the file parsed (even if some rows were rejected), 1 on an unreadable file, a header
+without an id column or an uninitialised desk.
 """
-import argparse, csv, os
+import argparse
+import os
+import sys
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--desk", default="/data/onlinehate_zeeschuimer/desk")
-ap.add_argument("selection")
-a = ap.parse_args()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from desklib import pool  # noqa: E402
+from desklib.config import load_config  # noqa: E402
+from desklib.platform import load_dir  # noqa: E402
 
-pool = os.path.join(a.desk, "pool.csv")
-seen = set()
-if os.path.exists(pool):
-    with open(pool, newline="") as f:
-        seen = {(r.get("video_id") or "").strip() for r in csv.DictReader(f)}
-new = []
-with open(a.selection, newline="") as f:
-    for r in csv.DictReader(f):
-        v = (r.get("video_id") or "").strip()
-        if v.isdigit() and v not in seen:
-            seen.add(v); new.append([v, r.get("bucket", ""), r.get("note", "")])
-fresh = not os.path.exists(pool)
-with open(pool, "a", newline="") as f:
-    w = csv.writer(f)
-    if fresh:
-        w.writerow(["video_id", "bucket", "note"])
-    w.writerows(new)
-print(f"added {len(new)} to {pool} ({len(seen)} in pool)")
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--desk", required=True, help="the desk root (holds desk.json)")
+    ap.add_argument("selection")
+    a = ap.parse_args()
+
+    try:
+        cfg = load_config(a.desk)
+        platform = load_dir(cfg.platforms_dir, cfg.platform)
+    except (OSError, ValueError) as e:
+        print(f"pool-add: {a.desk} is not an initialised desk ({e})", file=sys.stderr)
+        return 1
+    try:
+        with open(a.selection, newline="", encoding="utf-8-sig") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"pool-add: cannot read {a.selection}: {e}", file=sys.stderr)
+        return 1
+
+    rows, rejects = pool.parse_selection(text, platform)
+    if any(reason == "header has no id column" for _, reason in rejects):
+        print(f"pool-add: {a.selection}: header has no id column", file=sys.stderr)
+        return 1
+    added, total = pool.add_rows(a.desk, rows, platform)
+    print(f"added {added} to {os.path.join(a.desk, 'pool.csv')} ({total} in pool)")
+    for line, reason in rejects:
+        print(f"line {line}: {reason}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

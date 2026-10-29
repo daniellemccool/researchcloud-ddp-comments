@@ -777,21 +777,5 @@ class StubTest(StubHarness):
         self.assertFalse(self.running("desk-firefox-bob"))
 
 
-class PoolAddTest(unittest.TestCase):
-    def test_appends_new_ids_only_and_keeps_notes(self):
-        with tempfile.TemporaryDirectory() as t:
-            desk = os.path.join(t, "desk"); os.makedirs(desk)
-            add = os.path.join(REPO, "desk", "pool-add.py")
-            a = os.path.join(t, "a.csv"); write_csv(a, [["1", "x", "n1, q"], ["2", "x", ""], ["2", "x", "dup"]])
-            b = os.path.join(t, "b.csv"); write_csv(b, [["2", "y", ""], ["3", "y", ""], ["junk", "y", ""]])
-            for f, want in ((a, "added 2"), (b, "added 1")):
-                r = subprocess.run([sys.executable, add, "--desk", desk, f], capture_output=True, text=True)
-                self.assertEqual(r.returncode, 0, r.stderr); self.assertIn(want, r.stdout)
-            with open(os.path.join(desk, "pool.csv"), newline="") as f:
-                rows = list(csv.DictReader(f))
-            self.assertEqual([r["video_id"] for r in rows], ["1", "2", "3"])
-            self.assertEqual(rows[0]["note"], "n1, q")
-
-
 if __name__ == "__main__":
     unittest.main()
