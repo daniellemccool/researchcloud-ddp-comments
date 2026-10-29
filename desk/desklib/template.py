@@ -24,6 +24,8 @@ ALLOW_PREFS = frozenset((
     f"extensions.webextensions.ExtensionStorageIDB.migrated.{XPI_ID}",
     "extensions.databaseSchema", "extensions.lastAppVersion", "extensions.lastPlatformVersion",
     "extensions.pendingOperations", "toolkit.legacyUserProfileCustomizations.stylesheets"))
+XPI_REL = f"extensions/{XPI_ID}.xpi"
+JSON_FILES = ("extensions.json", "extension-preferences.json", "extension-settings.json")
 ITEMS_DB = "zeeschuimer-items"
 STORAGE_DB = "webExtensions-storage-local"
 STORAGE_LABEL = "storage.local"
@@ -131,7 +133,7 @@ def _prune(root, uuid, rel=""):
             continue
         elif r == "extensions":
             for n in os.listdir(p):
-                if not (n.endswith(".xpi") and os.path.isfile(os.path.join(p, n))):
+                if not (n == f"{XPI_ID}.xpi" and os.path.isfile(os.path.join(p, n))):
                     _remove(os.path.join(p, n))
         elif r == "storage/default":
             keep = _ext_dirs(uuid)
@@ -155,6 +157,97 @@ def _filter_prefs(path):
                 keep.append(line if line.endswith("\n") else line + "\n")
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(keep)
+
+
+def _load_json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _filter_json(name, data):
+    """The part of an extension metadata file that belongs to Zeeschuimer; anything unclear is dropped."""
+    if not isinstance(data, dict):
+        return {}
+    if name == "extensions.json":
+        addons = data.get("addons")
+        out = {k: v for k, v in data.items() if k == "schemaVersion"}
+        out["addons"] = [a for a in addons if isinstance(a, dict) and a.get("id") == XPI_ID] \
+            if isinstance(addons, list) else []
+        return out
+    out = {}
+    settings = name == "extension-settings.json"
+    for k, v in data.items():
+        if k == XPI_ID:
+            out[k] = v
+        elif settings and isinstance(v, dict):
+            out[k] = {kk: vv for kk, vv in v.items() if kk == XPI_ID}      # category -> {addon id: data}
+        elif settings and isinstance(v, list):
+            out[k] = [e for e in v if isinstance(e, dict) and e.get("id") == XPI_ID]
+        elif settings:
+            out[k] = v                                                  # scalar, e.g. version
+    return out
+
+
+def _foreign_ids(name, data):
+    """Addon ids other than Zeeschuimer's that a metadata file still mentions."""
+    if not isinstance(data, dict):
+        return ["<not an object>"]
+    if name == "extensions.json":
+        addons = data.get("addons")
+        if not isinstance(addons, list):
+            return ["<addons>"]
+        return [str(a.get("id")) if isinstance(a, dict) else "<entry>" for a in addons
+                if not (isinstance(a, dict) and a.get("id") == XPI_ID)]
+    settings = name == "extension-settings.json"
+    out = []
+    for k, v in data.items():
+        if k == XPI_ID:
+            continue
+        if settings and isinstance(v, dict):
+            out += [kk for kk in v if kk != XPI_ID]
+        elif settings and isinstance(v, list):
+            out += [str(e.get("id")) if isinstance(e, dict) else "<entry>" for e in v
+                    if not (isinstance(e, dict) and e.get("id") == XPI_ID)]
+        elif not settings:
+            out.append(k)
+    return out
+
+
+def _filter_json_files(profile_dir):
+    for name in JSON_FILES:
+        path = os.path.join(profile_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            data = _load_json(path)
+        except (OSError, ValueError) as e:
+            if name == "extensions.json":
+                raise TemplateError(f"extensions.json is not valid JSON: {e}")
+            os.remove(path)
+            continue
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_filter_json(name, data), f, separators=(",", ":"))
+
+
+def _json_problems(profile_dir):
+    out = []
+    for name in JSON_FILES:
+        path = os.path.join(profile_dir, name)
+        if not os.path.isfile(path):
+            if name == "extensions.json":
+                out.append("extensions.json does not list the xpi")
+            continue
+        try:
+            data = _load_json(path)
+        except (OSError, ValueError):
+            out.append(f"{name} is not valid JSON")
+            continue
+        out += [f"foreign addon id in {name}: {i}" for i in _foreign_ids(name, data)]
+        if name == "extensions.json" and not (isinstance(data, dict) and isinstance(data.get("addons"), list)
+                                              and any(isinstance(a, dict) and a.get("id") == XPI_ID
+                                                      for a in data["addons"])):
+            out.append("extensions.json does not list the xpi")
+    return out
 
 
 def _filter_cookies(path, keep_cookies):
@@ -195,6 +288,7 @@ def sanitise(profile_dir: str, keep_cookies: list) -> None:
     prefs = os.path.join(profile_dir, "prefs.js")
     if os.path.isfile(prefs):
         _filter_prefs(prefs)
+    _filter_json_files(profile_dir)
 
 
 @contextlib.contextmanager
@@ -278,7 +372,7 @@ def _tree_problems(profile_dir, uuid, prefix):
         return r in ok_dirs or bool(files_dir_re.fullmatch(r))
 
     def file_ok(r):
-        if r in ALLOW_FILES or (r.startswith("extensions/") and r.count("/") == 1 and r.endswith(".xpi")):
+        if r in ALLOW_FILES or r == XPI_REL:
             return True
         return bool(idb_file_re.fullmatch(r) or blob_re.fullmatch(r))
 
@@ -366,6 +460,7 @@ def verify_release(profile_dir: str, platform, rel_prefix: str = "") -> list:
     if keep and not present:
         problems.append("no keep cookie present")
     problems += _pref_problems(profile_dir)
+    problems += _json_problems(profile_dir)
     items_dir, ctx_dir = (_ext_dirs(uuid) or (None, None))
     dbs = [(os.path.basename(os.path.dirname(os.path.dirname(p))), n, c) for p, n, c in idb_databases(profile_dir)]
     items = [c for d, n, c in dbs if d == items_dir and n == ITEMS_DB]
@@ -382,9 +477,9 @@ def verify_release(profile_dir: str, platform, rel_prefix: str = "") -> list:
     return problems + _tree_problems(profile_dir, uuid, rel_prefix)
 
 
-def manifest(platform, zeeschuimer_version: str, sha256: str, kind: str) -> dict:
+def manifest(platform, zeeschuimer_version: str, sha256: str, kind: str, built_on: str = None) -> dict:
     return {"kind": kind, "platform": platform.name, "zeeschuimer_version": zeeschuimer_version,
-            "modules": platform.zeeschuimer_modules, "built_on": datetime.date.today().isoformat(),
+            "modules": platform.zeeschuimer_modules, "built_on": built_on or datetime.date.today().isoformat(),
             "sha256": sha256}
 
 
@@ -396,10 +491,18 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def _owned(ti):
-    ti.uid = ti.gid = 1000
-    ti.uname = ti.gname = ""
-    return ti
+def _mtime(built_on):
+    d = datetime.date.fromisoformat(built_on)
+    return int(datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc).timestamp())
+
+
+def _owned(mtime):
+    def f(ti):
+        ti.uid = ti.gid = 1000
+        ti.uname = ti.gname = ""
+        ti.mtime = mtime
+        return ti
+    return f
 
 
 def release(src_config_dir: str, out_dir: str, platform, zeeschuimer_version: str) -> tuple:
@@ -424,15 +527,29 @@ def release(src_config_dir: str, out_dir: str, platform, zeeschuimer_version: st
         if problems:
             raise TemplateError("template failed verification: " + "; ".join(problems))
         os.makedirs(out_dir, exist_ok=True)
-        for stale in (tar_path, man_path):
+        tmp_tar = tar_path + ".tmp"
+        for stale in (tar_path, man_path, tmp_tar):
             if os.path.exists(stale):
                 os.remove(stale)
-        with tarfile.open(tar_path, "w") as tar:
-            xdg = tarfile.TarInfo("xdg")
-            xdg.type, xdg.mode = tarfile.DIRTYPE, 0o755
-            tar.addfile(_owned(xdg))
-            tar.add(profile, arcname="profile", filter=_owned)
-    man = manifest(platform, zeeschuimer_version, _sha256(tar_path), "release")
+        built_on = datetime.date.today().isoformat()
+        owned = _owned(_mtime(built_on))
+        try:
+            with tarfile.open(tmp_tar, "w") as tar:
+                xdg = tarfile.TarInfo("xdg")
+                xdg.type, xdg.mode = tarfile.DIRTYPE, 0o755
+                tar.addfile(owned(xdg))
+                tar.add(profile, arcname="profile", filter=owned)
+            fd = os.open(tmp_tar, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp_tar, tar_path)
+        except BaseException:
+            if os.path.exists(tmp_tar):
+                os.remove(tmp_tar)
+            raise
+    man = manifest(platform, zeeschuimer_version, _sha256(tar_path), "release", built_on)
     with open(man_path, "w", encoding="utf-8") as f:
         json.dump(man, f, indent=2)
         f.write("\n")
@@ -464,6 +581,15 @@ def verify_tar(tar_path: str, platform) -> list:
             problems.append("sha256 does not match the manifest")
         if man.get("platform") != platform.name:
             problems.append(f"manifest platform {man.get('platform')!r} is not {platform.name!r}")
+        if man.get("kind") != "release":
+            problems.append(f"manifest kind is {man.get('kind')}, not release")
+        base = os.path.basename(tar_path)
+        pre = f"ddp-comments-template-{platform.name}-"
+        version = base[len(pre):-len(".tar")] if base.startswith(pre) and base.endswith(".tar") else None
+        if version is None or man.get("zeeschuimer_version") != version:
+            problems.append(f"manifest zeeschuimer_version is {man.get('zeeschuimer_version')}, not {version}")
+        if man.get("modules") != platform.zeeschuimer_modules:
+            problems.append(f"manifest modules are {man.get('modules')}, not {platform.zeeschuimer_modules}")
     except (OSError, ValueError, AttributeError):
         problems.append(f"manifest {os.path.basename(man_path)} missing or unreadable")
     with tempfile.TemporaryDirectory() as t:

@@ -1,5 +1,5 @@
 """Tests for desk/desklib/template.py: allowlist sanitising, empty-store proof, manifest, tar."""
-import hashlib, json, os, shutil, sqlite3, subprocess, sys, tarfile, tempfile, unittest
+import datetime, hashlib, json, os, shutil, sqlite3, subprocess, sys, tarfile, tempfile, unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "desk"))
@@ -53,18 +53,30 @@ def make_cookies(p, rows, wal_only=()):
     path = os.path.join(p, "cookies.sqlite")
     c = sqlite3.connect(path)
     c.execute("CREATE TABLE moz_cookies (id INTEGER PRIMARY KEY, host TEXT, name TEXT, value TEXT, expiry INTEGER)")
-    sql = "INSERT INTO moz_cookies (host, name, value, expiry) VALUES (?, ?, 'secret', 0)"
-    c.executemany(sql, rows)
+    sql = "INSERT INTO moz_cookies (host, name, value, expiry) VALUES (?, ?, ?, 0)"
+    n = iter(range(10_000))
+    val = lambda r: "consent-ok" if r[1] == "cookie-consent" and r[0].endswith("tiktok.com") else f"deleted-secret-{next(n)}"  # noqa: E731
+    c.executemany(sql, [(h, nm, val((h, nm))) for h, nm in rows])
     c.commit()
     if wal_only:
         c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA wal_autocheckpoint=0")
-        c.executemany(sql, wal_only); c.commit()
+        c.executemany(sql, [(h, nm, val((h, nm))) for h, nm in wal_only]); c.commit()
         shutil.copy(path, path + ".snap"); shutil.copy(path + "-wal", path + ".snap-wal")  # while still open
     c.close()
     if wal_only:
         os.replace(path + ".snap", path); os.replace(path + ".snap-wal", path + "-wal")
         for side in ("-shm",):
             if os.path.exists(path + side): os.remove(path + side)
+
+
+def write_json(p, name, data):
+    with open(os.path.join(p, name), "w") as fh:
+        json.dump(data, fh)
+
+
+def read_json(p, name):
+    with open(os.path.join(p, name)) as fh:
+        return json.load(fh)
 
 
 def make_profile(root, items_rows=0, uploads_rows=0, with_items_db=True, storage_rows=3, sl_uuid="abc",
@@ -83,14 +95,19 @@ def make_profile(root, items_rows=0, uploads_rows=0, with_items_db=True, storage
              ["items"], {"items": 5})
     os.makedirs(os.path.join(p, ZS), exist_ok=True)
     for f in ("cache2/entries/x", "sessionstore.jsonlz4", "sessionstore-backups/recovery.jsonlz4", "crashes/c",
-              "places.sqlite", "logins.json", "key4.db", "formhistory.sqlite", "extension-preferences.json",
-              "extension-settings.json", "chrome/userContent.css", "sessionstore-x.baklz4", ZS + "/.metadata-v2",
-              "storage/default/https+++www.tiktok.com/z.sqlite", XPI, "extensions/other.txt"):
+              "places.sqlite", "logins.json", "key4.db", "formhistory.sqlite",
+              "chrome/userContent.css", "sessionstore-x.baklz4", ZS + "/.metadata-v2",
+              "storage/default/https+++www.tiktok.com/z.sqlite", XPI, "extensions/other.txt",
+              "extensions/other@example.xpi"):
         with open(os.path.join(p, f), "w") as fh: fh.write("x")
     for f in ("log/access.log", "downloads/x.mp4", "certs/key.pem", "xdg/data/recently-used.xbel", ".vncpass_clear"):
         with open(os.path.join(root, f), "w") as fh: fh.write("x")
-    with open(os.path.join(p, "extensions.json"), "w") as fh:
-        fh.write('{"addons": [{"id": "' + XID + '"}]}')
+    write_json(p, "extensions.json", {"schemaVersion": 35, "addons": [
+        {"id": XID, "location": "app-profile", "path": f"/config/profile/{XPI}"},
+        {"id": "other@example", "location": "app-profile", "path": "/config/profile/extensions/other@example.xpi"}]})
+    write_json(p, "extension-preferences.json", {XID: {"permissions": ["tabs"]}, "other@example": {"permissions": []}})
+    write_json(p, "extension-settings.json", {"version": 2, "commands": {}, "default_search": {},
+                                              "prefs": {XID: {"initialValue": {}}, "other@example": {"x": 1}}})
     with open(os.path.join(p, "prefs.js"), "w") as fh: fh.write(prefs_text())
     make_cookies(p, cookies, wal_only)
     return p
@@ -115,7 +132,7 @@ class TemplateTest(unittest.TestCase):
         return src, tp.release(src, os.path.join(self.t, "out"), self.plat, "1.14.2")
 
     def extract(self, tar_path, name="x"):
-        x = os.path.join(self.t, name); os.makedirs(x)
+        x = os.path.join(self.t, name); shutil.rmtree(x, ignore_errors=True); os.makedirs(x)
         with tarfile.open(tar_path) as tar:
             tar.extractall(x, filter="data")
         return x
@@ -321,6 +338,141 @@ class TemplateTest(unittest.TestCase):
         got = tp.verify_tar(tar_path, self.plat)
         for rel in ("private.txt", "sub/y", "h9.sqlite"):
             self.assertIn(f"unexpected file: profile/{ZS}/idb/{rel}", got)
+
+    def test_only_zeeschuimer_xpi_survives(self):
+        p = make_profile(os.path.join(self.t, "pre"))
+        self.assertTrue(os.path.exists(os.path.join(p, "extensions/other@example.xpi")))
+        tp.sanitise(p, self.plat.keep_cookies)
+        self.assertEqual(os.listdir(os.path.join(p, "extensions")), [f"{XID}.xpi"])
+        _, (tar_path, _) = self.release()
+        self._retar(tar_path, ["profile/extensions/other@example.xpi"])
+        self.assertIn("unexpected file: profile/extensions/other@example.xpi", tp.verify_tar(tar_path, self.plat))
+
+    def test_extension_json_filtered_to_zeeschuimer(self):
+        p = make_profile(os.path.join(self.t, "src"))
+        tp.sanitise(p, self.plat.keep_cookies)
+        ext = read_json(p, "extensions.json")
+        self.assertEqual(ext["schemaVersion"], 35)
+        self.assertEqual([a["id"] for a in ext["addons"]], [XID])
+        self.assertEqual(list(read_json(p, "extension-preferences.json")), [XID])
+        st = read_json(p, "extension-settings.json")
+        self.assertEqual(st["version"], 2)
+        self.assertEqual(list(st["prefs"]), [XID])
+        for n in tp.JSON_FILES:
+            with open(os.path.join(p, n)) as fh: self.assertNotIn("other@example", fh.read())
+        self.assertEqual(tp.verify_release(p, self.plat), [])
+
+    def test_unparseable_extensions_json_is_an_error(self):
+        p = make_profile(os.path.join(self.t, "src"))
+        with open(os.path.join(p, "extensions.json"), "w") as fh: fh.write("{nope")
+        with self.assertRaises(tp.TemplateError):
+            tp.sanitise(p, self.plat.keep_cookies)
+
+    def test_unparseable_settings_file_is_removed(self):
+        p = make_profile(os.path.join(self.t, "src"))
+        with open(os.path.join(p, "extension-settings.json"), "w") as fh: fh.write("{nope")
+        tp.sanitise(p, self.plat.keep_cookies)
+        self.assertFalse(os.path.exists(os.path.join(p, "extension-settings.json")))
+        self.assertEqual(tp.verify_release(p, self.plat), [])
+
+    def test_verify_flags_foreign_ids_and_missing_xpi_listing(self):
+        _, (tar_path, _) = self.release()
+        def hook(x):
+            write_json(os.path.join(x, "profile"), "extensions.json", {"schemaVersion": 35, "addons": [
+                {"id": XID}, {"id": "evil@example"}]})
+            write_json(os.path.join(x, "profile"), "extension-preferences.json", {"evil2@example": {}})
+            write_json(os.path.join(x, "profile"), "extension-settings.json", {"prefs": {"evil3@example": {}}})
+        self._retar(tar_path, [], hook=hook)
+        got = tp.verify_tar(tar_path, self.plat)
+        for want in ("foreign addon id in extensions.json: evil@example",
+                     "foreign addon id in extension-preferences.json: evil2@example",
+                     "foreign addon id in extension-settings.json: evil3@example"):
+            self.assertIn(want, got)
+        self._retar(tar_path, [], hook=lambda x: write_json(os.path.join(x, "profile"), "extensions.json",
+                                                            {"schemaVersion": 35, "addons": []}))
+        self.assertIn("extensions.json does not list the xpi", tp.verify_tar(tar_path, self.plat))
+
+    def test_tar_mtimes_normalised(self):
+        src = os.path.join(self.t, "src"); p = make_profile(src)
+        old = os.path.join(p, "chrome", "userContent.css")
+        os.utime(old, (1_000_000_000, 1_000_000_000))
+        _, (tar_path, man) = self.release_from(src)
+        y, m, d = map(int, man["built_on"].split("-"))
+        want = int(datetime.datetime(y, m, d, tzinfo=datetime.timezone.utc).timestamp())
+        with tarfile.open(tar_path) as tar:
+            mt = {x.mtime for x in tar.getmembers()}
+        self.assertEqual(mt, {want})
+
+    def release_from(self, src):
+        return src, tp.release(src, os.path.join(self.t, "out"), self.plat, "1.14.2")
+
+    def _manifest_edit(self, tar_path, **changes):
+        mp = tar_path[:-4] + ".json"
+        with open(mp) as fh: man = json.load(fh)
+        man.update(changes)
+        with open(mp, "w") as fh: json.dump(man, fh)
+        man["sha256"] = tp._sha256(tar_path)
+        with open(mp, "w") as fh: json.dump(man, fh)
+
+    def test_verify_tar_checks_manifest_fields(self):
+        _, (tar_path, _) = self.release()
+        self._manifest_edit(tar_path, kind="freeze")
+        self.assertIn("manifest kind is freeze, not release", tp.verify_tar(tar_path, self.plat))
+        self._manifest_edit(tar_path, kind="release", zeeschuimer_version="9.9")
+        self.assertIn("manifest zeeschuimer_version is 9.9, not 1.14.2", tp.verify_tar(tar_path, self.plat))
+        self._manifest_edit(tar_path, zeeschuimer_version="1.14.2", modules=["other"])
+        self.assertTrue(any(x.startswith("manifest modules are ['other']") for x in tp.verify_tar(tar_path, self.plat)))
+        self._manifest_edit(tar_path, modules=self.plat.zeeschuimer_modules)
+        self.assertEqual(tp.verify_tar(tar_path, self.plat), [])
+
+    def test_deleted_cookie_values_do_not_survive(self):
+        src = os.path.join(self.t, "src"); p = make_profile(src, wal_only=[(".x.example", "sid")])
+        with open(os.path.join(p, "cookies.sqlite"), "rb") as fh:
+            self.assertIn(b"deleted-secret-", fh.read())  # precondition
+        tar_path, _ = tp.release(src, os.path.join(self.t, "out"), self.plat, "1.14.2")
+        with open(os.path.join(self.extract(tar_path), "profile", "cookies.sqlite"), "rb") as fh:
+            data = fh.read()
+        self.assertNotIn(b"deleted-secret-", data)
+        self.assertIn(b"consent-ok", data)
+
+    def test_symlink_member_in_profile_is_flagged(self):
+        _, (tar_path, _) = self.release()
+        self._retar(tar_path, [], hook=lambda x: os.symlink("prefs.js", os.path.join(x, "profile", "link")))
+        self.assertIn("unexpected file: profile/link", tp.verify_tar(tar_path, self.plat))
+
+    def test_leftover_rebuilt_and_tmp_files_in_idb(self):
+        p = make_profile(os.path.join(self.t, "src"))
+        tp.sanitise(p, self.plat.keep_cookies)
+        idb = os.path.join(p, ZS, "idb")
+        for n in ("h1.sqlite.rebuilt", "h1.sqlite.tmp"):
+            with open(os.path.join(idb, n), "w") as fh: fh.write("x")
+        got = tp.verify_release(p, self.plat)
+        for n in ("h1.sqlite.rebuilt", "h1.sqlite.tmp"):
+            self.assertIn(f"unexpected file: storage/default/moz-extension+++abc/idb/{n}", got)
+        # the sanitiser itself sweeps such leftovers out of a source copy
+        src = os.path.join(self.t, "src2"); q = make_profile(src)
+        with open(os.path.join(q, ZS, "idb", "h1.sqlite.rebuilt"), "w") as fh: fh.write("x")
+        tar_path, _ = tp.release(src, os.path.join(self.t, "out"), self.plat, "1.14.2")
+        with tarfile.open(tar_path) as tar:
+            self.assertFalse(any(n.endswith((".rebuilt", ".tmp")) for n in tar.getnames()))
+
+    def test_tar_written_atomically(self):
+        out = os.path.join(self.t, "out")
+        self.release()
+        self.assertFalse(any(f.endswith(".tmp") for f in os.listdir(out)))
+        src = os.path.join(self.t, "src2"); make_profile(src)
+        out2 = os.path.join(self.t, "out2")
+        real = tarfile.open
+        def boom(name, mode="r", *a, **kw):
+            real(name, mode).close()
+            raise OSError("disk full")
+        tarfile.open = boom
+        try:
+            with self.assertRaises(OSError):
+                tp.release(src, out2, self.plat, "1.14.2")
+        finally:
+            tarfile.open = real
+        self.assertEqual(os.listdir(out2), [])
 
     def _retar(self, tar_path, extra, hook=None):
         x = self.extract(tar_path, "tamper")
