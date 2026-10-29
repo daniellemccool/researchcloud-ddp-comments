@@ -33,8 +33,11 @@ class AdminTest(base.StubHarness):
         self.desk_obj().sessions.members = lambda: mapping
 
     def upload(self, content: bytes, **kw):
+        """POST the file; assert the 303 back to the overview and return (status, overview body, headers)."""
         body, ctype = multipart("file", content)
-        return self.areq("POST", "/desk/admin/pool", body=body, ctype=ctype, **kw)
+        s, _, h = self.areq("POST", "/desk/admin/pool", body=body, ctype=ctype, **kw)
+        self.assertEqual((s, h["location"]), (303, "/desk/admin/"))
+        return self.areq("GET", "/desk/admin/", **kw)
 
     def test_admin_page_sections_and_expected_vs_registered(self):
         self.members({"alice": True, "bob": False, "carol": False})
@@ -117,7 +120,9 @@ class AdminTest(base.StubHarness):
         self.assertNotIn("bob-secret-pw", body)
         os.remove(fc.password_path("alice"))
         self.assertEqual(self.areq("GET", "/desk/admin/4cat/password")[0], 404)
-        s, body, h = self.areq("POST", "/desk/admin/4cat/password")   # reissue
+        s, _, h = self.areq("POST", "/desk/admin/4cat/password")   # reissue: redirect, so a refresh cannot re-rotate
+        self.assertEqual((s, h["location"]), (303, "/desk/admin/4cat/password"))
+        s, body, h = self.areq("GET", h["location"])
         new = base.slurp(fc.password_path("alice"))
         self.assertEqual(s, 200); self.assertIn(new, body); self.assertEqual(h["cache-control"], "no-store")
         self.serve(fourcat_enabled=False)
@@ -200,6 +205,59 @@ class AdminTest(base.StubHarness):
         self.assertNotIn("9500", [r.id for r in pool.read_rows(self.root, "video")])
 
 
+    def notice_after(self, op, **result):
+        sess = self.desk_obj().sessions
+        with mock.patch.object(sess, op, **result):
+            self.areq("POST", f"/desk/admin/sessions?op={op}&user=bob")
+        body = self.areq("GET", "/desk/admin/")[1]
+        return body.split('role="status">', 1)[1].split("</p>", 1)[0]
+
+    def test_session_notice_texts(self):
+        self.assertEqual(self.notice_after("reconcile", return_value={"retired": ["x"], "admin_set": ["a"]}),
+                         "reconcile: retired: x; admin set: a; admin cleared: -")
+        self.assertEqual(self.notice_after("reconcile", return_value={"retired": [], "admin_cleared": ["c"],
+                                                                      "skipped": ["s"], "failed": {"y": "boom"}}),
+                         "reconcile: retired: -; admin set: -; admin cleared: c; "
+                         "skipped (no 4CAT account yet): s; y failed: boom")
+        self.assertEqual(self.notice_after("reconcile", return_value={}),
+                         "reconcile: retired: -; admin set: -; admin cleared: -")
+        self.assertEqual(self.notice_after("prune", return_value=["z", "w"]), "prune: retired z w")
+        self.assertEqual(self.notice_after("repair", return_value=mock.Mock(ready=lambda: False,
+                                                                         current=lambda: "fourcat_account",
+                                                                         error=lambda: "")),
+                         "bob: stuck at fourcat_account: incomplete")
+        self.assertEqual(self.notice_after("repair", return_value=mock.Mock(ready=lambda: True)), "bob: ready")
+        self.assertEqual(self.notice_after("stop"), "stopped bob")
+        self.assertEqual(self.notice_after("retire", side_effect=RuntimeError("no members")),
+                         "retire bob failed: RuntimeError: no members")
+
+    def test_notice_goes_to_the_acting_admin_only(self):
+        sess = self.desk_obj().sessions
+        with mock.patch.object(sess, "stop"):
+            self.areq("POST", "/desk/admin/sessions?op=stop&user=bob", user="alice")
+        self.assertNotIn("stopped bob", self.areq("GET", "/desk/admin/", user="bob")[1])
+        self.assertIn("stopped bob", self.areq("GET", "/desk/admin/", user="alice")[1])
+
+    def test_admin_responses_forbid_framing(self):
+        base.put(os.path.join(self.root, "state", "captures", "a.ndjson"), "x\n")
+        for path in ("/desk/admin/", "/desk/admin/problems", "/desk/admin/export/captures.zip",
+                     "/desk/admin/export/desk-log.ndjson", "/desk/admin/4cat/password"):
+            h = self.areq("GET", path, raw=True)[2]
+            self.assertEqual(h["x-frame-options"], "DENY", path)
+            self.assertEqual(h["content-security-policy"], "frame-ancestors 'none'", path)
+        self.assertEqual(self.areq("POST", "/desk/admin/sessions?op=explode")[2]["x-frame-options"], "DENY")  # a 400
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads any file")
+    def test_export_failure_is_a_500_not_a_dropped_connection(self):
+        f = os.path.join(self.root, "state", "captures", "alice", "locked.ndjson")
+        base.put(f, "secret\n"); os.chmod(f, 0)
+        self.addCleanup(os.chmod, f, 0o600)
+        s, body, h = self.areq("GET", "/desk/admin/export/captures.zip")
+        self.assertEqual(s, 500); self.assertIn("export failed", body)
+        self.assertIn("state/captures/alice/locked.ndjson", body); self.assertNotIn(self.root, body)
+        self.assertEqual(h["x-frame-options"], "DENY")
+
+
 class PoolUnitTest(unittest.TestCase):
     def setUp(self):
         self.platform = load_dir(os.path.join(base.REPO, "platforms"), "tiktok")
@@ -210,6 +268,29 @@ class PoolUnitTest(unittest.TestCase):
         self.assertEqual([(r.id, r.kind, r.bucket, r.note) for r in rows], [("12", "video", "", "")])
         self.assertEqual(rejects, [(4, "id is empty"), (5, "id must match ^[0-9]+$"), (6, "unknown kind 'nope'")])
         self.assertEqual(pool.parse_selection("name\nx\n", self.platform)[0], [])
+
+    def test_add_rows_replaces_atomically_and_ends_with_newline(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "pool.csv")
+            with open(path, "w", newline="") as f:
+                f.write("video_id,bucket,note\r\n11,a,x")          # legacy header, no final newline
+            before = os.stat(path).st_ino
+            rows, _ = pool.parse_selection("id\n22\n", self.platform)
+            self.assertEqual(pool.add_rows(root, rows, self.platform), (1, 1))  # the unterminated "11" row is cut off
+            self.assertNotEqual(os.stat(path).st_ino, before)       # a new file was swapped in, not appended to
+            with open(path, "rb") as f:
+                data = f.read()
+            self.assertTrue(data.endswith(b"\n")); self.assertTrue(data.startswith(b"id,kind,bucket,note"))
+            self.assertEqual([r.id for r in pool.read_rows(root, "video")], ["22"])
+            self.assertEqual([n for n in os.listdir(root) if n.startswith(".pool.csv.")], [])
+
+    def test_read_drops_a_cut_off_last_line(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "pool.csv"), "w", newline="") as f:
+                f.write("id,kind,bucket,note\r\n9001234567,video,,\r\n90")
+            self.assertEqual([r.id for r in pool.read_rows(root, "video")], ["9001234567"])
 
     def test_add_rows_creates_file_with_header_and_dedupes(self):
         import tempfile

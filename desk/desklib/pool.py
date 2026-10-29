@@ -30,22 +30,44 @@ def _path(desk_root: str) -> str:
 def _read(desk_root: str, default_kind: str) -> tuple[list[PoolRow], bool]:
     try:
         with open(_path(desk_root), newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            names = reader.fieldnames
-            if names is not None and "id" not in names and "video_id" not in names:
-                raise ValueError(f"pool.csv: unrecognised header {names!r}")
-            legacy = names is not None and "id" not in names
-            rows, seen = [], set()
-            for r in reader:
-                id_ = ((r.get("id") if not legacy else r.get("video_id")) or "").strip()
-                kind = default_kind if legacy else ((r.get("kind") or "").strip() or default_kind)
-                if not id_ or (kind, id_) in seen:
-                    continue
-                seen.add((kind, id_))
-                rows.append(PoolRow(id_, kind, r.get("bucket") or "", r.get("note") or ""))
+            text = f.read()
     except FileNotFoundError:
         return [], False
+    if text and not text.endswith("\n"):
+        text = text[:text.rfind("\n") + 1]     # a cut-off last line is never a row
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    names = reader.fieldnames
+    if names is not None and "id" not in names and "video_id" not in names:
+        raise ValueError(f"pool.csv: unrecognised header {names!r}")
+    legacy = names is not None and "id" not in names
+    rows, seen = [], set()
+    for r in reader:
+        id_ = ((r.get("id") if not legacy else r.get("video_id")) or "").strip()
+        kind = default_kind if legacy else ((r.get("kind") or "").strip() or default_kind)
+        if not id_ or (kind, id_) in seen:
+            continue
+        seen.add((kind, id_))
+        rows.append(PoolRow(id_, kind, r.get("bucket") or "", r.get("note") or ""))
     return rows, legacy
+
+
+def _replace(desk_root: str, rows: list[PoolRow]) -> None:
+    """Write header + rows to a temp file beside pool.csv and swap it in: readers see old or new, whole."""
+    os.makedirs(desk_root, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=desk_root, prefix=".pool.csv.")
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(HEADER)
+            w.writerows([r.id, r.kind, r.bucket, r.note] for r in rows)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, _path(desk_root))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def read_rows(desk_root: str, default_kind: str) -> list[PoolRow]:
@@ -112,7 +134,6 @@ def add_rows(desk_root: str, rows: list[PoolRow], platform) -> tuple[int, int]:
     Returns (added, total rows now). Rows the platform cannot open are skipped, never written.
     """
     with flocked(pool_lock(desk_root)):
-        _migrate(desk_root, platform.default_kind)
         existing, _ = _read(desk_root, platform.default_kind)
         seen = {(r.kind, r.id) for r in existing}
         fresh = []
@@ -122,22 +143,8 @@ def add_rows(desk_root: str, rows: list[PoolRow], platform) -> tuple[int, int]:
                 continue
             seen.add((r.kind, r.id))
             fresh.append(r)
-        if fresh:
-            path = _path(desk_root)
-            os.makedirs(desk_root, exist_ok=True)
-            with open(path, "a+b") as probe:     # a hand-edited file may lack its final newline
-                size = probe.seek(0, os.SEEK_END)
-                lead = b""
-                if size:
-                    probe.seek(-1, os.SEEK_END)
-                    lead = b"" if probe.read(1) == b"\n" else b"\n"
-            with open(path, "a", newline="", encoding="utf-8") as f:
-                if lead:
-                    f.write(lead.decode())
-                w = csv.writer(f)
-                if not size:
-                    w.writerow(HEADER)
-                w.writerows([r.id, r.kind, r.bucket, r.note] for r in fresh)
+        if fresh:       # the whole new content, swapped in atomically (also upgrades a legacy header)
+            _replace(desk_root, existing + fresh)
         return len(fresh), len(existing) + len(fresh)
 
 
@@ -150,18 +157,5 @@ def _migrate(desk_root: str, default_kind: str) -> bool:
     rows, legacy = _read(desk_root, default_kind)
     if not legacy:
         return False
-    fd, tmp = tempfile.mkstemp(dir=desk_root, prefix=".pool.csv.")
-    try:
-        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(HEADER)
-            w.writerows([r.id, r.kind, r.bucket, r.note] for r in rows)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, _path(desk_root))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+    _replace(desk_root, rows)
     return True

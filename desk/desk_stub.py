@@ -52,16 +52,15 @@ class Desk:
         self.last_seen = {}     # user -> last time their screen was connected or their page loaded
         self.provisioning = set()  # users with an advance() thread running
         self.pool_error = None     # why the last pool.csv read failed, if it did
-        self.notice = None         # one line from the last admin action, shown once on the next overview
+        self.notices = {}          # admin -> one line from their last action, shown once on their next overview
 
-    def set_notice(self, text):
+    def set_notice(self, user, text):
         with self.lock:
-            self.notice = text
+            self.notices[user] = text
 
-    def take_notice(self):
+    def take_notice(self, user):
         with self.lock:
-            text, self.notice = self.notice, None
-        return text
+            return self.notices.pop(user, None)
 
     # --- provisioning ----------------------------------------------------
 
