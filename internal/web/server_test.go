@@ -142,6 +142,13 @@ func TestContainerListenerOnlyHealthz(t *testing.T) {
 			t.Errorf("%s: body = %q, want %q", c.path, rec.Body.String(), c.wantBody)
 		}
 	}
+	// Only GET is registered: a POST to /healthz is not 200.
+	req := httptest.NewRequest(http.MethodPost, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Errorf("POST /healthz: status = %d, want 405 or 404", rec.Code)
+	}
 }
 
 func TestAccessLoggedOncePerChange(t *testing.T) {
@@ -193,5 +200,34 @@ func TestAccessLoggedOncePerChange(t *testing.T) {
 	}
 	if entries[2].User != "someone" || entries[2].Collector || entries[2].Admin {
 		t.Errorf("entry[2] = %+v, want someone, neither collector nor admin", entries[2])
+	}
+}
+
+func TestEmptyRolesLoggedOnce(t *testing.T) {
+	srv, logPath := newTestServer(t)
+
+	// Roles header present but empty: the 403 page (not the not-ready page),
+	// and exactly one log line with "roles":[].
+	rec := do(t, srv, "dmccool2", "", testGate, "/desk/")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	b := rec.Body.String()
+	if !strings.Contains(b, testContact) || strings.Contains(b, "not ready yet") {
+		t.Errorf("body %q is not the non-member 403 page", b)
+	}
+	// A second identical request adds no line.
+	do(t, srv, "dmccool2", "", testGate, "/desk/")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log has %d lines, want 1:\n%s", len(lines), data)
+	}
+	if !strings.Contains(lines[0], `"user":"dmccool2"`) || !strings.Contains(lines[0], `"roles":[]`) {
+		t.Errorf("line %q lacks the user or an empty roles array", lines[0])
 	}
 }

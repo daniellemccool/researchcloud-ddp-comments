@@ -21,7 +21,8 @@ import (
 // of desk.json arrive as strings and are converted here; layout_version is
 // the one integer in the file.
 type Config struct {
-	DeskRoot           string
+	DeskRoot           string // container-local: the directory desk.json was loaded from
+	HostDeskRoot       string // the desk_root value in the file (the host path)
 	FQDN               string
 	CollectorRole      string
 	AdminRole          string
@@ -88,14 +89,16 @@ var knownKeys = []string{
 }
 
 var (
-	intRe   = regexp.MustCompile(`^[0-9]+$`)
-	batchRe = regexp.MustCompile(`^[0-9]+(,[0-9]+)*$`)
-	roleRe  = regexp.MustCompile(`^src_co_[A-Za-z0-9_-]+$`)
+	intRe      = regexp.MustCompile(`^[0-9]+$`)
+	batchRe    = regexp.MustCompile(`^[0-9]+(,[0-9]+)*$`)
+	roleRe     = regexp.MustCompile(`^src_co_[A-Za-z0-9_-]+$`)
+	platformRe = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 )
 
-// Load reads and validates the desk.json at path. The desk_root value in the
-// file is the desk root; the gate secret is read from
-// <desk root>/secrets/gate and trimmed.
+// Load reads and validates the desk.json at path. DeskRoot is the directory
+// the file was loaded from (the container-local desk root); the file's
+// desk_root value is the host path and lands in HostDeskRoot. The gate
+// secret is read from <DeskRoot>/secrets/gate and trimmed.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -118,8 +121,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("desk.json %s: %w", path, err)
 	}
 	for _, k := range knownKeys {
-		if _, ok := keys[k]; !ok {
+		v, ok := keys[k]
+		if !ok {
 			return nil, fmt.Errorf("desk.json %s: missing key %q", path, k)
+		}
+		if string(v) == "null" {
+			return nil, fmt.Errorf("desk.json %s: key %q is null", path, k)
 		}
 	}
 
@@ -127,6 +134,8 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg.DeskRoot = filepath.Dir(path)
+	cfg.HostDeskRoot = raw.DeskRoot
 
 	gatePath := filepath.Join(cfg.DeskRoot, "secrets", "gate")
 	gate, err := os.ReadFile(gatePath)
@@ -152,6 +161,12 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 	adminRole, err := checkRole(raw.DeskAdminRole)
 	if err != nil {
 		return nil, fail("desk_admin_role", "%v", err)
+	}
+	if raw.DeskContact == "" {
+		return nil, fail("desk_contact", "must not be empty")
+	}
+	if !platformRe.MatchString(raw.DeskPlatform) {
+		return nil, fail("desk_platform", "must match ^[a-z][a-z0-9_-]*$ (it is joined into a path), got %q", raw.DeskPlatform)
 	}
 	hideMedia, err := parseBool(raw.DeskHideMedia)
 	if err != nil {
@@ -183,7 +198,7 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 	}
 
 	return &Config{
-		DeskRoot:           raw.DeskRoot,
+		HostDeskRoot:       raw.DeskRoot,
 		FQDN:               raw.WorkspaceFQDN,
 		CollectorRole:      collectorRole,
 		AdminRole:          adminRole,

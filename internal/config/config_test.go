@@ -8,9 +8,14 @@ import (
 	"testing"
 )
 
-// deskJSON builds a complete, realistic desk.json for dir. mutate changes the
-// key map before marshaling (add or delete keys).
-func deskJSON(t *testing.T, dir string, mutate func(map[string]any)) string {
+// hostDeskRoot is the desk_root value written into test desk.json files: a
+// HOST path, deliberately different from the temp directory the file is
+// loaded from.
+const hostDeskRoot = "/data/vol1/desk"
+
+// deskJSON builds a complete, realistic desk.json. mutate changes the key map
+// before marshaling (add or delete keys).
+func deskJSON(t *testing.T, mutate func(map[string]any)) string {
 	t.Helper()
 	m := map[string]any{
 		"desk_collector_role": "src_co_students",
@@ -33,7 +38,7 @@ func deskJSON(t *testing.T, dir string, mutate func(map[string]any)) string {
 		"co_id":               "12345",
 		"co_name":             "Example CO",
 		"workspace_fqdn":      "desk.example.org",
-		"desk_root":           dir,
+		"desk_root":           hostDeskRoot,
 		"layout_version":      1,
 		"package_version":     "v1.2.3",
 		"applied_at":          "2026-10-30T12:00:00Z",
@@ -52,7 +57,7 @@ func deskJSON(t *testing.T, dir string, mutate func(map[string]any)) string {
 func writeDeskRoot(t *testing.T, mutate func(map[string]any), withGate bool) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "desk.json"), []byte(deskJSON(t, dir, mutate)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "desk.json"), []byte(deskJSON(t, mutate)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if withGate {
@@ -74,7 +79,10 @@ func TestLoadDeskJSONStrict(t *testing.T) {
 			t.Fatalf("Load: %v", err)
 		}
 		if cfg.DeskRoot != dir {
-			t.Errorf("DeskRoot = %q, want %q", cfg.DeskRoot, dir)
+			t.Errorf("DeskRoot = %q, want the temp dir %q", cfg.DeskRoot, dir)
+		}
+		if cfg.HostDeskRoot != hostDeskRoot {
+			t.Errorf("HostDeskRoot = %q, want the file's desk_root %q", cfg.HostDeskRoot, hostDeskRoot)
 		}
 		if cfg.CollectorRole != "src_co_students" || cfg.AdminRole != "src_co_admin" {
 			t.Errorf("roles = %q/%q", cfg.CollectorRole, cfg.AdminRole)
@@ -141,6 +149,32 @@ func TestLoadDeskJSONStrict(t *testing.T) {
 		dir := writeDeskRoot(t, nil, false)
 		if _, err := Load(filepath.Join(dir, "desk.json")); err == nil {
 			t.Fatal("err = nil, want an error for the missing gate file")
+		}
+	})
+
+	t.Run("null string key names the key", func(t *testing.T) {
+		dir := writeDeskRoot(t, func(m map[string]any) { m["desk_contact"] = nil }, true)
+		_, err := Load(filepath.Join(dir, "desk.json"))
+		if err == nil || !strings.Contains(err.Error(), "desk_contact") {
+			t.Fatalf("err = %v, want one naming desk_contact", err)
+		}
+	})
+
+	t.Run("empty desk_contact is an error", func(t *testing.T) {
+		dir := writeDeskRoot(t, func(m map[string]any) { m["desk_contact"] = "" }, true)
+		_, err := Load(filepath.Join(dir, "desk.json"))
+		if err == nil || !strings.Contains(err.Error(), "desk_contact") {
+			t.Fatalf("err = %v, want one naming desk_contact", err)
+		}
+	})
+
+	t.Run("bad desk_platform is an error", func(t *testing.T) {
+		for _, p := range []string{"TikTok", "1x", "../etc"} {
+			dir := writeDeskRoot(t, func(m map[string]any) { m["desk_platform"] = p }, true)
+			_, err := Load(filepath.Join(dir, "desk.json"))
+			if err == nil || !strings.Contains(err.Error(), "desk_platform") {
+				t.Fatalf("platform %q: err = %v, want one naming desk_platform", p, err)
+			}
 		}
 	})
 }

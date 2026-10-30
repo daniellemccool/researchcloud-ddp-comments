@@ -39,20 +39,20 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: desk serve --desk-root /desk --repo /repo [--listen :8110] [--container-listen :8111]")
+	fmt.Fprintln(os.Stderr, "usage: desk serve --desk-root /desk [--repo /repo] [--listen :8110] [--container-listen :8111]")
 }
 
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	deskRoot := fs.String("desk-root", "", "the desk's directory, holding desk.json (required)")
-	repo := fs.String("repo", "", "read-only repository copy holding platforms/ (required)")
+	repo := fs.String("repo", "/repo", "read-only repository copy holding platforms/ (the compose mount)")
 	listen := fs.String("listen", ":8110", "gated listener address")
 	containerListen := fs.String("container-listen", ":8111", "container listener address")
 	if err := fs.Parse(args); err != nil {
 		usage()
 		os.Exit(2)
 	}
-	if *deskRoot == "" || *repo == "" {
+	if *deskRoot == "" {
 		usage()
 		os.Exit(2)
 	}

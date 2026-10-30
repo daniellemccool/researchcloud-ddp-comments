@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -64,12 +65,26 @@ func TestBadUsernameIs403(t *testing.T) {
 		{"J.Smith", ErrBadUser},
 		{"../x", ErrBadUser},
 		{"", ErrNoUser},
+		{strings.Repeat("a", 33), ErrBadUser}, // 33 chars: one too many
+		{"1abc", ErrBadUser},                  // leading digit
+		{"Dmccool2", ErrBadUser},              // uppercase
+		{" dmccool2 ", ErrBadUser},            // padded: the raw value is validated
 	}
 	for _, c := range cases {
 		r := newRequest(c.user, testCollectorRole, testGate)
 		if _, err := FromRequest(r, testConfig()); !errors.Is(err, c.want) {
 			t.Errorf("user %q: err = %v, want %v", c.user, err, c.want)
 		}
+	}
+}
+
+func TestEmptyConfiguredSecretFailsClosed(t *testing.T) {
+	// An empty configured secret must never match, not even an empty gate
+	// header with admin roles forged on top.
+	cfg := Config{CollectorRole: testCollectorRole, AdminRole: testAdminRole, GateSecret: ""}
+	r := newRequest("dmccool2", testAdminRole, "")
+	if _, err := FromRequest(r, cfg); !errors.Is(err, ErrGate) {
+		t.Fatalf("err = %v, want ErrGate", err)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
-	"strings"
 )
 
 // The three identity header names. They may appear only in this package;
@@ -51,14 +50,15 @@ var (
 
 // FromRequest is the only reader of the three identity headers in the whole
 // module. The gate is checked first, in constant time; a request whose gate
-// is wrong has its other headers ignored entirely. Then the username is
-// validated, then the roles are split into whole ';'-separated segments.
+// is wrong has its other headers ignored entirely. Then the RAW username
+// value is validated (no trimming: " dmccool2 " is not a valid name), then
+// the roles are split into whole ';'-separated segments.
 // Admin implies Collector.
 func FromRequest(r *http.Request, c Config) (Identity, error) {
 	if !gateOK(r, c.GateSecret) {
 		return Identity{}, ErrGate
 	}
-	user := strings.TrimSpace(r.Header.Get(headerUser))
+	user := r.Header.Get(headerUser)
 	if user == "" {
 		return Identity{}, ErrNoUser
 	}

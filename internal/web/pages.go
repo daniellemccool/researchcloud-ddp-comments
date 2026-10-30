@@ -3,6 +3,7 @@ package web
 import (
 	"embed"
 	"html/template"
+	"log"
 	"net/http"
 )
 
@@ -35,5 +36,7 @@ func mustLoadPages() *pages {
 func (p *pages) render(w http.ResponseWriter, status int, name string, d pageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_ = p.t.ExecuteTemplate(w, name+".html", d)
+	if err := p.t.ExecuteTemplate(w, name+".html", d); err != nil {
+		log.Printf("web: render %s: %v", name, err)
+	}
 }
