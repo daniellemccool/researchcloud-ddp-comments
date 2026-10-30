@@ -281,6 +281,8 @@ func TestCookieReplaced(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Add("Set-Cookie", "remember_token=abc; Path=/")
+		w.Header().Add("Set-Cookie", "session=zzz")
 		w.WriteHeader(201)
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
@@ -296,6 +298,12 @@ func TestCookieReplaced(t *testing.T) {
 	}
 	if len(cookies) != 1 || cookies[0] != "remember_token=abc" {
 		t.Errorf("upstream saw Cookie %q, want exactly remember_token=abc", cookies)
+	}
+	if sc := resp.Header.Values("Set-Cookie"); len(sc) != 0 {
+		t.Errorf("browser received Set-Cookie %q", sc)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("upstream saw %d requests, want 1", hits.Load())
 	}
 	if host != "fourcat.desk" {
 		t.Errorf("upstream Host %q, want fourcat.desk", host)
@@ -393,5 +401,60 @@ func TestDeniedThroughProxy(t *testing.T) {
 	}
 	if n := strings.Count(rig.logs.String(), "\n"); n != 6 {
 		t.Errorf("want 6 log lines, got %d: %q", n, rig.logs.String())
+	}
+}
+
+func TestForwardDropsUpgradeAndRefuses1xx(t *testing.T) {
+	var conn, upg string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, upg = r.Header.Get("Connection"), r.Header.Get("Upgrade")
+		if r.URL.Query().Get("sw") != "" {
+			w.Header().Set("Connection", "Upgrade")
+			w.Header().Set("Upgrade", "websocket")
+			w.WriteHeader(http.StatusSwitchingProtocols)
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer up.Close()
+	rig := newRig(t, up.URL, strp("abc"), nil)
+
+	hdr := map[string]string{"Connection": "Upgrade", "Upgrade": "websocket", "Te": "trailers", "Keep-Alive": "5"}
+	resp, body := rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k", hdr, "")
+	if resp.StatusCode != 200 || body != "ok" {
+		t.Errorf("plain forward: %d %q", resp.StatusCode, body)
+	}
+	if upg != "" || strings.Contains(strings.ToLower(conn), "upgrade") {
+		t.Errorf("upstream saw Connection %q Upgrade %q", conn, upg)
+	}
+
+	resp, body = rig.do(t, "GET", "http://fourcat.desk/api/check-query/?sw=1", hdr, "")
+	assertDenied(t, resp, body)
+}
+
+func TestTokenRotatesBetweenRequests(t *testing.T) {
+	var got string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Cookie")
+	}))
+	defer up.Close()
+	rig := newRig(t, up.URL, strp("one"), nil)
+	rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k", nil, "")
+	if got != "remember_token=one" {
+		t.Fatalf("got %q", got)
+	}
+	if err := os.WriteFile(rig.token, []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k", nil, "")
+	if got != "remember_token=two" {
+		t.Fatalf("after rotation got %q", got)
+	}
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(rig.token, 0); err != nil {
+			t.Fatal(err)
+		}
+		resp, body := rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k", nil, "")
+		assertDenied(t, resp, body)
 	}
 }

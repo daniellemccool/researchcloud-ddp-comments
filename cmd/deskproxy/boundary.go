@@ -65,6 +65,8 @@ func classify(req *http.Request, fqdn string) verdict {
 	case strings.HasSuffix(h, ".desk"):
 		return deny
 	case fqdn != "" && h == normHost(fqdn):
+		// Same answer as the fallthrough; this documents the intent: the
+		// workspace's own host is let through because nginx gates it.
 		return allow
 	}
 	return allow
@@ -158,6 +160,9 @@ func newBoundary(fqdn string, token *tokenFile, upstream *url.URL, res resolver)
 		// Accept-Encoding passes through and the body is never decoded.
 		fourcat: &http.Transport{
 			Proxy:                 nil,
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
 			DisableCompression:    true,
 			ResponseHeaderTimeout: 5 * time.Minute,
 		},
@@ -220,7 +225,12 @@ func (b *boundary) forward(req *http.Request) *http.Response {
 	out.RequestURI = ""
 	out.Header.Del("Cookie")
 	out.Header.Set("Cookie", "remember_token="+tok)
-	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Proxy-Authenticate"} {
+	// goproxy's RemoveProxyHeaders does not run on this path, and an upgrade
+	// must never reach 4CAT: drop the hop-by-hop headers here.
+	for _, h := range []string{
+		"Connection", "Upgrade", "Te", "Keep-Alive", "Transfer-Encoding", "Trailer",
+		"Proxy-Connection", "Proxy-Authorization", "Proxy-Authenticate",
+	} {
 		out.Header.Del(h)
 	}
 	resp, err := b.fourcat.RoundTrip(out)
@@ -228,5 +238,15 @@ func (b *boundary) forward(req *http.Request) *http.Response {
 		// The error is not echoed: it names the request, which carries the token.
 		return goproxy.NewResponse(req, goproxy.ContentTypeText, http.StatusBadGateway, "deskproxy: 4CAT unreachable")
 	}
+	if resp.StatusCode >= 100 && resp.StatusCode < 200 {
+		// An interim or switching-protocols answer would make goproxy relay
+		// raw bytes to 4CAT past the method-and-path table.
+		_ = resp.Body.Close()
+		return denyResponse(req)
+	}
+	// 4CAT's cookies carry its session for the collector's identity: no page
+	// may see them (ADR-0009).
+	resp.Header.Del("Set-Cookie")
+	resp.Header.Del("Set-Cookie2")
 	return resp
 }
