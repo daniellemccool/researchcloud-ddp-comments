@@ -24,7 +24,7 @@ Parameters declared on the component (spec §5.2), with their defaults:
 | `fourcat_image` | pinned `digitalmethodsinitiative/4cat:<tag>` |
 | `desk_image` | pinned `ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:<tag>` |
 | `deskproxy_image` | pinned `ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:<tag>` |
-| `zeeschuimer_version` | `1.14.2` |
+| `zeeschuimer_version` | `1.14.3` |
 | `template_sha256` | pinned per release |
 
 ## Item
@@ -43,7 +43,7 @@ Item overwrites (spec §5.1):
 
 | Platform | Zeeschuimer | Artifact | SHA256 | Built on |
 |---|---|---|---|---|
-| tiktok | 1.14.2 | `ddp-comments-template-tiktok-1.14.2.tar` | `026210019e2ad02eb33ce9f81afd63a54792ca541a0dcdd52014dc8f1ad257a2` | 2026-10-30, from the sandbox `state/firefox/_template` profile |
+| tiktok | 1.14.3 | `ddp-comments-template-tiktok-1.14.3.tar` | `143aa7b6055ad6c4d740a2cccf8b24209c2acf5424ce4aa33e724557e22d507c` | 2026-10-30, from the sandbox `state/firefox/_template` profile |
 
 ## Snags
 

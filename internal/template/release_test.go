@@ -40,14 +40,18 @@ func loadTikTok(t *testing.T) *platform.Platform {
 // fixtureOpts varies the built fixture profile.
 type fixtureOpts struct {
 	items, uploads, nav, settings int
-	storageRows                   int  // rows in the storage.local database
-	ctxHasStores                  bool // the userContext dir holds the four stores (ambiguity)
-	noExt                         bool // no moz-extension directories at all
-	noCtx                         bool // no userContext sibling dir (storage.local missing)
-	noCookies                     bool // no cookies.sqlite
-	noPrefs                       bool // no prefs.js
+	storageRows                   int    // rows in the storage.local database
+	extVersion                    string // version in the extensions.json entry
+	ctxHasStores                  bool   // the userContext dir holds the four stores (ambiguity)
+	noExt                         bool   // no moz-extension directories at all
+	noCtx                         bool   // no userContext sibling dir (storage.local missing)
+	emptyStorage                  bool   // storage.local database exists but holds no rows
+	noCookies                     bool   // no cookies.sqlite
+	noPrefs                       bool   // no prefs.js
+	noXPI                         bool   // no extensions/<xpiID>.xpi
 	lock, parentlock              bool
 	walEmpty, walNonEmpty         bool // idb -wal side file in the original
+	shmNonEmpty                   bool // non-empty idb -shm side file in the original
 }
 
 // buildProfile writes a fixture Firefox profile into dir.
@@ -76,8 +80,12 @@ func buildProfile(t *testing.T, dir string, o fixtureOpts) {
 			t.Fatal(err)
 		}
 	}
+	extVersion := o.extVersion
+	if extVersion == "" {
+		extVersion = zsVersion
+	}
 	extensionsJSON := `{"schemaVersion":37,"addons":[` +
-		`{"id":"` + xpiID + `","syncGUID":"aaaa","type":"extension","path":"/old/path.xpi",` +
+		`{"id":"` + xpiID + `","syncGUID":"aaaa","type":"extension","version":"` + extVersion + `","path":"/old/path.xpi",` +
 		`"rootURI":"jar:file:///old/path.xpi!/","sourceURI":"` + policyURL(zsVersion) + `",` +
 		`"installDate":1,"updateDate":2,"installTelemetryInfo":{"x":1}},` +
 		`{"id":"webcompat@mozilla.org","syncGUID":"bbbb","type":"extension"}]}`
@@ -86,12 +94,14 @@ func buildProfile(t *testing.T, dir string, o fixtureOpts) {
 		"extension-preferences.json":                  `{}`, // not on the allowlist: deleted
 		"places.sqlite":                               "junk",
 		"times.json":                                  "{}",
-		"extensions/" + xpiID + ".xpi":                "xpi-bytes",
 		"extensions/other.xpi":                        "junk",
 		"chrome/userContent.css":                      "/* hide media */",
 		"chrome/other.css":                            "junk",
 		"storage/default/https+++www.tiktok.com/junk": "junk",
 		"storage/permanent/chrome/idb/x.sqlite":       "junk",
+	}
+	if !o.noXPI {
+		files["extensions/"+xpiID+".xpi"] = "xpi-bytes"
 	}
 	for rel, content := range files {
 		p := filepath.Join(dir, filepath.FromSlash(rel))
@@ -120,6 +130,11 @@ func buildProfile(t *testing.T, dir string, o fixtureOpts) {
 				t.Fatal(err)
 			}
 		}
+		if o.shmNonEmpty {
+			if err := os.WriteFile(filepath.Join(idbDir, itemsIDB+"-shm"), []byte("shm"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if !o.noCtx {
 			ctxDir := filepath.Join(dir, "storage", "default", ctxExtDir)
 			writeJunk(t, ctxDir, "cache/junk")
@@ -130,7 +145,7 @@ func buildProfile(t *testing.T, dir string, o fixtureOpts) {
 				writeItemsIDB(t, filepath.Join(ctxIDB, storageIDB), storageDB, 0, 0, 0, 1)
 			} else {
 				rows := o.storageRows
-				if rows == 0 {
+				if rows == 0 && !o.emptyStorage {
 					rows = 2
 				}
 				writeStorageIDB(t, filepath.Join(ctxIDB, storageIDB), rows)
@@ -562,6 +577,17 @@ func TestLockedProfileRefused(t *testing.T) {
 	if _, err := Verify(work, p, zsVersion); !errors.Is(err, ErrLocked) {
 		t.Fatalf("Verify with idb -wal: error = %v, want ErrLocked", err)
 	}
+
+	// a non-empty -shm beside an idb database in the ORIGINAL: refused (F29)
+	src = newWorkProfile(t, fixtureOpts{settings: 1, shmNonEmpty: true})
+	out = filepath.Join(t.TempDir(), "out")
+	_, err = Release(src, p, zsVersion, out)
+	if !errors.Is(err, ErrLocked) {
+		t.Fatalf("Release with non-empty idb -shm: error = %v, want ErrLocked", err)
+	}
+	if !strings.Contains(err.Error(), itemsIDB+"-shm") {
+		t.Errorf("ErrLocked message %q does not name the -shm file", err.Error())
+	}
 }
 
 func TestStorageLocalKeptAndVerified(t *testing.T) {
@@ -597,6 +623,52 @@ func TestMissingPrefsIsError(t *testing.T) {
 	_, err := Release(src, loadTikTok(t), zsVersion, out)
 	if err == nil || !strings.Contains(err.Error(), "prefs.js") {
 		t.Fatalf("Release without prefs.js: error = %v, want a prefs.js error", err)
+	}
+}
+
+func TestMissingXPIRefused(t *testing.T) {
+	src := newWorkProfile(t, fixtureOpts{settings: 1, noXPI: true})
+	out := filepath.Join(t.TempDir(), "out")
+	_, err := Release(src, loadTikTok(t), zsVersion, out)
+	if err == nil || !strings.Contains(err.Error(), "extensions/"+xpiID+".xpi") {
+		t.Fatalf("Release without the xpi: error = %v, want it to name the xpi path", err)
+	}
+}
+
+func TestVersionMismatchRefused(t *testing.T) {
+	src := newWorkProfile(t, fixtureOpts{settings: 1, extVersion: "9.9.9"})
+	out := filepath.Join(t.TempDir(), "out")
+	_, err := Release(src, loadTikTok(t), zsVersion, out)
+	if err == nil ||
+		!strings.Contains(err.Error(), `"9.9.9"`) ||
+		!strings.Contains(err.Error(), `"`+zsVersion+`"`) {
+		t.Fatalf("Release with version mismatch: error = %v, want it to name both versions", err)
+	}
+}
+
+func TestEmptyStorageLocalRefused(t *testing.T) {
+	src := newWorkProfile(t, fixtureOpts{settings: 1, emptyStorage: true})
+	out := filepath.Join(t.TempDir(), "out")
+	_, err := Release(src, loadTikTok(t), zsVersion, out)
+	if err == nil || !strings.Contains(err.Error(), "extension storage.local database not found or empty") {
+		t.Fatalf("Release with empty storage.local: error = %v, want the storage.local message", err)
+	}
+}
+
+func TestEmptyDisallowedDirReported(t *testing.T) {
+	work := newWorkProfile(t, fixtureOpts{settings: 1})
+	p := loadTikTok(t)
+	if err := Sanitise(work, p, zsVersion, builtOn); err != nil {
+		t.Fatalf("Sanitise: %v", err)
+	}
+	// an empty disallowed directory left behind after Sanitise
+	empty := filepath.Join(work, "storage", "default", "https+++example.com")
+	if err := os.MkdirAll(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Verify(work, p, zsVersion)
+	if err == nil || !strings.Contains(err.Error(), "unexpected file: storage/default/https+++example.com") {
+		t.Fatalf("Verify with empty disallowed dir: error = %v, want it to report the directory itself", err)
 	}
 }
 

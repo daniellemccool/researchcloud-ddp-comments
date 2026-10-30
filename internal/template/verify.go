@@ -59,15 +59,20 @@ func Verify(dir string, p *platform.Platform, zsVersion string) (Counts, error) 
 	if uuid != "" && items[0].extDir != "moz-extension+++"+uuid {
 		problems = append(problems, itemsDB+" database not found")
 	}
-	switch {
-	case counts.Items > 0:
-		problems = append(problems, "template has captured items")
-	case counts.Uploads > 0:
-		problems = append(problems, "template has upload history")
-	case counts.Nav > 0:
-		problems = append(problems, "template has navigation history")
-	case counts.Settings < 1:
-		problems = append(problems, "template has no settings (modules were never enabled)")
+	for _, db := range items {
+		c := countsOf(db.counts)
+		if c.Items > 0 {
+			problems = append(problems, "template has captured items")
+		}
+		if c.Uploads > 0 {
+			problems = append(problems, "template has upload history")
+		}
+		if c.Nav > 0 {
+			problems = append(problems, "template has navigation history")
+		}
+		if c.Settings < 1 {
+			problems = append(problems, "template has no settings (modules were never enabled)")
+		}
 	}
 
 	ctxDir := "moz-extension+++" + uuid + userContext
@@ -81,12 +86,13 @@ func Verify(dir string, p *platform.Platform, zsVersion string) (Counts, error) 
 		problems = append(problems, "extension storage.local database not found or empty")
 	}
 
-	if !hasXPI(dir) {
-		problems = append(problems, "xpi id missing")
+	if xp := xpiProblem(dir); xp != "" {
+		problems = append(problems, xp)
 	}
 	problems = append(problems, cookieProblems(dir, p)...)
 	problems = append(problems, prefProblems(dir)...)
 	problems = append(problems, jsonProblems(dir, zsVersion)...)
+	problems = append(problems, versionProblems(dir, zsVersion)...)
 
 	exts := extDirs(uuid)
 	if len(exts) == 0 {
@@ -130,17 +136,40 @@ func sumCounts(counts map[string]int) int {
 	return n
 }
 
-// hasXPI reports whether Zeeschuimer's xpi is present, either as the file or
-// named in extensions.json.
-func hasXPI(dir string) bool {
-	if info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(xpiRel))); err == nil && info.Mode().IsRegular() {
-		return true
+// xpiProblem refuses a missing Zeeschuimer xpi: the file must exist as a
+// regular, non-empty file, and the message names its path.
+func xpiProblem(dir string) string {
+	info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(xpiRel)))
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		return "xpi missing or empty: " + xpiRel
 	}
+	return ""
+}
+
+// versionProblems refuses an extensions.json whose kept Zeeschuimer entry
+// carries a different version than the release label (F30).
+func versionProblems(dir, zsVersion string) []string {
 	data, err := os.ReadFile(filepath.Join(dir, "extensions.json"))
 	if err != nil {
-		return false
+		return nil // jsonProblems already reports the missing file
 	}
-	return strings.Contains(string(data), xpiID)
+	var parsed struct {
+		Addons []map[string]any `json:"addons"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil // jsonProblems already reports invalid JSON
+	}
+	for _, a := range parsed.Addons {
+		if a["id"] != xpiID {
+			continue
+		}
+		v, _ := a["version"].(string)
+		if v != zsVersion {
+			return []string{fmt.Sprintf("extensions.json version %q does not match --zeeschuimer %q", v, zsVersion)}
+		}
+		return nil
+	}
+	return nil // no entry: jsonProblems reports "does not list the xpi"
 }
 
 // cookieProblems checks cookies.sqlite against the platform's keep list.
@@ -405,7 +434,11 @@ func treeProblems(dir string, exts []string) []string {
 		r := filepath.ToSlash(rel)
 		if d.IsDir() {
 			if !dirOK(r) {
-				bad = append(bad, entriesUnder(path, r)...)
+				if under := entriesUnder(path, r); len(under) > 0 {
+					bad = append(bad, under...)
+				} else {
+					bad = append(bad, r) // empty disallowed directory: report it itself
+				}
 				return filepath.SkipDir
 			}
 			return nil

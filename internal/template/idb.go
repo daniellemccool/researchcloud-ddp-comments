@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver; depguard allows it only here
@@ -172,14 +173,74 @@ func clearNavRows(db *sql.DB) error {
 		}
 	}
 	if tableExists(db, "file") {
-		if _, err := db.Exec("DELETE FROM file WHERE NOT EXISTS (SELECT 1 FROM object_data " +
-			"WHERE (',' || file_ids || ',') LIKE ('%,' || id || ',%'))"); err != nil {
+		if err := deleteUnreferencedFileRows(db); err != nil {
 			return err
 		}
 	}
 	for _, tr := range triggers {
 		if _, err := db.Exec(tr.sql); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// deleteUnreferencedFileRows deletes file rows whose id no object_data row
+// references any more (the dropped triggers would have maintained the
+// refcounts). Firefox stores file_ids as whitespace-separated ids, possibly
+// prefixed, so the ids are parsed in Go rather than matched in SQL.
+func deleteUnreferencedFileRows(db *sql.DB) error {
+	rows, err := db.Query("SELECT file_ids FROM object_data WHERE file_ids IS NOT NULL")
+	if err != nil {
+		return err
+	}
+	referenced := map[string]bool{}
+	for rows.Next() {
+		var ids *string
+		if err := rows.Scan(&ids); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if ids == nil {
+			continue
+		}
+		for _, tok := range strings.Fields(*ids) {
+			for len(tok) > 0 && (tok[0] < '0' || tok[0] > '9') {
+				tok = tok[1:] // strip any non-digit prefix
+			}
+			if tok != "" {
+				referenced[tok] = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	fileRows, err := db.Query("SELECT id FROM file")
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for fileRows.Next() {
+		var id int64
+		if err := fileRows.Scan(&id); err != nil {
+			_ = fileRows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := fileRows.Err(); err != nil {
+		_ = fileRows.Close()
+		return err
+	}
+	_ = fileRows.Close()
+	for _, id := range ids {
+		if !referenced[strconv.FormatInt(id, 10)] {
+			if _, err := db.Exec("DELETE FROM file WHERE id = ?", id); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

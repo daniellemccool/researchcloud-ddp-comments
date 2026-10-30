@@ -142,9 +142,9 @@ case_ok_fresh() {
 			a_fail "$f still contains __GATE__"
 		fi
 	done
-	a_file "$d/templates/release/tiktok-1.14.2/manifest.json"
+	a_file "$d/templates/release/tiktok-1.14.3/manifest.json"
 	if [ "$(id -u)" = "0" ]; then
-		a_eq "template owner uid" "$(stat -c %u "$d/templates/release/tiktok-1.14.2/manifest.json")" "1000"
+		a_eq "template owner uid" "$(stat -c %u "$d/templates/release/tiktok-1.14.3/manifest.json")" "1000"
 	fi
 	a_eq "pool.csv header" "$(head -n1 "$d/pool.csv")" "id,kind,bucket,note"
 	a_file "$SYSROOT/usr/local/bin/desk"
@@ -283,7 +283,7 @@ case_sha_mismatch() {
 	a_err_has "template_sha256"
 	local d
 	d=$(desk)
-	if [ -e "$d/templates/release/tiktok-1.14.2" ]; then
+	if [ -e "$d/templates/release/tiktok-1.14.3" ]; then
 		a_fail "template was extracted despite sha mismatch"
 	fi
 	[ -z "$(ls -A "$d/templates/release" 2>/dev/null)" ] ||
