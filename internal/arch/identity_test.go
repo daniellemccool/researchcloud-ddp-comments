@@ -14,11 +14,7 @@ import (
 
 // identityNames are the identity inputs that only internal/access may read
 // (ADR-0003).
-var identityNames = map[string]bool{
-	"REMOTE_USER":  true,
-	"X-Desk-Roles": true,
-	"X-Desk-Gate":  true,
-}
+var identityNames = []string{"REMOTE_USER", "X-Desk-Roles", "X-Desk-Gate"}
 
 // excludedDirs are the directories the rule does not apply to, relative to
 // the repository root.
@@ -113,5 +109,53 @@ func isIdentityLiteral(lit *ast.BasicLit) bool {
 		return false
 	}
 	s, err := strconv.Unquote(lit.Value)
-	return err == nil && identityNames[s]
+	if err != nil {
+		return false
+	}
+	// HTTP header names are case-insensitive, so every casing counts.
+	for _, name := range identityNames {
+		if strings.EqualFold(s, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFindIdentityReads(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string // substrings, one per expected violation
+	}{
+		{"get REMOTE_USER", `h.Get("REMOTE_USER")`, []string{`Get call with "REMOTE_USER"`}},
+		{"header get roles", `r.Header.Get("X-Desk-Roles")`, []string{`Get call with "X-Desk-Roles"`}},
+		{"lowercase gate", `r.Header.Get("x-desk-gate")`, []string{`Get call with "x-desk-gate"`}},
+		{"uppercase gate", `r.Header.Get("X-DESK-GATE")`, []string{`Get call with "X-DESK-GATE"`}},
+		{"const", `const name = "X-Desk-Gate"`, []string{`string literal "X-Desk-Gate"`}},
+		{"raw string", "var name = `REMOTE_USER`", []string{"string literal `REMOTE_USER`"}},
+		{"clean", `r.Header.Get("Accept")`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// The parser does not type-check, so the receivers need no types.
+			src := "package x\n\nfunc f() {\n\t_ = " + c.body + "\n}\n"
+			if strings.HasPrefix(c.body, "const") || strings.HasPrefix(c.body, "var") {
+				src = "package x\n\n" + c.body + "\n"
+			}
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "x.go", src, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := findIdentityReads(fset, file)
+			if len(got) != len(c.want) {
+				t.Fatalf("violations = %v, want %d", got, len(c.want))
+			}
+			for i, w := range c.want {
+				if !strings.Contains(got[i], w) || !strings.Contains(got[i], "x.go:") {
+					t.Errorf("violation %q lacks %q or file:line", got[i], w)
+				}
+			}
+		})
+	}
 }

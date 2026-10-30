@@ -4,7 +4,9 @@ package platform
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -134,6 +136,10 @@ func Load(path string) (*Platform, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("platform %s: %w", path, err)
+	}
+	var extra struct{}
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("platform %s: unexpected content after the JSON object", path)
 	}
 
 	p, err := build(raw)
