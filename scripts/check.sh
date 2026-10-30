@@ -34,6 +34,7 @@ layer_adr() {
 layer_shell() {
 	need shellcheck || return 1
 	need shfmt || return 1
+	need jq || return 1
 	local files=() f
 	for f in scripts/*.sh deploy/*.sh tests/sh/*.sh; do
 		[ -f "$f" ] || continue

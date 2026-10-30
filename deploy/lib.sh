@@ -12,6 +12,10 @@ PG_SECRET=
 CO_TOKEN=
 CO_ENDPOINT=
 MEMBERS_FILE=
+VOLUME=
+backup=
+CLEANUP_FILES=""
+CLEANUP_DIRS=""
 
 GHCR_NS="ghcr.io/daniellemccool/researchcloud-ddp-comments"
 
@@ -26,9 +30,14 @@ die() {
 	exit 2
 }
 
-param_err() {
-	ERRORS="${ERRORS}init: $1: $2
+# Collect a problem into ERRORS; the caller decides whether to continue.
+collect_err() {
+	ERRORS="${ERRORS}init: $1
 "
+}
+
+param_err() {
+	collect_err "$1: $2"
 }
 
 param() {
@@ -37,6 +46,25 @@ param() {
 
 gen_hex32() {
 	od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+register_cleanup_file() {
+	CLEANUP_FILES="$CLEANUP_FILES $1"
+}
+
+register_cleanup_dir() {
+	CLEANUP_DIRS="$CLEANUP_DIRS $1"
+}
+
+cleanup() {
+	# shellcheck disable=SC2086
+	for f in $CLEANUP_FILES; do
+		rm -f "$f"
+	done
+	# shellcheck disable=SC2086
+	for d in $CLEANUP_DIRS; do
+		rm -rf "$d"
+	done
 }
 
 parse_plugin_parameters() {
@@ -161,20 +189,41 @@ validate_params() {
 
 read_workspace() {
 	ws=$SYSROOT/etc/rsc/workspace.json
-	[ -f "$ws" ] || die "workspace.json: not found at $ws"
-	CO_TOKEN=$(jq -r '.co_token // empty' "$ws")
-	CO_ENDPOINT=$(jq -r '.co_user_api_endpoint // empty' "$ws")
-	[ -n "$CO_TOKEN" ] || die "workspace.json: missing co_token"
-	[ -n "$CO_ENDPOINT" ] || die "workspace.json: missing co_user_api_endpoint"
+	if [ ! -f "$ws" ]; then
+		collect_err "workspace.json: not found at $ws"
+		return 1
+	fi
+	CO_TOKEN=$(jq -r '.co_token // empty' "$ws") || {
+		collect_err "workspace.json: unreadable"
+		return 1
+	}
+	CO_ENDPOINT=$(jq -r '.co_user_api_endpoint // empty' "$ws") || {
+		collect_err "workspace.json: unreadable"
+		return 1
+	}
+	if [ -z "$CO_TOKEN" ]; then
+		collect_err "workspace.json: missing co_token"
+		return 1
+	fi
+	if [ -z "$CO_ENDPOINT" ]; then
+		collect_err "workspace.json: missing co_user_api_endpoint"
+		return 1
+	fi
+	return 0
 }
 
 load_members() {
 	MEMBERS_FILE=$(mktemp)
+	register_cleanup_file "$MEMBERS_FILE"
 	if [ -n "${DESK_CO_MEMBERS_FILE:-}" ]; then
-		cp "$DESK_CO_MEMBERS_FILE" "$MEMBERS_FILE"
+		if ! cp "$DESK_CO_MEMBERS_FILE" "$MEMBERS_FILE"; then
+			collect_err "co_members: cannot read $DESK_CO_MEMBERS_FILE"
+			return 1
+		fi
 	else
 		# The token goes through a curl config file, never a command line.
 		curlcfg=$(mktemp)
+		register_cleanup_file "$curlcfg"
 		{
 			printf 'silent\n'
 			printf 'fail\n'
@@ -182,15 +231,19 @@ load_members() {
 			printf 'url = "%s"\n' "$CO_ENDPOINT"
 		} >"$curlcfg"
 		if ! curl --config "$curlcfg" --output "$MEMBERS_FILE"; then
-			rm -f "$curlcfg"
-			die "co_members: CO user API unreachable"
+			collect_err "co_members: CO user API unreachable"
+			return 1
 		fi
-		rm -f "$curlcfg"
 	fi
 	if ! jq -e 'type == "array"' "$MEMBERS_FILE" >/dev/null 2>&1; then
-		die "co_members: response is not a JSON array"
+		collect_err "co_members: response is not a JSON array"
+		return 1
 	fi
-	[ "$(jq 'length' "$MEMBERS_FILE")" -gt 0 ] || die "co_members: no members returned"
+	if [ "$(jq 'length' "$MEMBERS_FILE")" -eq 0 ]; then
+		collect_err "co_members: no members returned"
+		return 1
+	fi
+	return 0
 }
 
 role_held() {
@@ -280,16 +333,21 @@ write_secrets() {
 }
 
 write_env() {
-	{
-		printf 'DESK_ROOT=%s\n' "$DESK_ROOT"
-		printf 'FQDN=%s\n' "$(param workspace_fqdn)"
-		printf 'GHCR_NS=%s\n' "$GHCR_NS"
-		printf 'DESK_IMAGE=%s\n' "$(param desk_image)"
-		printf 'DESKPROXY_IMAGE=%s\n' "$(param deskproxy_image)"
-		printf 'FOURCAT_IMAGE=%s\n' "$(param fourcat_image)"
-		printf 'POSTGRES_PASSWORD=%s\n' "$PG_SECRET"
-		printf 'REPO_ROOT=%s\n' "$REPO_ROOT"
-	} >"$REPO_ROOT/deploy/.env"
+	# Written under umask 077 so the password is never world-readable, even
+	# between creation and the chmod; the chmod stays as belt and braces.
+	(
+		umask 077
+		{
+			printf 'DESK_ROOT=%s\n' "$DESK_ROOT"
+			printf 'FQDN=%s\n' "$(param workspace_fqdn)"
+			printf 'GHCR_NS=%s\n' "$GHCR_NS"
+			printf 'DESK_IMAGE=%s\n' "$(param desk_image)"
+			printf 'DESKPROXY_IMAGE=%s\n' "$(param deskproxy_image)"
+			printf 'FOURCAT_IMAGE=%s\n' "$(param fourcat_image)"
+			printf 'POSTGRES_PASSWORD=%s\n' "$PG_SECRET"
+			printf 'REPO_ROOT=%s\n' "$REPO_ROOT"
+		} >"$REPO_ROOT/deploy/.env"
+	)
 	chmod 0600 "$REPO_ROOT/deploy/.env"
 }
 
@@ -313,14 +371,23 @@ install_nginx() {
 	confdir=$SYSROOT/etc/nginx/app-location-conf.d
 	mkdir -p "$confdir"
 	for f in desk.conf fourcat.conf; do
-		sed "s/__GATE__/$GATE/g" "$REPO_ROOT/deploy/nginx/$f" >"$confdir/$f"
+		# Written under umask 077 so the gate secret is never world-readable.
+		(
+			umask 077
+			sed "s/__GATE__/$GATE/g" "$REPO_ROOT/deploy/nginx/$f" >"$confdir/$f"
+		)
 		chmod 0600 "$confdir/$f"
 		if grep -q __GATE__ "$confdir/$f"; then
 			die "nginx: __GATE__ left in $f"
 		fi
 	done
 	if [ "${DESK_NO_NGINX:-0}" != "1" ]; then
-		nginx -t || die "nginx: configuration test failed"
+		if ! nginx -t; then
+			# nginx keeps running the old configuration; do not leave broken
+			# files behind for the next reload.
+			rm -f "$confdir/desk.conf" "$confdir/fourcat.conf"
+			die "nginx: configuration test failed"
+		fi
 		systemctl reload nginx || die "nginx: reload failed"
 	fi
 }
@@ -333,6 +400,7 @@ install_template() {
 	artifact="ddp-comments-template-$platform-$zsv.tar"
 	url="https://github.com/daniellemccool/researchcloud-ddp-comments/releases/download/$pkg/$artifact"
 	tmp=$(mktemp)
+	register_cleanup_file "$tmp"
 	if [ "${DESK_NO_FETCH:-0}" = "1" ]; then
 		[ -n "${DESK_TEMPLATE_FILE:-}" ] || die "template: DESK_NO_FETCH=1 but DESK_TEMPLATE_FILE is unset"
 		cp "$DESK_TEMPLATE_FILE" "$tmp"
@@ -342,13 +410,12 @@ install_template() {
 	got=$(sha256sum "$tmp" | awk '{print $1}')
 	want=$(param template_sha256)
 	if [ "$got" != "$want" ]; then
-		rm -f "$tmp"
 		die "template_sha256: mismatch (expected $want, got $got)"
 	fi
 	dest=$DESK_ROOT/templates/release/$platform-$zsv
 	staging=$(mktemp -d "$DESK_ROOT/templates/release/.stage-XXXXXX")
+	register_cleanup_dir "$staging"
 	tar -xf "$tmp" -C "$staging"
-	rm -f "$tmp"
 	if [ "$(id -u)" = "0" ]; then
 		chown -R 1000:1000 "$staging"
 	fi
@@ -367,34 +434,52 @@ pull_images() {
 	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
 		return 0
 	fi
-	# The two fixed images are read from the compose file, not hardcoded.
+	# The two fixed images are read from the compose file, not hardcoded; a
+	# compose edit that changes their count must fail loudly, not drop a pull.
 	fixed=$(grep -E '^[[:space:]]+image: (postgres|memcached):[A-Za-z0-9._-]+$' "$REPO_ROOT/deploy/compose.yml" | awk '{print $2}')
-	for img in "$(param desk_image)" "$(param deskproxy_image)" "$(param fourcat_image)" $fixed; do
+	# shellcheck disable=SC2086
+	set -- $fixed
+	if [ $# -ne 2 ]; then
+		die "compose: expected exactly 2 fixed images (postgres, memcached), found $#"
+	fi
+	for img in "$(param desk_image)" "$(param deskproxy_image)" "$(param fourcat_image)" "$@"; do
 		docker pull "$img" || die "docker pull failed: $img"
 	done
 }
 
 write_wrapper() {
 	mkdir -p "$SYSROOT/usr/local/bin"
-	{
-		printf '#!/bin/sh\n'
-		printf 'exec docker compose -f %s/deploy/compose.yml exec desk desk "$@"\n' "$REPO_ROOT"
-	} >"$SYSROOT/usr/local/bin/desk"
+	(
+		umask 077
+		{
+			printf '#!/bin/sh\n'
+			printf 'exec docker compose -f "%s/deploy/compose.yml" exec desk desk "$@"\n' "$REPO_ROOT"
+		} >"$SYSROOT/usr/local/bin/desk"
+	)
 	chmod 0755 "$SYSROOT/usr/local/bin/desk"
 }
 
 platform_mode() {
 	parse_plugin_parameters
 	validate_params
-	read_workspace
-	load_members
-	check_roles
+	read_workspace || true
+	if load_members; then
+		check_roles
+	fi
 	if [ -n "$ERRORS" ]; then
 		printf '%s' "$ERRORS" >&2
 		exit 2
 	fi
 	resolve_volume
 	if [ -f "$DESK_ROOT/desk.json" ]; then
+		# ADR-0016: gate on the existing layout version before writing anything.
+		lv=$(jq -r '.layout_version // 0' "$DESK_ROOT/desk.json")
+		case $lv in
+		'' | *[!0-9]*) die "layout_version: desk.json has a non-integer layout_version: $lv" ;;
+		esac
+		if [ "$lv" -gt 1 ]; then
+			die "layout_version: desk.json is layout $lv, this release knows 1"
+		fi
 		MODE=reattach
 		echo "init: reattach: existing desk.json found at $DESK_ROOT/desk.json"
 	else
@@ -422,48 +507,87 @@ platform_mode() {
 }
 
 apply_mode() {
-	# The desk root is found by the auto scan; desk.json then supplies the parameters.
-	scan_single_volume
-	[ -f "$DESK_ROOT/desk.json" ] || die "apply: no desk.json at $DESK_ROOT/desk.json"
-	PARAMS_JSON=$(jq 'del(.desk_root, .layout_version, .package_version, .applied_at)' "$DESK_ROOT/desk.json")
-	validate_params
-	read_workspace
-	load_members
-	check_roles
-	if [ -n "$ERRORS" ]; then
-		printf '%s' "$ERRORS" >&2
-		exit 2
+	# ADR-0017: apply only asks the running desk to re-render. It touches no
+	# file: no .env rewrite, no pulls, no volume scan.
+	render="docker compose -f $REPO_ROOT/deploy/compose.yml exec desk desk render"
+	echo "$render"
+	if [ "${DESK_NO_DOCKER:-0}" != "1" ]; then
+		docker compose -f "$REPO_ROOT/deploy/compose.yml" exec desk desk render ||
+			die "apply: render failed"
 	fi
-	PG_SECRET=$(cat "$DESK_ROOT/secrets/4cat-postgres")
-	write_env
-	write_wrapper
-	pull_images
-	echo "docker compose -f $REPO_ROOT/deploy/compose.yml exec desk desk render"
+}
+
+update_fail() {
+	printf 'init: %s\n' "$*" >&2
+	printf 'init: update: previous repository copy kept at %s\n' "$backup" >&2
+	exit 2
 }
 
 update_mode() {
 	release=$1
+	if ! printf '%s' "$release" | grep -Eq '^v[0-9A-Za-z._-]+$'; then
+		die "update: invalid release name: $release"
+	fi
 	if [ "${DESK_NO_FETCH:-0}" = "1" ]; then
 		die "update: downloads are disabled (DESK_NO_FETCH=1)"
 	fi
 	tmp=$(mktemp -d)
+	register_cleanup_dir "$tmp"
 	url="https://github.com/daniellemccool/researchcloud-ddp-comments/archive/refs/tags/$release.tar.gz"
-	curl --fail --location --silent --output "$tmp/repo.tar.gz" "$url" || die "update: download failed: $url"
+	if ! curl --fail --location --silent --output "$tmp/repo.tar.gz" "$url"; then
+		die "update: download failed: $url"
+	fi
 	mkdir "$tmp/x"
-	tar -xzf "$tmp/repo.tar.gz" -C "$tmp/x"
+	if ! tar -xzf "$tmp/repo.tar.gz" -C "$tmp/x"; then
+		die "update: archive extraction failed"
+	fi
 	new=$(find "$tmp/x" -mindepth 1 -maxdepth 1 -type d)
-	[ -n "$new" ] || die "update: archive layout unexpected"
+	if [ -z "$new" ]; then
+		die "update: archive layout unexpected"
+	fi
+	backup=$REPO_ROOT.old.$$
 	if [ -f "$REPO_ROOT/deploy/.env" ]; then
 		cp "$REPO_ROOT/deploy/.env" "$tmp/env.keep"
 	fi
-	mv "$REPO_ROOT" "$REPO_ROOT.old.$$"
-	mv "$new" "$REPO_ROOT"
+	mv "$REPO_ROOT" "$backup"
+	if ! mv "$new" "$REPO_ROOT"; then
+		mv "$backup" "$REPO_ROOT"
+		die "update: install failed, original restored"
+	fi
 	if [ -f "$tmp/env.keep" ]; then
 		mkdir -p "$REPO_ROOT/deploy"
 		cp "$tmp/env.keep" "$REPO_ROOT/deploy/.env"
 	fi
-	rm -rf "$REPO_ROOT.old.$$" "$tmp"
-	apply_mode
+	# From here on the running (old) lib.sh performs the remaining steps; the
+	# new copy's own init.sh apply path is equivalent and is not re-exec'd.
+	scan_single_volume
+	dj=$DESK_ROOT/desk.json
+	if [ ! -f "$dj" ]; then
+		update_fail "update: no desk.json at $dj"
+	fi
+	desk_image=$(jq -r '.desk_image' "$dj")
+	deskproxy_image=$(jq -r '.deskproxy_image' "$dj")
+	if ! jq --arg di "${desk_image%:*}:$release" --arg dpi "${deskproxy_image%:*}:$release" \
+		--arg release "$release" \
+		'.desk_image = $di | .deskproxy_image = $dpi | .package_version = $release' \
+		"$dj" >"$dj.new"; then
+		update_fail "update: could not rewrite desk.json"
+	fi
+	mv "$dj.new" "$dj"
+	chmod 0644 "$dj"
+	PARAMS_JSON=$(jq 'del(.desk_root, .layout_version, .package_version, .applied_at)' "$dj")
+	PG_SECRET=$(cat "$DESK_ROOT/secrets/4cat-postgres")
+	write_env
+	pull_images
+	up="docker compose -f $REPO_ROOT/deploy/compose.yml up -d"
+	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
+		echo "$up"
+	else
+		docker compose -f "$REPO_ROOT/deploy/compose.yml" up -d ||
+			update_fail "update: compose up failed"
+	fi
+	echo "docker compose -f $REPO_ROOT/deploy/compose.yml exec desk desk render"
+	rm -rf "$backup"
 }
 
 main() {

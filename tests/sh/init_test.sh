@@ -2,32 +2,31 @@
 # Test suite for deploy/init.sh. Run from the repository root or via
 # scripts/check.sh. Each case builds a throwaway DESK_SYSROOT and runs the
 # init script against it with docker, nginx and network fetches disabled.
+# Every case runs in a subshell with `set -e` in effect, so a failing
+# assertion aborts the case and is reported; no assertion can be inert.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 REPO_ROOT=$PWD
+
+# The suite deletes deploy/.env; never run it against a deployed copy.
+case $REPO_ROOT in
+/rsc/*)
+	echo "refusing to run from a deployed copy under /rsc/: $REPO_ROOT" >&2
+	exit 2
+	;;
+esac
+
 FIX=$REPO_ROOT/tests/sh/fixtures
 
 PASS=0
 FAIL=0
 FAILED=()
-CASE_ERR=""
 SYSROOT=""
 RC=0
 OUT=""
 ERR=""
-
-new_sysroot() {
-	SYSROOT=$(mktemp -d)
-	mkdir -p "$SYSROOT/etc/rsc" "$SYSROOT/data/vol1" \
-		"$SYSROOT/etc/nginx/app-location-conf.d" "$SYSROOT/usr/local/bin"
-	cp "$FIX/workspace.json" "$SYSROOT/etc/rsc/workspace.json"
-	export DESK_SYSROOT=$SYSROOT DESK_NO_DOCKER=1 DESK_NO_NGINX=1 DESK_NO_FETCH=1
-	export DESK_TEMPLATE_FILE=$FIX/template.tar DESK_CO_MEMBERS_FILE=$FIX/members.json
-	PLUGIN_PARAMETERS=$(cat "$FIX/params-ok.json")
-	export PLUGIN_PARAMETERS
-	rm -f "$REPO_ROOT/deploy/.env"
-}
+CASE_ERR_FILE=""
 
 run_init() {
 	set +e
@@ -37,67 +36,73 @@ run_init() {
 	ERR=$(cat "$SYSROOT/stderr.txt")
 }
 
+a_fail() {
+	printf '%s\n' "$*" >"$CASE_ERR_FILE"
+	return 1
+}
 a_rc() {
-	[ "$RC" -eq "$1" ] || {
-		CASE_ERR="expected exit $1, got $RC (stderr: $ERR)"
-		return 1
-	}
+	[ "$RC" -eq "$1" ] || a_fail "expected exit $1, got $RC (stderr: $ERR)"
 }
 a_err_has() {
 	case $ERR in
 	*"$1"*) ;;
-	*)
-		CASE_ERR="stderr lacks [$1]: $ERR"
-		return 1
-		;;
+	*) a_fail "stderr lacks [$1]: $ERR" ;;
 	esac
 }
 a_out_has() {
 	case $OUT in
 	*"$1"*) ;;
-	*)
-		CASE_ERR="stdout lacks [$1]: $OUT"
-		return 1
-		;;
+	*) a_fail "stdout lacks [$1]: $OUT" ;;
 	esac
 }
 a_file() {
-	[ -f "$1" ] || {
-		CASE_ERR="missing file: $1"
-		return 1
-	}
+	[ -f "$1" ] || a_fail "missing file: $1"
 }
 a_eq() {
-	[ "$2" = "$3" ] || {
-		CASE_ERR="$1: expected [$3], got [$2]"
-		return 1
-	}
+	[ "$2" = "$3" ] || a_fail "$1: expected [$3], got [$2]"
 }
 a_mode() {
 	local m
 	m=$(stat -c %a "$2")
-	[ "$m" = "$3" ] || {
-		CASE_ERR="$1: mode $m != $3"
-		return 1
-	}
+	[ "$m" = "$3" ] || a_fail "$1: mode $m != $3"
 }
 
 run_case() {
 	local name=$1
 	shift
-	CASE_ERR=""
-	if "$@"; then
+	SYSROOT=$(mktemp -d)
+	mkdir -p "$SYSROOT/etc/rsc" "$SYSROOT/data/vol1" \
+		"$SYSROOT/etc/nginx/app-location-conf.d" "$SYSROOT/usr/local/bin"
+	cp "$FIX/workspace.json" "$SYSROOT/etc/rsc/workspace.json"
+	export DESK_SYSROOT=$SYSROOT DESK_NO_DOCKER=1 DESK_NO_NGINX=1 DESK_NO_FETCH=1
+	export DESK_TEMPLATE_FILE=$FIX/template.tar DESK_CO_MEMBERS_FILE=$FIX/members.json
+	PLUGIN_PARAMETERS=$(cat "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	rm -f "$REPO_ROOT/deploy/.env"
+	local errfile rc
+	errfile=$(mktemp)
+	# The case runs in a subshell as a plain command (not an if condition, where
+	# bash would ignore set -e) with set -e in effect, so any failing assertion
+	# aborts the case and is reported.
+	set +e
+	(
+		set -e
+		CASE_ERR_FILE=$errfile
+		"$@"
+	)
+	rc=$?
+	set -e
+	if [ "$rc" -eq 0 ]; then
 		echo "ok $name"
 		PASS=$((PASS + 1))
 	else
-		echo "FAIL $name: ${CASE_ERR:-failed}"
+		echo "FAIL $name: $(cat "$errfile" 2>/dev/null || echo failed)"
 		FAIL=$((FAIL + 1))
 		FAILED+=("$name")
 	fi
+	rm -f "$errfile"
 	rm -f "$REPO_ROOT/deploy/.env"
-	if [ -n "$SYSROOT" ]; then
-		rm -rf "$SYSROOT"
-	fi
+	rm -rf "$SYSROOT"
 	SYSROOT=""
 }
 
@@ -105,7 +110,6 @@ desk() { printf '%s/data/vol1/desk' "$SYSROOT"; }
 envval() { grep "^$1=" "$REPO_ROOT/deploy/.env" | cut -d= -f2-; }
 
 case_ok_fresh() {
-	new_sysroot
 	run_init
 	a_rc 0
 	local d
@@ -122,15 +126,9 @@ case_ok_fresh() {
 	local gate
 	gate=$(cat "$d/secrets/gate")
 	case $gate in
-	'' | *[!0-9a-f]*)
-		CASE_ERR="gate not lowercase hex: [$gate]"
-		return 1
-		;;
+	'' | *[!0-9a-f]*) a_fail "gate not lowercase hex: [$gate]" ;;
 	esac
-	[ "${#gate}" -eq 32 ] || {
-		CASE_ERR="gate length ${#gate} != 32"
-		return 1
-	}
+	[ "${#gate}" -eq 32 ] || a_fail "gate length ${#gate} != 32"
 	a_mode "4cat-postgres mode" "$d/secrets/4cat-postgres" "600"
 	a_eq "co_token value" "$(cat "$d/secrets/co_token")" "fixture-token-not-real"
 	a_mode "co_token mode" "$d/secrets/co_token" "600"
@@ -138,13 +136,10 @@ case_ok_fresh() {
 	for f in desk.conf fourcat.conf; do
 		a_file "$SYSROOT/etc/nginx/app-location-conf.d/$f"
 		a_mode "nginx $f mode" "$SYSROOT/etc/nginx/app-location-conf.d/$f" "600"
-		grep -q "$gate" "$SYSROOT/etc/nginx/app-location-conf.d/$f" || {
-			CASE_ERR="$f does not contain the gate secret"
-			return 1
-		}
+		grep -q "$gate" "$SYSROOT/etc/nginx/app-location-conf.d/$f" ||
+			a_fail "$f does not contain the gate secret"
 		if grep -q __GATE__ "$SYSROOT/etc/nginx/app-location-conf.d/$f"; then
-			CASE_ERR="$f still contains __GATE__"
-			return 1
+			a_fail "$f still contains __GATE__"
 		fi
 	done
 	a_file "$d/templates/release/tiktok-1.14.2/manifest.json"
@@ -153,18 +148,12 @@ case_ok_fresh() {
 	fi
 	a_eq "pool.csv header" "$(head -n1 "$d/pool.csv")" "id,kind,bucket,note"
 	a_file "$SYSROOT/usr/local/bin/desk"
-	[ -x "$SYSROOT/usr/local/bin/desk" ] || {
-		CASE_ERR="wrapper not executable"
-		return 1
-	}
-	grep -q "deploy/compose.yml" "$SYSROOT/usr/local/bin/desk" || {
-		CASE_ERR="wrapper does not name the compose path"
-		return 1
-	}
+	[ -x "$SYSROOT/usr/local/bin/desk" ] || a_fail "wrapper not executable"
+	grep -q "deploy/compose.yml" "$SYSROOT/usr/local/bin/desk" ||
+		a_fail "wrapper does not name the compose path"
 }
 
 case_python_repr_params() {
-	new_sysroot
 	PLUGIN_PARAMETERS=$(jq -r 'to_entries | map("\u0027\(.key)\u0027: \u0027\(.value)\u0027") | join(", ") | "{" + . + "}"' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
 	run_init
@@ -181,28 +170,18 @@ case_python_repr_params() {
 }
 
 case_placeholder_role() {
-	new_sysroot
 	PLUGIN_PARAMETERS=$(jq -c '.desk_collector_role = "src_co_<fill-me-in>"' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
 	run_init
 	a_rc 2
 	a_err_has "desk_collector_role"
-	[ ! -e "$(desk)" ] || {
-		CASE_ERR="desk root was written"
-		return 1
-	}
-	[ ! -e "$REPO_ROOT/deploy/.env" ] || {
-		CASE_ERR=".env was written"
-		return 1
-	}
-	[ -z "$(ls -A "$SYSROOT/etc/nginx/app-location-conf.d")" ] || {
-		CASE_ERR="nginx files were written"
-		return 1
-	}
+	[ ! -e "$(desk)" ] || a_fail "desk root was written"
+	[ ! -e "$REPO_ROOT/deploy/.env" ] || a_fail ".env was written"
+	[ -z "$(ls -A "$SYSROOT/etc/nginx/app-location-conf.d")" ] ||
+		a_fail "nginx files were written"
 }
 
 case_uppercase_role() {
-	new_sysroot
 	PLUGIN_PARAMETERS=$(jq -c '.desk_collector_role = "Src_co_students"' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
 	run_init
@@ -211,7 +190,6 @@ case_uppercase_role() {
 }
 
 case_crlf_value() {
-	new_sysroot
 	PLUGIN_PARAMETERS=$(jq -c --arg c $'Danielle\r\n' '.desk_contact = $c' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
 	run_init
@@ -220,7 +198,6 @@ case_crlf_value() {
 }
 
 case_quote_in_contact() {
-	new_sysroot
 	PLUGIN_PARAMETERS=$(jq -c --arg c "Danielle O'Brien" '.desk_contact = $c' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
 	run_init
@@ -229,7 +206,6 @@ case_quote_in_contact() {
 }
 
 case_two_failures() {
-	new_sysroot
 	PLUGIN_PARAMETERS=$(jq -c '.desk_collector_role = "src_co_<fill-me-in>" | .desk_idle_seconds = "abc"' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
 	run_init
@@ -239,7 +215,6 @@ case_two_failures() {
 }
 
 case_role_held_by_nobody() {
-	new_sysroot
 	jq 'map(if .username == "dmccool" then .roles = ["src_co_admin"]
 	      elif .username == "dmccool2" then .roles = []
 	      else . end)' "$FIX/members.json" >"$SYSROOT/members.json"
@@ -250,7 +225,6 @@ case_role_held_by_nobody() {
 }
 
 case_admin_role_held_by_nobody() {
-	new_sysroot
 	jq 'map(.roles |= map(select(. != "src_co_admin")))' "$FIX/members.json" >"$SYSROOT/members.json"
 	export DESK_CO_MEMBERS_FILE=$SYSROOT/members.json
 	run_init
@@ -259,7 +233,6 @@ case_admin_role_held_by_nobody() {
 }
 
 case_two_volumes() {
-	new_sysroot
 	mkdir -p "$SYSROOT/data/vol2"
 	run_init
 	a_rc 2
@@ -269,7 +242,6 @@ case_two_volumes() {
 }
 
 case_reattach() {
-	new_sysroot
 	run_init
 	a_rc 0
 	local d gate1 pg1 gate2 pg2 f
@@ -281,24 +253,29 @@ case_reattach() {
 	a_out_has "reattach"
 	gate2=$(cat "$d/secrets/gate")
 	pg2=$(cat "$d/secrets/4cat-postgres")
-	[ "$pg1" = "$pg2" ] || {
-		CASE_ERR="4cat-postgres changed on reattach"
-		return 1
-	}
-	[ "$gate1" != "$gate2" ] || {
-		CASE_ERR="gate did not change on reattach"
-		return 1
-	}
+	[ "$pg1" = "$pg2" ] || a_fail "4cat-postgres changed on reattach"
+	[ "$gate1" != "$gate2" ] || a_fail "gate did not change on reattach"
 	for f in desk.conf fourcat.conf; do
-		grep -q "$gate2" "$SYSROOT/etc/nginx/app-location-conf.d/$f" || {
-			CASE_ERR="$f does not hold the new gate secret"
-			return 1
-		}
+		grep -q "$gate2" "$SYSROOT/etc/nginx/app-location-conf.d/$f" ||
+			a_fail "$f does not hold the new gate secret"
 	done
 }
 
+case_reattach_newer_layout() {
+	run_init
+	a_rc 0
+	local d gate1
+	d=$(desk)
+	gate1=$(cat "$d/secrets/gate")
+	jq '.layout_version = 2' "$d/desk.json" >"$d/desk.json.new"
+	mv "$d/desk.json.new" "$d/desk.json"
+	run_init
+	a_rc 2
+	a_err_has "layout_version"
+	a_eq "gate unchanged" "$(cat "$d/secrets/gate")" "$gate1"
+}
+
 case_sha_mismatch() {
-	new_sysroot
 	PLUGIN_PARAMETERS=$(jq -c '.template_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
 	run_init
@@ -307,29 +284,24 @@ case_sha_mismatch() {
 	local d
 	d=$(desk)
 	if [ -e "$d/templates/release/tiktok-1.14.2" ]; then
-		CASE_ERR="template was extracted despite sha mismatch"
-		return 1
+		a_fail "template was extracted despite sha mismatch"
 	fi
-	[ -z "$(ls -A "$d/templates/release" 2>/dev/null)" ] || {
-		CASE_ERR="templates/release not empty after mismatch"
-		return 1
-	}
+	[ -z "$(ls -A "$d/templates/release" 2>/dev/null)" ] ||
+		a_fail "templates/release not empty after mismatch"
 }
 
 case_apply_mode() {
-	new_sysroot
 	run_init
 	a_rc 0
-	rm -f "$REPO_ROOT/deploy/.env"
+	cp "$REPO_ROOT/deploy/.env" "$SYSROOT/env.before"
 	run_init apply
 	a_rc 0
-	a_file "$REPO_ROOT/deploy/.env"
-	a_eq "env DESK_ROOT after apply" "$(envval DESK_ROOT)" "$(desk)"
 	a_out_has "exec desk desk render"
+	cmp -s "$SYSROOT/env.before" "$REPO_ROOT/deploy/.env" ||
+		a_fail "apply modified deploy/.env"
 }
 
 case_bad_mode() {
-	new_sysroot
 	run_init frobnicate
 	a_rc 2
 	a_err_has "usage"
@@ -346,6 +318,7 @@ run_case role-held-by-nobody case_role_held_by_nobody
 run_case admin-role-held-by-nobody case_admin_role_held_by_nobody
 run_case two-volumes case_two_volumes
 run_case reattach case_reattach
+run_case reattach-newer-layout case_reattach_newer_layout
 run_case sha-mismatch case_sha_mismatch
 run_case apply-mode case_apply_mode
 run_case bad-mode case_bad_mode

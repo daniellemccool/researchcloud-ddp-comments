@@ -1,7 +1,8 @@
 #!/bin/sh
 # Desk init script. The platform plugin runs this once as root, from deploy/,
 # before `docker compose up` on compose.yml. Modes: (none) platform path,
-# `apply` re-applies desk.json, `update <release>` installs a release tag.
+# `apply` asks the running desk to re-render, `update <release>` installs a
+# release tag.
 set -eu
 
 self=$0
@@ -22,5 +23,8 @@ export REPO_ROOT SYSROOT
 
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/lib.sh"
+
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 
 main "$@"
