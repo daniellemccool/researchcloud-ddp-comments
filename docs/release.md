@@ -56,7 +56,9 @@ is `ghcr.io/daniellemccool/researchcloud-ddp-comments`.
    `desk_image=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.1.0-alpha.1`.
    The init script derives the release tag, and so the artifact download URL,
    from the tag part of `desk_image`, so it must equal the git tag. It refuses
-   the artifact if the sha256 does not match.
+   the artifact if the sha256 does not match. Component parameters reach a
+   workspace only at launch and at reattach (a fresh workspace on an existing
+   volume); a running workspace moves to a release with `sudo init.sh update <tag>`.
 
 ## First release only
 
@@ -67,7 +69,9 @@ is not usable until this is done.
 ## The 4CAT mirror
 
 The workflow reads `FOURCAT_IMAGE` from `deploy/.env.example` and mirrors
-that tag. Bumping the pin changes only what the workflow mirrors. A running
-workspace adopts the new version only when `fourcat_image` is changed in the
-component and `init.sh update` is run, which runs 4CAT's database migrations.
+that tag. To change the pin, edit `deploy/.env.example`, tag a release, and
+run `sudo init.sh update <tag>` on each workspace: `update` adopts the pin
+from that release's `deploy/.env.example` and writes it into `desk.json` and
+`.env`, so 4CAT's database migrations run at that update. Also set the
+component default for `fourcat_image` to the new tag, for future launches.
 Bump it deliberately, not as part of an unrelated release.
