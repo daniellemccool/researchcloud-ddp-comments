@@ -1,0 +1,41 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - gocritic
+    - depguard
+  settings:
+    depguard:
+      rules:
+        goproxy:
+          list-mode: lax
+          files:
+            - "!**/cmd/deskproxy/**/*.go"
+          deny:
+            - pkg: github.com/elazarl/goproxy
+              desc: goproxy is imported only by the main package under cmd/deskproxy
+        docker-sdk:
+          list-mode: lax
+          files:
+            - "!**/internal/docker/**/*.go"
+          deny:
+            - pkg: github.com/docker/docker
+              desc: the Docker SDK is imported only in internal/docker
+        os-exec:
+          list-mode: lax
+          files:
+            - "!**/internal/docker/**/*.go"
+          deny:
+            - pkg: os/exec
+              desc: os/exec is allowed only in internal/docker
+        sqlite:
+          list-mode: lax
+          files:
+            - "!**/internal/template/**/*.go"
+          deny:
+            - pkg: modernc.org/sqlite
+              desc: modernc.org/sqlite is imported only in internal/template

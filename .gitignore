@@ -4,4 +4,7 @@ templates/firefox-profile.tar
 __pycache__/
 .venv/
 .superpowers/
-dist/
+/dist/
+/.cache/
+deploy/.resolved.yml
+deploy/.env
