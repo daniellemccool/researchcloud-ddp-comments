@@ -65,10 +65,37 @@ func main() {
 		log.Fatalf("open captures: %v", err)
 	}
 
+	proxy := newProxy(p, meta, out)
+
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "ok\n")
+		})
+		log.Fatal(http.ListenAndServe(*health, mux))
+	}()
+
+	log.Printf("deskproxy platform=%s user=%s session=%s listening on %s", p.Name, *user, *session, *listen)
+	log.Fatal(http.ListenAndServe(*listen, proxy))
+}
+
+// newProxy builds the capture proxy handler.
+//
+// Log format, exactly one stderr line per request, written when the response
+// is handed back: "method host path status bytes". bytes is the body length
+// delivered to the browser; "N+" means N bytes were buffered and more were
+// streamed through (over-cap or interrupted body); "-" means the length is
+// unknown (unmatched chunked response).
+func newProxy(p *platform.Platform, meta Meta, out *recordWriter) *goproxy.ProxyHttpServer {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
-	// Keep upstream bodies encoded so we decode them ourselves and the
-	// browser gets the original bytes.
+	// The browser's own Accept-Encoding is forwarded unchanged (goproxy
+	// would otherwise strip it, and upstream would see a different client
+	// than Firefox). DisableCompression stops the transport adding its own
+	// Accept-Encoding and transparently decoding, so matching bodies arrive
+	// encoded as the browser asked for them; we decode a copy for the record
+	// and the browser gets the original bytes.
+	proxy.KeepAcceptEncoding = true
 	proxy.Tr.DisableCompression = true
 
 	// The browser speaks HTTP/1.1 to the proxy: goproxy's AllowHTTP2 (the
@@ -82,9 +109,9 @@ func main() {
 	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		// Fail closed: refused hosts are answered here, before any upstream
 		// is contacted. CONNECT is allowed (AlwaysMitm dials nothing), so the
-		// 403 is delivered inside the MITM'd TLS session.
+		// 403 is delivered inside the MITM'd TLS session. The canned response
+		// passes through OnResponse below, which logs it.
 		if resp := denyResponse(req); resp != nil {
-			log.Printf("%s %s %s 403 0", req.Method, requestHost(req), req.URL.Path)
 			return req, resp
 		}
 		if rule := matchRule(p, req); rule != nil {
@@ -104,36 +131,29 @@ func main() {
 		if req == nil {
 			return resp
 		}
-		nbytes := resp.ContentLength
+		nbytes := "-"
+		if resp.ContentLength >= 0 {
+			nbytes = strconv.FormatInt(resp.ContentLength, 10)
+		}
 		if m, ok := ctx.UserData.(*matchedCtx); ok && m != nil && resp.Body != nil {
 			nbytes = capture(m.rule, req, resp, meta, out)
 		}
-		log.Printf("%s %s %s %d %d", req.Method, requestHost(req), req.URL.Path, resp.StatusCode, nbytes)
+		log.Printf("%s %s %s %d %s", req.Method, requestHost(req), req.URL.Path, resp.StatusCode, nbytes)
 		return resp
 	})
-
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = io.WriteString(w, "ok\n")
-		})
-		log.Fatal(http.ListenAndServe(*health, mux))
-	}()
-
-	log.Printf("deskproxy platform=%s user=%s session=%s listening on %s", p.Name, *user, *session, *listen)
-	log.Fatal(http.ListenAndServe(*listen, proxy))
+	return proxy
 }
 
 // capture buffers a matching response (at most rule.MaxBodyBytes+1 bytes),
 // writes its records, and puts the original bytes back on resp for the
-// browser. It returns the body length it saw.
-func capture(rule *platform.CaptureRule, req *http.Request, resp *http.Response, meta Meta, out *recordWriter) int64 {
+// browser. It returns the bytes field for the log line.
+func capture(rule *platform.CaptureRule, req *http.Request, resp *http.Response, meta Meta, out *recordWriter) string {
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, rule.MaxBodyBytes+1))
 	if err != nil {
 		// The read failed midway: hand the browser what arrived and the error.
 		resp.Body = &prefixBody{r: io.MultiReader(bytes.NewReader(raw), errReader{err}), c: resp.Body}
-		log.Printf("capture %s: read: %v", rule.Name, err)
-		return int64(len(raw))
+		writeRecords(out, rule, []Record{errorRecord(newRecord(rule, req, resp, meta), "read error: "+err.Error())})
+		return strconv.Itoa(len(raw)) + "+"
 	}
 
 	var recs []Record
@@ -142,7 +162,7 @@ func capture(rule *platform.CaptureRule, req *http.Request, resp *http.Response,
 		resp.Body = &prefixBody{r: io.MultiReader(bytes.NewReader(raw), resp.Body), c: resp.Body}
 		recs = []Record{errorRecord(newRecord(rule, req, resp, meta), "body too large")}
 		writeRecords(out, rule, recs)
-		return int64(len(raw))
+		return strconv.Itoa(len(raw)) + "+"
 	}
 
 	_ = resp.Body.Close()
@@ -160,7 +180,7 @@ func capture(rule *platform.CaptureRule, req *http.Request, resp *http.Response,
 		recs = recordsFor(rule, req, resp, decoded, meta)
 	}
 	writeRecords(out, rule, recs)
-	return int64(len(raw))
+	return strconv.Itoa(len(raw))
 }
 
 func writeRecords(out *recordWriter, rule *platform.CaptureRule, recs []Record) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -45,7 +46,19 @@ func (r RespInfo) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	m["status"] = status
-	return json.Marshal(m)
+	return marshalRaw(m)
+}
+
+// marshalRaw is json.Marshal without HTML escaping, so raw upstream bytes
+// (<, > and & inside item or body) are written exactly as decoded.
+func marshalRaw(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // Record is one line of captures.ndjson. Item or Body holds the upstream
@@ -252,7 +265,7 @@ func (w *recordWriter) write(recs []Record) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for _, r := range recs {
-		b, err := json.Marshal(r)
+		b, err := marshalRaw(r)
 		if err != nil {
 			return err
 		}

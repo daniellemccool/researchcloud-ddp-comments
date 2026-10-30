@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 )
@@ -54,6 +55,13 @@ func TestDecodeGzipBrDeflate(t *testing.T) {
 			return zlib.NewWriter(w)
 		},
 		"br": func(w io.Writer) io.WriteCloser { return brotli.NewWriter(w) },
+		"zstd": func(w io.Writer) io.WriteCloser {
+			zw, err := zstd.NewWriter(w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return zw
+		},
 		"identity": func(w io.Writer) io.WriteCloser {
 			return nopWriteCloser{w}
 		},
@@ -219,13 +227,14 @@ func TestMissingFieldPathIsAbsent(t *testing.T) {
 
 func TestPostIDFromPath(t *testing.T) {
 	rule := &platform.CaptureRule{
-		Name:   "x",
-		Path:   regexpMust(`^/v/(?P<vid>[0-9]+)/c`),
-		PostID: platform.PostIDSpec{From: "path", Group: "vid"},
+		Name:         "x",
+		Path:         regexpMust(`^/v/(?P<vid>[0-9]+)/c`),
+		PostID:       platform.PostIDSpec{From: "path", Group: "vid"},
+		MaxBodyBytes: 1000,
 	}
 	u, _ := url.Parse("https://h.example/v/99/c")
 	recs := recordsFor(rule, &http.Request{Method: "GET", URL: u}, okResponse(), []byte(`{}`), testMeta)
-	if len(recs) != 1 || recs[0].PostID != "99" {
+	if len(recs) != 1 || recs[0].PostID != "99" || recs[0].Error != "" {
 		t.Errorf("got %+v", recs)
 	}
 }
@@ -294,3 +303,33 @@ func TestEmptyItemsArrayYieldsNoRecords(t *testing.T) {
 }
 
 func regexpMust(s string) *regexp.Regexp { return regexp.MustCompile(s) }
+
+func TestWriterDoesNotEscapeHTML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "captures.ndjson")
+	w, err := openRecordWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := `{"text":"a<b> & c"}`
+	rec := Record{
+		Capture:  "x",
+		Item:     json.RawMessage(item),
+		Response: RespInfo{Status: 200, Keep: map[string]json.RawMessage{"k": json.RawMessage(`"x<y&z"`)}},
+	}
+	if err := w.write([]Record{rec}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"item":`+item)) {
+		t.Errorf("item not written byte-for-byte: %s", b)
+	}
+	if !bytes.Contains(b, []byte(`"k":"x<y&z"`)) {
+		t.Errorf("response keep escaped: %s", b)
+	}
+	if bytes.Count(b, []byte("\n")) != 1 || !bytes.HasSuffix(b, []byte("\n")) {
+		t.Errorf("want exactly one terminating newline: %q", b)
+	}
+}

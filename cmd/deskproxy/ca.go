@@ -15,7 +15,8 @@ import (
 )
 
 // ensureCA loads the CA from certPath/keyPath, or generates a fresh 2048-bit
-// RSA self-signed CA and writes it there on first run.
+// RSA self-signed CA and writes it there on first run. If either file is
+// missing both are regenerated together, so cert and key always match.
 func ensureCA(certPath, keyPath string) (*tls.Certificate, error) {
 	if fileExists(certPath) && fileExists(keyPath) {
 		return loadCA(certPath, keyPath)
@@ -54,6 +55,13 @@ func ensureCA(certPath, keyPath string) (*tls.Certificate, error) {
 	}
 	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
 		return nil, fmt.Errorf("write %s: %w", keyPath, err)
+	}
+	// WriteFile keeps the mode of a file that already exists.
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		return nil, fmt.Errorf("chmod %s: %w", keyPath, err)
+	}
+	if err := os.Chmod(certPath, 0o644); err != nil {
+		return nil, fmt.Errorf("chmod %s: %w", certPath, err)
 	}
 	return loadCA(certPath, keyPath)
 }

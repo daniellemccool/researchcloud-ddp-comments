@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 // ErrTooLarge means a body, once decoded, is longer than the rule allows.
@@ -30,8 +31,24 @@ func decodeBody(encoding string, r io.Reader, max int64) ([]byte, error) {
 		}
 	}
 
+	var closers []func()
+	defer func() {
+		for _, c := range closers {
+			c()
+		}
+	}()
+
 	// Encodings are listed in the order applied, so undo them in reverse.
 	for i := len(codings) - 1; i >= 0; i-- {
+		if codings[i] == "zstd" {
+			zr, err := zstd.NewReader(r, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(64<<20))
+			if err != nil {
+				return nil, err
+			}
+			closers = append(closers, zr.Close)
+			r = zr
+			continue
+		}
 		next, err := wrapDecoder(codings[i], r)
 		if err != nil {
 			return nil, err
