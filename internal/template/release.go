@@ -2,7 +2,8 @@
 // Firefox profile: it sanitises a copy to an explicit allowlist, verifies the
 // Zeeschuimer store holds no captured data, and writes a deterministic tar
 // with its manifest and sha256 (ADR-0012; profiles come only from a verified
-// release template, ADR-0011).
+// release template, ADR-0011). The behavioural reference is the legacy Python
+// tool desk/desklib/template.py, ported function by function.
 package template
 
 import (
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
@@ -52,9 +54,13 @@ var (
 // writes <out>/ddp-comments-template-<platform>-<zsVersion>.tar plus the
 // sibling .sha256 file ("<hex>  <filename>\n"). It returns the manifest,
 // which is also stored inside the tar as manifest.json. It refuses with
-// ErrLocked when profile/lock or profile/.parentlock exists.
+// ErrLocked when profile/lock or profile/.parentlock exists, or when a
+// non-empty -wal/-shm sits beside an IndexedDB database in the original.
 func Release(profile string, p *platform.Platform, zsVersion, out string) (Manifest, error) {
 	if err := checkUnlocked(profile); err != nil {
+		return Manifest{}, err
+	}
+	if err := checkOriginalSideFiles(profile); err != nil {
 		return Manifest{}, err
 	}
 	tmp, err := os.MkdirTemp("", "ddp-template-")
@@ -67,10 +73,11 @@ func Release(profile string, p *platform.Platform, zsVersion, out string) (Manif
 	if err := copyTree(profile, work); err != nil {
 		return Manifest{}, err
 	}
-	if err := Sanitise(work, p); err != nil {
+	builtOn := time.Now().UTC().Format(time.RFC3339)
+	if err := Sanitise(work, p, zsVersion, builtOn); err != nil {
 		return Manifest{}, err
 	}
-	if _, err := Verify(work); err != nil {
+	if _, err := Verify(work, p, zsVersion); err != nil {
 		return Manifest{}, err
 	}
 
@@ -87,7 +94,7 @@ func Release(profile string, p *platform.Platform, zsVersion, out string) (Manif
 		Platform:    p.Name,
 		Zeeschuimer: zsVersion,
 		Modules:     p.ZeeschuimerModules,
-		BuiltOn:     time.Now().UTC().Format(time.RFC3339),
+		BuiltOn:     builtOn,
 	}
 	if err := writeTar(work, tmpTar, man); err != nil {
 		return Manifest{}, err
@@ -112,6 +119,41 @@ func checkUnlocked(profile string) error {
 		path := filepath.Join(profile, name)
 		if _, err := os.Lstat(path); err == nil {
 			return fmt.Errorf("%w: %s exists; stop Firefox before releasing", ErrLocked, path)
+		}
+	}
+	return nil
+}
+
+// checkOriginalSideFiles refuses a profile whose IndexedDB still has a
+// non-empty write-ahead log or shared-memory file: Firefox was not shut down
+// cleanly. Zero-byte side files are tolerated and dropped by the rebuild.
+func checkOriginalSideFiles(profile string) error {
+	base := filepath.Join(profile, "storage", "default")
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "moz-extension+++") {
+			continue
+		}
+		idbDir := filepath.Join(base, e.Name(), "idb")
+		fis, err := os.ReadDir(idbDir)
+		if err != nil {
+			continue
+		}
+		for _, fi := range fis {
+			if !strings.HasSuffix(fi.Name(), "-wal") && !strings.HasSuffix(fi.Name(), "-shm") {
+				continue
+			}
+			info, err := fi.Info()
+			if err != nil {
+				continue
+			}
+			if info.Size() > 0 {
+				return fmt.Errorf("%w: %s is not empty; Firefox was not shut down cleanly", ErrLocked,
+					filepath.Join("storage", "default", e.Name(), "idb", fi.Name()))
+			}
 		}
 	}
 	return nil

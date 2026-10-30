@@ -10,20 +10,24 @@ import (
 	_ "modernc.org/sqlite" // registers the "sqlite" driver; depguard allows it only here
 )
 
-// zeeschuimerStores are the object stores of Zeeschuimer's IndexedDB database.
-var zeeschuimerStores = []string{"items", "uploads", "nav", "settings"}
+// idbDB is one IndexedDB database file found under an extension directory.
+type idbDB struct {
+	extDir string // e.g. "moz-extension+++<uuid>"
+	file   string // absolute path of the sqlite file
+	name   string // the database name recorded in its `database` table
+	counts map[string]int
+}
 
-// findStore locates the one extension directory under storage/default whose
-// IndexedDB holds Zeeschuimer's object stores. It returns the extension
-// directory relative to dir and the sqlite file holding the stores.
-func findStore(dir string) (extRel, idbFile string, err error) {
+// idbDatabases lists every IndexedDB sqlite file under storage/default's
+// moz-extension+++* directories, with its database name and object-store row
+// counts. Files that are not IndexedDB databases are skipped.
+func idbDatabases(dir string) ([]idbDB, error) {
 	base := filepath.Join(dir, "storage", "default")
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		return "", "", ErrNoStore
+		return nil, ErrNoStore
 	}
-	var foundExt, foundFile string
-	count := 0
+	var out []idbDB
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "moz-extension+++") {
 			continue
@@ -38,162 +42,147 @@ func findStore(dir string) (extRel, idbFile string, err error) {
 				continue
 			}
 			p := filepath.Join(idbDir, fi.Name())
-			ok, err := hasZeeschuimerStores(p)
-			if err != nil || !ok {
+			name, counts, ok := readIDB(p)
+			if !ok {
 				continue
 			}
-			count++
-			foundExt = "storage/default/" + e.Name()
-			foundFile = p
-			break
+			out = append(out, idbDB{extDir: e.Name(), file: p, name: name, counts: counts})
 		}
 	}
-	switch {
-	case count == 0:
-		return "", "", ErrNoStore
-	case count > 1:
-		return "", "", ErrAmbiguousStore
-	}
-	return foundExt, foundFile, nil
+	return out, nil
 }
 
-// hasZeeschuimerStores reports whether the sqlite file at path is an IndexedDB
-// database holding all of Zeeschuimer's object stores.
-func hasZeeschuimerStores(path string) (bool, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = db.Close() }()
-	rows, err := db.Query("SELECT name FROM object_store")
-	if err != nil {
-		return false, nil // not an IndexedDB file
-	}
-	defer func() { _ = rows.Close() }()
-	names := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return false, err
+// readIDB reads the database name and object-store counts of an IndexedDB
+// file through a temp copy, so the original is never touched.
+func readIDB(path string) (string, map[string]int, bool) {
+	var name string
+	counts := map[string]int{}
+	err := withSnapshot(path, func(db *sql.DB) error {
+		if err := db.QueryRow("SELECT name FROM database").Scan(&name); err != nil {
+			return err
 		}
-		names[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	for _, s := range zeeschuimerStores {
-		if !names[s] {
-			return false, nil
+		rows, err := db.Query("SELECT s.name, COUNT(d.object_store_id) FROM object_store s " +
+			"LEFT JOIN object_data d ON d.object_store_id = s.id GROUP BY s.id, s.name")
+		if err != nil {
+			return err
 		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var n string
+			var c int
+			if err := rows.Scan(&n, &c); err != nil {
+				return err
+			}
+			counts[n] = c
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return "", nil, false
 	}
-	return true, nil
+	return name, counts, true
 }
 
-// countStores counts the object_data rows of each object store in the
-// Zeeschuimer IndexedDB file.
-func countStores(idbFile string) (Counts, error) {
-	db, err := sql.Open("sqlite", "file:"+idbFile+"?mode=ro")
-	if err != nil {
-		return Counts{}, err
-	}
-	defer func() { _ = db.Close() }()
-	rows, err := db.Query("SELECT s.name, COUNT(d.object_store_id) FROM object_store s " +
-		"LEFT JOIN object_data d ON d.object_store_id = s.id GROUP BY s.id, s.name")
-	if err != nil {
-		return Counts{}, err
-	}
-	defer func() { _ = rows.Close() }()
-	var c Counts
-	for rows.Next() {
-		var name string
-		var n int
-		if err := rows.Scan(&name, &n); err != nil {
-			return Counts{}, err
-		}
-		switch name {
-		case "items":
-			c.Items = n
-		case "uploads":
-			c.Uploads = n
-		case "nav":
-			c.Nav = n
-		case "settings":
-			c.Settings = n
-		}
-	}
-	return c, rows.Err()
-}
-
-// emptyNavStore deletes every row of the nav object store (and its index
-// rows), then rebuilds the file with VACUUM INTO so the deleted rows leave no
-// trace, and replaces the original.
-func emptyNavStore(idbFile string) error {
-	db, err := sql.Open("sqlite", idbFile)
+// withSnapshot copies a sqlite file (with its -wal/-shm siblings) to a temp
+// dir and runs fn on the copy.
+func withSnapshot(path string, fn func(*sql.DB) error) error {
+	tmpDir, err := os.MkdirTemp("", "ddp-snap-")
 	if err != nil {
 		return err
 	}
-	// Firefox's IndexedDB triggers call the browser-internal update_refcount
-	// function; while they exist, plain SQLite cannot even prepare a statement
-	// on object_data. Drop them for the delete and recreate them afterwards
-	// so the rebuilt file keeps Firefox's schema.
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	dst := filepath.Join(tmpDir, "db.sqlite")
+	if err := copyFile(path, dst, 0o644); err != nil {
+		return err
+	}
+	for _, side := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + side); err == nil {
+			if err := copyFile(path+side, dst+side, 0o644); err != nil {
+				return err
+			}
+		}
+	}
+	db, err := sql.Open("sqlite", dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	return fn(db)
+}
+
+// rebuildIDB rewrites an IndexedDB file so deleted rows (free pages, WAL)
+// leave no trace: it optionally clears the nav store, checkpoints the WAL,
+// rebuilds the file with VACUUM INTO a sibling temp file, and replaces the
+// original.
+func rebuildIDB(path string, clearNav bool) error {
+	tmp := path + ".rebuilt"
+	_ = os.Remove(tmp)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	if clearNav {
+		if err := clearNavRows(db); err != nil {
+			_ = db.Close()
+			return err
+		}
+	}
+	_, _ = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	query := "VACUUM INTO '" + strings.ReplaceAll(tmp, "'", "''") + "'"
+	if _, err := db.Exec(query); err != nil {
+		_ = db.Close()
+		return err
+	}
+	if err := db.Close(); err != nil {
+		return err
+	}
+	for _, side := range []string{"-wal", "-shm", "-journal"} {
+		_ = os.Remove(path + side)
+	}
+	return os.Rename(tmp, path)
+}
+
+// clearNavRows deletes every row of the nav object store and its index rows.
+// Firefox's triggers on those tables call the browser-internal
+// update_refcount function, which plain SQLite cannot even prepare a
+// statement against, so they are dropped for the delete and recreated
+// afterwards; file rows left without a referencing object_data row are
+// deleted as well.
+func clearNavRows(db *sql.DB) error {
 	triggers, err := readTriggers(db)
 	if err != nil {
-		_ = db.Close()
 		return err
 	}
 	for _, tr := range triggers {
 		if _, err := db.Exec("DROP TRIGGER " + quoteIdent(tr.name)); err != nil {
-			_ = db.Close()
 			return err
 		}
 	}
 	if _, err := db.Exec("DELETE FROM object_data WHERE object_store_id = " +
 		"(SELECT id FROM object_store WHERE name = 'nav')"); err != nil {
-		_ = db.Close()
 		return err
 	}
 	for _, table := range []string{"index_data", "unique_index_data"} {
-		var one int
-		err := db.QueryRow("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&one)
-		if err != nil {
-			continue // table absent
+		if !tableExists(db, table) {
+			continue
 		}
 		if _, err := db.Exec("DELETE FROM " + table + " WHERE object_store_id = " +
 			"(SELECT id FROM object_store WHERE name = 'nav')"); err != nil {
-			_ = db.Close()
+			return err
+		}
+	}
+	if tableExists(db, "file") {
+		if _, err := db.Exec("DELETE FROM file WHERE NOT EXISTS (SELECT 1 FROM object_data " +
+			"WHERE (',' || file_ids || ',') LIKE ('%,' || id || ',%'))"); err != nil {
 			return err
 		}
 	}
 	for _, tr := range triggers {
 		if _, err := db.Exec(tr.sql); err != nil {
-			_ = db.Close()
 			return err
 		}
 	}
-	tmpDir, err := os.MkdirTemp("", "ddp-idb-")
-	if err != nil {
-		_ = db.Close()
-		return err
-	}
-	rebuilt := filepath.Join(tmpDir, "rebuilt.sqlite")
-	query := "VACUUM INTO '" + strings.ReplaceAll(rebuilt, "'", "''") + "'"
-	if _, err := db.Exec(query); err != nil {
-		_ = db.Close()
-		_ = os.RemoveAll(tmpDir)
-		return err
-	}
-	if err := db.Close(); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return err
-	}
-	for _, side := range []string{"-wal", "-shm", "-journal"} {
-		_ = os.Remove(idbFile + side)
-	}
-	if err := os.Rename(rebuilt, idbFile); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return err
-	}
-	return os.RemoveAll(tmpDir)
+	return nil
 }
 
 // readTriggers returns the triggers on the tables the nav delete touches.
@@ -215,6 +204,12 @@ func readTriggers(db *sql.DB) ([]struct{ name, sql string }, error) {
 	return out, rows.Err()
 }
 
+// tableExists reports whether the sqlite connection has the named table.
+func tableExists(db *sql.DB, name string) bool {
+	var one int
+	return db.QueryRow("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", name).Scan(&one) == nil
+}
+
 // quoteIdent quotes an SQL identifier.
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
@@ -226,7 +221,7 @@ func checkIDBWal(dir string) error {
 	base := filepath.Join(dir, "storage", "default")
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		return nil // no storage/default: findStore reports ErrNoStore
+		return nil // no storage/default: idbDatabases reports ErrNoStore
 	}
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "moz-extension+++") {
@@ -239,7 +234,8 @@ func checkIDBWal(dir string) error {
 		}
 		for _, fi := range fis {
 			if strings.HasSuffix(fi.Name(), "-wal") {
-				return fmt.Errorf("%w: %s", ErrLocked, filepath.Join("storage", "default", e.Name(), "idb", fi.Name()))
+				return fmt.Errorf("%w: %s", ErrLocked,
+					filepath.Join("storage", "default", e.Name(), "idb", fi.Name()))
 			}
 		}
 	}

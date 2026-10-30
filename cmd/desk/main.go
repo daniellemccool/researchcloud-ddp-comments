@@ -42,6 +42,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: desk serve --desk-root /desk [--repo /repo] [--listen :8110] [--container-listen :8111]")
+	fmt.Fprintln(os.Stderr, "       desk template release --profile DIR --platform NAME --platforms-dir DIR --zeeschuimer VERSION --out DIR")
 }
 
 func serve(args []string) error {

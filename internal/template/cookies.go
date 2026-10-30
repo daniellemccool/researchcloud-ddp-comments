@@ -41,6 +41,7 @@ func filterCookies(path string, keep []platform.CookieSpec) error {
 		_ = db.Close()
 		return err
 	}
+	_, _ = db.Exec("PRAGMA journal_mode=DELETE")
 	if _, err := db.Exec("VACUUM"); err != nil {
 		_ = db.Close()
 		return err

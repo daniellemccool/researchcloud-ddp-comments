@@ -25,8 +25,7 @@ func templateCmd(args []string) int {
 	zsVersion := fs.String("zeeschuimer", "", "Zeeschuimer version (required)")
 	out := fs.String("out", "", "output directory for the tar and its .sha256 (required)")
 	if err := fs.Parse(args[1:]); err != nil {
-		templateUsage()
-		return 2
+		return 2 // the flag set already printed the error and its usage
 	}
 	if *profile == "" || *platformName == "" || *platformsDir == "" || *zsVersion == "" || *out == "" || fs.NArg() != 0 {
 		templateUsage()

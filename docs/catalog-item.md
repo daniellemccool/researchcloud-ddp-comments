@@ -43,7 +43,7 @@ Item overwrites (spec §5.1):
 
 | Platform | Zeeschuimer | Artifact | SHA256 | Built on |
 |---|---|---|---|---|
-| tiktok | 1.14.2 | `ddp-comments-template-tiktok-1.14.2.tar` | `c4f12ac12356906a94d202fc67020a5abffb576e77a7e6034290dee6ef2935c9` | 2026-10-30, from the sandbox `state/firefox/_template` profile |
+| tiktok | 1.14.2 | `ddp-comments-template-tiktok-1.14.2.tar` | `026210019e2ad02eb33ce9f81afd63a54792ca541a0dcdd52014dc8f1ad257a2` | 2026-10-30, from the sandbox `state/firefox/_template` profile |
 
 ## Snags
 
