@@ -39,3 +39,30 @@ func TestEnsureCAFixesKeyMode(t *testing.T) {
 		t.Error("existing CA was regenerated")
 	}
 }
+
+func TestEnsureCAChmodsExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "ca.pem")
+	keyPath := filepath.Join(dir, "ca-key.pem")
+	if _, err := ensureCA(certPath, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(certPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureCA(certPath, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]os.FileMode{keyPath: 0o600, certPath: 0o644} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != want {
+			t.Errorf("%s mode %v, want %v", path, fi.Mode().Perm(), want)
+		}
+	}
+}

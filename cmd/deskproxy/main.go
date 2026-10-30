@@ -84,8 +84,10 @@ func main() {
 // Log format, exactly one stderr line per request, written when the response
 // is handed back: "method host path status bytes". bytes is the body length
 // delivered to the browser; "N+" means N bytes were buffered and more were
-// streamed through (over-cap or interrupted body); "-" means the length is
-// unknown (unmatched chunked response).
+// streamed through (over-cap body); "N!" means the upstream read failed after
+// N bytes and the browser gets those N bytes and then the error; "-" means
+// the length is unknown (unmatched chunked response). " write-error" is
+// appended when the record could not be written, so it still is one line.
 func newProxy(p *platform.Platform, meta Meta, out *recordWriter) *goproxy.ProxyHttpServer {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
@@ -152,8 +154,8 @@ func capture(rule *platform.CaptureRule, req *http.Request, resp *http.Response,
 	if err != nil {
 		// The read failed midway: hand the browser what arrived and the error.
 		resp.Body = &prefixBody{r: io.MultiReader(bytes.NewReader(raw), errReader{err}), c: resp.Body}
-		writeRecords(out, rule, []Record{errorRecord(newRecord(rule, req, resp, meta), "read error: "+err.Error())})
-		return strconv.Itoa(len(raw)) + "+"
+		sfx := writeRecords(out, []Record{errorRecord(newRecord(rule, req, resp, meta), "read error: "+err.Error())})
+		return strconv.Itoa(len(raw)) + "!" + sfx
 	}
 
 	var recs []Record
@@ -161,8 +163,7 @@ func capture(rule *platform.CaptureRule, req *http.Request, resp *http.Response,
 		// Too big: stream the rest through to the browser, keep nothing.
 		resp.Body = &prefixBody{r: io.MultiReader(bytes.NewReader(raw), resp.Body), c: resp.Body}
 		recs = []Record{errorRecord(newRecord(rule, req, resp, meta), "body too large")}
-		writeRecords(out, rule, recs)
-		return strconv.Itoa(len(raw)) + "+"
+		return strconv.Itoa(len(raw)) + "+" + writeRecords(out, recs)
 	}
 
 	_ = resp.Body.Close()
@@ -179,14 +180,17 @@ func capture(rule *platform.CaptureRule, req *http.Request, resp *http.Response,
 	default:
 		recs = recordsFor(rule, req, resp, decoded, meta)
 	}
-	writeRecords(out, rule, recs)
-	return strconv.Itoa(len(raw))
+	return strconv.Itoa(len(raw)) + writeRecords(out, recs)
 }
 
-func writeRecords(out *recordWriter, rule *platform.CaptureRule, recs []Record) {
+// writeRecords returns the log suffix for the request line: " write-error"
+// when the records could not be written (the single log line carries it, the
+// error itself is not logged), else "".
+func writeRecords(out *recordWriter, recs []Record) string {
 	if err := out.write(recs); err != nil {
-		log.Printf("capture %s: write: %v", rule.Name, err)
+		return " write-error"
 	}
+	return ""
 }
 
 // prefixBody reads r and closes the original upstream body.

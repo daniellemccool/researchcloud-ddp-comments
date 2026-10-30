@@ -19,6 +19,9 @@ import (
 // missing both are regenerated together, so cert and key always match.
 func ensureCA(certPath, keyPath string) (*tls.Certificate, error) {
 	if fileExists(certPath) && fileExists(keyPath) {
+		if err := fixModes(certPath, keyPath); err != nil {
+			return nil, err
+		}
 		return loadCA(certPath, keyPath)
 	}
 
@@ -50,18 +53,13 @@ func ensureCA(certPath, keyPath string) (*tls.Certificate, error) {
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
-		return nil, fmt.Errorf("write %s: %w", certPath, err)
-	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+	// Write through a fresh 0600 temp file and rename, so the key never
+	// lands in an old, more permissive inode.
+	if err := writeAtomic(keyPath, keyPEM, 0o600); err != nil {
 		return nil, fmt.Errorf("write %s: %w", keyPath, err)
 	}
-	// WriteFile keeps the mode of a file that already exists.
-	if err := os.Chmod(keyPath, 0o600); err != nil {
-		return nil, fmt.Errorf("chmod %s: %w", keyPath, err)
-	}
-	if err := os.Chmod(certPath, 0o644); err != nil {
-		return nil, fmt.Errorf("chmod %s: %w", certPath, err)
+	if err := writeAtomic(certPath, certPEM, 0o644); err != nil {
+		return nil, fmt.Errorf("write %s: %w", certPath, err)
 	}
 	return loadCA(certPath, keyPath)
 }
@@ -77,4 +75,38 @@ func loadCA(certPath, keyPath string) (*tls.Certificate, error) {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// fixModes makes an existing CA readable as intended: key 0600, cert 0644.
+func fixModes(certPath, keyPath string) error {
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		return fmt.Errorf("chmod %s: %w", keyPath, err)
+	}
+	if err := os.Chmod(certPath, 0o644); err != nil {
+		return fmt.Errorf("chmod %s: %w", certPath, err)
+	}
+	return nil
+}
+
+// writeAtomic writes data to a 0600 temp file in path's directory, sets mode
+// and renames it over path.
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-"+filepath.Base(path)+"-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }() // no-op after a successful rename
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -331,5 +332,37 @@ func TestWriterDoesNotEscapeHTML(t *testing.T) {
 	}
 	if bytes.Count(b, []byte("\n")) != 1 || !bytes.HasSuffix(b, []byte("\n")) {
 		t.Errorf("want exactly one terminating newline: %q", b)
+	}
+}
+
+func TestZstdBombIsRefusedWithoutExpanding(t *testing.T) {
+	const expanded = 256 << 20
+	var buf bytes.Buffer
+	zw, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := make([]byte, 1<<20)
+	for i := 0; i < expanded>>20; i++ {
+		if _, err := zw.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() > 128<<10 {
+		t.Fatalf("test frame is %d bytes, want a small in-memory input", buf.Len())
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err = decodeBody("zstd", bytes.NewBuffer(buf.Bytes()), 1000) // *bytes.Buffer is the eager-decode input
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Errorf("got %v, want ErrTooLarge", err)
+	}
+	if grown := after.TotalAlloc - before.TotalAlloc; grown > 64<<20 {
+		t.Errorf("decoder allocated %d MB for a %d MB bomb", grown>>20, expanded>>20)
 	}
 }

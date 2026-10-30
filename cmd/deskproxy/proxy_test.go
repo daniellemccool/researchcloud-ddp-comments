@@ -43,6 +43,13 @@ func TestLiveProxyOverHTTP(t *testing.T) {
 	big := `{"comments":[` + strings.Repeat(`{"id":1},`, 20) + `{"id":2}]}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAE = r.Header.Get("Accept-Encoding")
+		if strings.HasPrefix(r.URL.Path, "/api/cut") {
+			// Announce 50 bytes, send 10, then drop the connection.
+			w.Header().Set("Content-Length", "50")
+			_, _ = io.WriteString(w, small[:10])
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler)
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/big") {
 			_, _ = io.WriteString(w, big)
 			return
@@ -120,6 +127,15 @@ func TestLiveProxyOverHTTP(t *testing.T) {
 		t.Errorf("small request logged %d lines", lines)
 	}
 
+	// (d) an interrupted upstream: the "!" marker, still one line.
+	if _, err := client.Get("http://capture.example/api/cut"); err == nil {
+		// headers may arrive before the cut; the body read is not needed
+		t.Log("cut response delivered headers")
+	}
+	if all := logs.String(); !strings.Contains(all, "/api/cut 200 10!\n") {
+		t.Errorf("interrupted request not logged with the ! marker:\n%s", all)
+	}
+
 	// (c) a refused host logs once too.
 	req, _ := http.NewRequest("GET", "http://other.desk/x", nil)
 	before := strings.Count(logs.String(), "\n")
@@ -141,13 +157,35 @@ func TestLiveProxyOverHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	recs := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(recs) != 2 {
-		t.Fatalf("want 2 records, got %d: %s", len(recs), data)
+	if len(recs) != 3 {
+		t.Fatalf("want 3 records, got %d: %s", len(recs), data)
 	}
 	if !strings.Contains(recs[0], `"error":"body too large"`) || strings.Contains(recs[0], `"item"`) {
 		t.Errorf("record 0: %s", recs[0])
 	}
 	if !strings.Contains(recs[1], `"item":{"id":1,"t":"a<b"}`) || !strings.Contains(recs[1], `"cursor":5`) {
 		t.Errorf("record 1: %s", recs[1])
+	}
+}
+
+func TestWriteFailureFoldsIntoLogSuffix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "captures.ndjson")
+	out, err := openRecordWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = out.f.Close() // every write now fails
+	rule := &platform.CaptureRule{Name: "c", Path: regexpMust(`^/`), Items: "comments", MaxBodyBytes: 100}
+	u, _ := url.Parse("http://capture.example/api")
+	req := &http.Request{Method: "GET", URL: u}
+	body := `{"comments":[{"id":1}]}`
+	resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+	got := capture(rule, req, resp, testMeta, out)
+	if got != "23 write-error" {
+		t.Errorf("got %q", got)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if string(b) != body {
+		t.Errorf("browser body %q", b)
 	}
 }

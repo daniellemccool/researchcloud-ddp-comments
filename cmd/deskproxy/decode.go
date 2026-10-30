@@ -19,7 +19,9 @@ var ErrTooLarge = errors.New("body too large")
 
 // decodeBody reads r, undoes the HTTP Content-Encoding and returns the
 // decoded bytes. It fails with ErrTooLarge as soon as the decoded body would
-// exceed max bytes, so a compressed bomb is never fully expanded. An encoding
+// exceed max bytes: every coding is read through a LimitReader, and the zstd
+// decoder is built streaming and with its own memory cap, because klauspost
+// decodes a small in-memory input eagerly and unbounded otherwise. An encoding
 // it does not know is an error; the caller keeps the original bytes for the
 // browser either way.
 func decodeBody(encoding string, r io.Reader, max int64) ([]byte, error) {
@@ -41,7 +43,10 @@ func decodeBody(encoding string, r io.Reader, max int64) ([]byte, error) {
 	// Encodings are listed in the order applied, so undo them in reverse.
 	for i := len(codings) - 1; i >= 0; i-- {
 		if codings[i] == "zstd" {
-			zr, err := zstd.NewReader(r, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(64<<20))
+			zr, err := zstd.NewReader(r,
+				zstd.WithDecoderConcurrency(1),
+				zstd.WithDecodeBuffersBelow(0), // always stream, never decode eagerly
+				zstd.WithDecoderMaxWindow(32<<20))
 			if err != nil {
 				return nil, err
 			}
@@ -57,6 +62,9 @@ func decodeBody(encoding string, r io.Reader, max int64) ([]byte, error) {
 	}
 
 	out, err := io.ReadAll(io.LimitReader(r, max+1))
+	if errors.Is(err, zstd.ErrDecoderSizeExceeded) {
+		return nil, ErrTooLarge
+	}
 	if err != nil {
 		return nil, err
 	}
