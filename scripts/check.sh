@@ -14,6 +14,8 @@ LEGACY_SHELL=(scripts/e2e.sh scripts/lib.sh scripts/test-all.sh)
 
 GOLANGCI_LINT_VERSION="v2.12.2"
 GO_IMAGE="golang:1.26"
+# Toolchain the native go layer pins; its major.minor must match GO_IMAGE.
+GO_TOOLCHAIN="go1.26.3"
 ALL_LAYERS=(adr shell go compose shape)
 
 need() {
@@ -49,8 +51,9 @@ layer_shell() {
 
 # Run the go steps in the current environment.
 go_steps() {
-	local unformatted
-	unformatted="$(go list -f '{{.Dir}}' ./... | xargs -r gofmt -l)"
+	local unformatted gofmt_bin
+	gofmt_bin="$(go env GOROOT)/bin/gofmt"
+	unformatted="$(go list -f '{{.Dir}}' ./... | xargs -r "$gofmt_bin" -l)"
 	if [ -n "$unformatted" ]; then
 		echo "gofmt: files need formatting:" >&2
 		echo "$unformatted" >&2
@@ -66,6 +69,7 @@ layer_go() {
 	fi
 	if command -v go >/dev/null 2>&1; then
 		need golangci-lint || return 1
+		export GOTOOLCHAIN="$GO_TOOLCHAIN"
 		go_steps
 		return
 	fi
