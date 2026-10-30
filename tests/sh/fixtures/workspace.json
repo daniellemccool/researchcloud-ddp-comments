@@ -1,0 +1,6 @@
+{
+  "co_id": "11111111-2222-3333-4444-555555555555",
+  "co_name": "Example CO",
+  "co_token": "fixture-token-not-real",
+  "co_user_api_endpoint": "https://example.invalid/co/users"
+}

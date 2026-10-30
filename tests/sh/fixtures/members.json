@@ -1,0 +1,17 @@
+[
+  {
+    "username": "dmccool",
+    "integer_id": 1001,
+    "roles": ["src_co_admin", "src_co_students"]
+  },
+  {
+    "username": "dmccool2",
+    "integer_id": 1002,
+    "roles": ["src_co_students"]
+  },
+  {
+    "username": "nobody3",
+    "integer_id": 1003,
+    "roles": []
+  }
+]

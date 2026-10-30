@@ -35,7 +35,7 @@ layer_shell() {
 	need shellcheck || return 1
 	need shfmt || return 1
 	local files=() f
-	for f in scripts/*.sh deploy/*.sh; do
+	for f in scripts/*.sh deploy/*.sh tests/sh/*.sh; do
 		[ -f "$f" ] || continue
 		case " ${LEGACY_SHELL[*]} " in
 		*" $f "*) continue ;;
@@ -46,7 +46,7 @@ layer_shell() {
 		echo "no shell scripts found" >&2
 		return 1
 	fi
-	shellcheck "${files[@]}" && shfmt -d "${files[@]}"
+	shellcheck "${files[@]}" && shfmt -d "${files[@]}" && tests/sh/init_test.sh
 }
 
 # Run the go steps in the current environment.

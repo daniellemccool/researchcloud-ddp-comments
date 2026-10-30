@@ -1,0 +1,22 @@
+{
+  "desk_collector_role": "src_co_students",
+  "desk_admin_role": "src_co_admin",
+  "desk_platform": "tiktok",
+  "desk_contact": "Danielle",
+  "desk_hide_media": "true",
+  "desk_batch_sizes": "5,10",
+  "desk_idle_seconds": "900",
+  "desk_timer_minutes": "3",
+  "desk_max_sessions": "99",
+  "desk_max_running": "auto",
+  "desk_storage_path": "auto",
+  "fourcat_enabled": "true",
+  "fourcat_image": "digitalmethodsinitiative/4cat:v1.57",
+  "desk_image": "ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.1.0-alpha.1",
+  "deskproxy_image": "ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.1.0-alpha.1",
+  "zeeschuimer_version": "1.14.2",
+  "template_sha256": "cb6e516041e186cdd39b223b61a5d5499f1809380c773ed12081c8309d4407e1",
+  "co_id": "11111111-2222-3333-4444-555555555555",
+  "co_name": "Example CO",
+  "workspace_fqdn": "example.co.src.surf-hosted.nl"
+}

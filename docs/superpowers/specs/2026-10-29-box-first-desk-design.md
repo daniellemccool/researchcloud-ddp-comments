@@ -228,6 +228,8 @@ launching CO.
 | `desk_storage_path` | keep | `auto` | `auto` = the single mount under `/data` that is not `datasets`; several mounts fail loudly. |
 | `fourcat_enabled` | keep | `true` | Bundle 4CAT. `false`: no accounts, no tokens, upload text omitted, proxy refuses `fourcat.desk`. |
 | `fourcat_image` | keep | pinned `digitalmethodsinitiative/4cat:<tag>` | Image for backend and frontend. |
+| `desk_image` | keep | pinned `ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:<tag>` | Image for the desk service; the tag is the release. |
+| `deskproxy_image` | keep | pinned `.../deskproxy:<tag>` | Image for every collector's capture proxy. |
 | `zeeschuimer_version` | keep | `1.14.2` | Selects the template artifact. |
 | `template_sha256` | keep | pinned per release | The digest the init script requires of the fetched template artifact. The catalog item is the trust root; a digest shipped beside the artifact in the release would only guard against corruption. |
 
