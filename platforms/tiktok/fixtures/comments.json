@@ -1,0 +1,38 @@
+{
+  "status_code": 0,
+  "cursor": 3,
+  "has_more": 1,
+  "total": 41,
+  "comments": [
+    {
+      "cid": "7000000000000000001",
+      "text": "first synthetic comment",
+      "user": {"unique_id": "sample_user_one", "nickname": "Sample One", "uid": "6000000000000000001"},
+      "create_time": 1760000000,
+      "digg_count": 12,
+      "reply_id": "0",
+      "reply_comment_total": 2,
+      "comment_language": "en"
+    },
+    {
+      "cid": "7000000000000000002",
+      "text": "tweede synthetische reactie",
+      "user": {"unique_id": "sample_user_two", "nickname": "Sample Two", "uid": "6000000000000000002"},
+      "create_time": 1760000100,
+      "digg_count": 0,
+      "reply_id": "0",
+      "reply_comment_total": 0,
+      "comment_language": "nl"
+    },
+    {
+      "cid": "7000000000000000003",
+      "text": "a synthetic reply",
+      "user": {"unique_id": "sample_user_three", "nickname": "Sample Three", "uid": "6000000000000000003"},
+      "create_time": 1760000200,
+      "digg_count": 4,
+      "reply_id": "7000000000000000001",
+      "reply_comment_total": 0,
+      "comment_language": "en"
+    }
+  ]
+}
