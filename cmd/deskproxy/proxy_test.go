@@ -75,7 +75,7 @@ func TestLiveProxyOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy := newProxy(p, Meta{User: "u", Session: "s", Platform: "test", Kind: "video"}, out)
+	proxy := newProxy(p, Meta{User: "u", Session: "s", Platform: "test", Kind: "video"}, out, newBoundary("", newTokenFile(filepath.Join(t.TempDir(), "token")), mustURL("http://4cat-frontend:5000"), nil))
 	upAddr := upstream.Listener.Addr().String()
 	proxy.Tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, upAddr)
@@ -188,4 +188,12 @@ func TestWriteFailureFoldsIntoLogSuffix(t *testing.T) {
 	if string(b) != body {
 		t.Errorf("browser body %q", b)
 	}
+}
+
+func mustURL(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }

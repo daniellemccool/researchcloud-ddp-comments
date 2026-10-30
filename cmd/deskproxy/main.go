@@ -2,9 +2,11 @@
 // safety copy of selected platform API responses as NDJSON records and hands
 // the browser the original bytes untouched.
 //
-// The 4CAT allowlist, the token injection and the inward-address refusal come
-// in Task 4 (ADR-0001, ADR-0009); until then every .desk host, loopback name,
-// IP literal and dotless name is refused with 403 by the proxy itself.
+// The boundary (boundary.go) comes first: only the two 4CAT routes are
+// forwarded, with the collector's token as the Cookie (ADR-0001, ADR-0009);
+// loopback names, IP literals, dotless names, every other .desk host and any
+// destination that resolves to an inward address are refused with 403 by the
+// proxy itself.
 package main
 
 import (
@@ -14,6 +16,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,6 +40,9 @@ func main() {
 		caDir        = flag.String("ca", "/ca", "directory holding ca.pem and ca-key.pem")
 		listen       = flag.String("listen", ":8080", "proxy listen address")
 		health       = flag.String("health", ":8081", "health listen address")
+		tokenPath    = flag.String("token-file", "/token", "this collector's 4CAT token file")
+		upstream     = flag.String("fourcat-upstream", "http://4cat-frontend:5000", "where fourcat.desk is forwarded")
+		fqdn         = flag.String("fqdn", "", "the workspace's own host name, allowed through")
 	)
 	flag.Parse()
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -47,6 +53,10 @@ func main() {
 	p, err := platform.Load(*platformPath)
 	if err != nil {
 		log.Fatalf("load platform: %v", err)
+	}
+	up, err := url.Parse(*upstream)
+	if err != nil || up.Host == "" || (up.Scheme != "http" && up.Scheme != "https") {
+		log.Fatalf("--fourcat-upstream %q is not an http(s) URL", *upstream)
 	}
 	meta := Meta{User: *user, Session: *session, Platform: p.Name, Kind: p.DefaultKind}
 
@@ -65,7 +75,7 @@ func main() {
 		log.Fatalf("open captures: %v", err)
 	}
 
-	proxy := newProxy(p, meta, out)
+	proxy := newProxy(p, meta, out, newBoundary(*fqdn, newTokenFile(*tokenPath), up, nil))
 
 	go func() {
 		mux := http.NewServeMux()
@@ -88,7 +98,7 @@ func main() {
 // N bytes and the browser gets those N bytes and then the error; "-" means
 // the length is unknown (unmatched chunked response). " write-error" is
 // appended when the record could not be written, so it still is one line.
-func newProxy(p *platform.Platform, meta Meta, out *recordWriter) *goproxy.ProxyHttpServer {
+func newProxy(p *platform.Platform, meta Meta, out *recordWriter, b *boundary) *goproxy.ProxyHttpServer {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
 	// The browser's own Accept-Encoding is forwarded unchanged (goproxy
@@ -99,6 +109,7 @@ func newProxy(p *platform.Platform, meta Meta, out *recordWriter) *goproxy.Proxy
 	// and the browser gets the original bytes.
 	proxy.KeepAcceptEncoding = true
 	proxy.Tr.DisableCompression = true
+	b.install(proxy)
 
 	// The browser speaks HTTP/1.1 to the proxy: goproxy's AllowHTTP2 (the
 	// h2 ALPN) is left off. The spike's websocket pass-through is proven on
@@ -109,11 +120,13 @@ func newProxy(p *platform.Platform, meta Meta, out *recordWriter) *goproxy.Proxy
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 
 	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		// Fail closed: refused hosts are answered here, before any upstream
-		// is contacted. CONNECT is allowed (AlwaysMitm dials nothing), so the
-		// 403 is delivered inside the MITM'd TLS session. The canned response
-		// passes through OnResponse below, which logs it.
-		if resp := denyResponse(req); resp != nil {
+		// Fail closed: the boundary answers refusals and the 4CAT forward
+		// here, before any capture rule or upstream is considered. CONNECT is
+		// allowed (AlwaysMitm dials nothing), so the answer is delivered
+		// inside the MITM'd TLS session. The response passes through
+		// OnResponse below, which logs it. A forwarded 4CAT response never
+		// has a capture rule.
+		if resp := b.handle(proxy, req, ctx); resp != nil {
 			return req, resp
 		}
 		if rule := matchRule(p, req); rule != nil {
