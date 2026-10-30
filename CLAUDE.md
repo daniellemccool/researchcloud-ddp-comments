@@ -6,7 +6,7 @@ The development workspace is the SURF Research Cloud box, reached with `ssh -F ~
 
 ## Box-first verification
 
-Verification runs on the box. There is no Go toolchain there, so Go tests run in a container: `sudo docker run --rm -v /home/dmccool/ddp-comments:/src -w /src -v ddp-gomod:/go/pkg/mod golang:1.26 go test ./...`, and locally the same way with the local path when `go` is absent. When `go` is on PATH, the local go layer pins `GOTOOLCHAIN` to the `GO_TOOLCHAIN` version in `scripts/check.sh` (go1.26.3), so it matches the container and CI. `scripts/check.sh shell shape` runs on the box; the `adr` layer needs `adg`, which the box does not have, so it is a desktop and CI layer.
+Verification runs on the box. There is no Go toolchain there, so Go tests run in a container: `sudo docker run --rm -v /home/dmccool/ddp-comments:/src -w /src -v ddp-gomod:/go/pkg/mod golang:1.26 go test ./...`, and locally the same way with the local path when `go` is absent. When `go` is on PATH, the local go layer pins `GOTOOLCHAIN` to the `GO_TOOLCHAIN` version in `scripts/check.sh` (go1.26.3), so it matches the container and CI. The pre-commit gate is `scripts/check.sh adr shell go shape` locally plus `scripts/check.sh compose` on the box, because the compose layer needs docker, which the desktop lacks and which fails loudly rather than skipping. `scripts/check.sh shell shape` runs on the box; the `adr` layer needs `adg`, which the box does not have, so it is a desktop and CI layer.
 
 ## ADRs
 

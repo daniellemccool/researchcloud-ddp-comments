@@ -1,0 +1,109 @@
+# The desk and the bundled 4CAT. Values come only from .env (ADR-0017); the
+# init script writes it. The one published port is the desk's gated listener on
+# loopback (ADR-0006); 4CAT publishes nothing and is reached on desk-fourcat.
+name: desk
+
+x-fourcat-env: &fourcat-env
+  POSTGRES_USER: fourcat
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  POSTGRES_DB: fourcat
+  POSTGRES_HOST_AUTH_METHOD: trust
+  POSTGRES_HOST: 4cat-db
+  POSTGRES_PORT: "5432"
+  SERVER_NAME: ${FQDN}
+  API_HOST: 4cat-backend
+  MEMCACHED_HOST: 4cat-memcached
+  MEMCACHED_PORT: "11211"
+  worker_tmp_dir: /dev/shm
+  workers: "4"
+  threads: "4"
+  worker_class: gthread
+  log_level: debug
+
+services:
+  desk:
+    image: ${DESK_IMAGE}
+    restart: unless-stopped
+    command: ["serve", "--desk-root", "/desk"]
+    ports:
+      - "127.0.0.1:8110:8110"
+    volumes:
+      - ${DESK_ROOT}:/desk
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${REPO_ROOT}:/repo:ro
+    networks:
+      - desk-fourcat
+      - desk-egress
+
+  4cat-db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fourcat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: fourcat
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ${DESK_ROOT}/4cat/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - 4cat-internal
+
+  4cat-memcached:
+    image: memcached:alpine
+    restart: unless-stopped
+    command: ["-m", "64"]
+    healthcheck:
+      test: ["CMD-SHELL", "echo stats | nc localhost 11211 | grep -q uptime"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - 4cat-internal
+
+  4cat-backend:
+    image: ${FOURCAT_IMAGE}
+    restart: unless-stopped
+    init: true
+    environment: *fourcat-env
+    depends_on:
+      4cat-db:
+        condition: service_healthy
+      4cat-memcached:
+        condition: service_healthy
+    volumes:
+      - ${DESK_ROOT}/4cat/data:/usr/src/app/data/
+      - ${DESK_ROOT}/4cat/config:/usr/src/app/config/
+      - ${DESK_ROOT}/4cat/logs:/usr/src/app/logs/
+    entrypoint: docker/docker-entrypoint.sh
+    networks:
+      - 4cat-internal
+
+  4cat-frontend:
+    image: ${FOURCAT_IMAGE}
+    restart: unless-stopped
+    environment: *fourcat-env
+    depends_on:
+      - 4cat-db
+      - 4cat-backend
+    volumes:
+      - ${DESK_ROOT}/4cat/data:/usr/src/app/data/
+      - ${DESK_ROOT}/4cat/config:/usr/src/app/config/
+      - ${DESK_ROOT}/4cat/logs:/usr/src/app/logs/
+    command: ["docker/wait-for-backend.sh"]
+    networks:
+      - 4cat-internal
+      - desk-fourcat
+
+networks:
+  desk-fourcat:
+    driver: bridge
+  desk-egress:
+    driver: bridge
+  4cat-internal:
+    driver: bridge
+    internal: true

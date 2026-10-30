@@ -96,7 +96,19 @@ layer_compose() {
 		return 0
 	fi
 	need docker || return 1
-	docker compose -f deploy/compose.yml --env-file deploy/.env.example config -q
+	local rc=0
+	if docker compose -f deploy/compose.yml --env-file deploy/.env.example config >deploy/.resolved.yml; then
+		if command -v go >/dev/null 2>&1; then
+			GOTOOLCHAIN="$GO_TOOLCHAIN" go test -run TestCompose ./internal/arch/ || rc=1
+		else
+			docker run --rm -v "$PWD:/src" -w /src -v ddp-gomod:/go/pkg/mod "$GO_IMAGE" \
+				go test -run TestCompose ./internal/arch/ || rc=1
+		fi
+	else
+		rc=1
+	fi
+	rm -f deploy/.resolved.yml
+	return "$rc"
 }
 
 # Mirrors ADR-0018 and ADR-0019 for environments without adg.
