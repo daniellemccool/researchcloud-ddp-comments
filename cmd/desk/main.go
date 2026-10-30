@@ -32,6 +32,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "desk: %v\n", err)
 			os.Exit(1)
 		}
+	case "template":
+		os.Exit(templateCmd(os.Args[2:]))
 	default:
 		usage()
 		os.Exit(2)
