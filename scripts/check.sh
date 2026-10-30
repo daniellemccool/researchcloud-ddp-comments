@@ -50,7 +50,7 @@ layer_shell() {
 # Run the go steps in the current environment.
 go_steps() {
 	local unformatted
-	unformatted="$(gofmt -l .)"
+	unformatted="$(go list -f '{{.Dir}}' ./... | xargs -r gofmt -l)"
 	if [ -n "$unformatted" ]; then
 		echo "gofmt: files need formatting:" >&2
 		echo "$unformatted" >&2
@@ -72,9 +72,9 @@ layer_go() {
 	need docker || return 1
 	docker run --rm -v "$PWD:/src" -w /src -v ddp-gomod:/go/pkg/mod "$GO_IMAGE" bash -c '
 		set -euo pipefail
-		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh |
+		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.12.2/install.sh |
 			sh -s -- -b /usr/local/bin '"$GOLANGCI_LINT_VERSION"'
-		unformatted="$(gofmt -l .)"
+		unformatted="$(go list -f "{{.Dir}}" ./... | xargs -r gofmt -l)"
 		if [ -n "$unformatted" ]; then
 			echo "gofmt: files need formatting:" >&2
 			echo "$unformatted" >&2
