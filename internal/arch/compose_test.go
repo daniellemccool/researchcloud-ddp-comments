@@ -25,20 +25,20 @@ type composeFile struct {
 }
 
 // portString renders a resolved port entry (long form from `config`, or the
-// short string form) as host_ip:published:target.
+// short string form) as host_ip:published:target/protocol.
 func portString(p any) string {
 	m, ok := p.(map[string]any)
 	if !ok {
 		return fmt.Sprint(p)
 	}
-	return fmt.Sprintf("%v:%v:%v", m["host_ip"], m["published"], m["target"])
+	return fmt.Sprintf("%v:%v:%v/%v", m["host_ip"], m["published"], m["target"], m["protocol"])
 }
 
 // checkCompose applies the compose rules to a resolved file: every port
-// published is one of wantPorts and each of them appears once, no 0.0.0.0
+// published is exactly an entry of wantPorts, owned by that service, no 0.0.0.0
 // binding, no network_mode, and every service restarts unless stopped. Plan 2
 // runs rendered per-user files through it with no wanted ports.
-func checkCompose(t *testing.T, path string, wantPorts []string) composeFile {
+func checkCompose(t *testing.T, path string, wantPorts map[string][]string) composeFile {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -51,7 +51,12 @@ func checkCompose(t *testing.T, path string, wantPorts []string) composeFile {
 	if len(c.Services) == 0 {
 		t.Fatal("no services in resolved file")
 	}
-	var got []string
+	var got, want []string
+	for svc, ps := range wantPorts {
+		for _, p := range ps {
+			want = append(want, svc+" "+p)
+		}
+	}
 	for name, s := range c.Services {
 		t.Run(name, func(t *testing.T) {
 			if s.NetworkMode != "" {
@@ -62,7 +67,7 @@ func checkCompose(t *testing.T, path string, wantPorts []string) composeFile {
 			}
 			for _, p := range s.Ports {
 				ps := portString(p)
-				got = append(got, ps)
+				got = append(got, name+" "+ps)
 				if strings.HasPrefix(ps, "0.0.0.0:") || strings.HasPrefix(ps, "<nil>:") {
 					t.Errorf("port %q binds all interfaces", ps)
 				}
@@ -70,8 +75,9 @@ func checkCompose(t *testing.T, path string, wantPorts []string) composeFile {
 		})
 	}
 	slices.Sort(got)
-	if !slices.Equal(got, slices.Sorted(slices.Values(wantPorts))) {
-		t.Errorf("published ports %v, want exactly %v", got, wantPorts)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("published ports (service entry) %v, want exactly %v", got, want)
 	}
 	return c
 }
@@ -81,7 +87,7 @@ func TestCompose(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Skip("deploy/.resolved.yml absent: run scripts/check.sh compose")
 	}
-	c := checkCompose(t, path, []string{"127.0.0.1:8110:8110"})
+	c := checkCompose(t, path, map[string][]string{"desk": {"127.0.0.1:8110:8110/tcp"}})
 	if !c.Networks["4cat-internal"].Internal {
 		t.Error("network 4cat-internal is not internal: true")
 	}

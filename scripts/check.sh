@@ -96,6 +96,8 @@ layer_compose() {
 		return 0
 	fi
 	need docker || return 1
+	trap 'rm -f deploy/.resolved.yml' EXIT
+	trap 'exit 130' INT TERM
 	local rc=0
 	if docker compose -f deploy/compose.yml --env-file deploy/.env.example config >deploy/.resolved.yml; then
 		if command -v go >/dev/null 2>&1; then
@@ -108,6 +110,7 @@ layer_compose() {
 		rc=1
 	fi
 	rm -f deploy/.resolved.yml
+	trap - EXIT INT TERM
 	return "$rc"
 }
 
