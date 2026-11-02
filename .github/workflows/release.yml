@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
@@ -19,6 +19,9 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
+
+      - name: Check the pins
+        run: scripts/check-pins.sh "$GITHUB_REF_NAME"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -73,3 +76,10 @@ jobs:
           set -euo pipefail
           printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GH_USER" --password-stdin
           skopeo copy --all "docker://$SRC" "docker://$DEST:$TAG"
+
+      # The catalog component's tag field is the branch `release` and never
+      # changes; this push fast-forwards it to the tagged commit. No force
+      # flag: a tag that is not a descendant of the branch fails the job, and
+      # the component keeps pointing at the previous release.
+      - name: Move the release branch
+        run: git push origin HEAD:refs/heads/release

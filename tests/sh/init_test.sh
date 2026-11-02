@@ -726,6 +726,32 @@ case_update_pins_invalid() {
 	fi
 }
 
+# The pin cases run against the REAL checkout files, not the installed copy,
+# so they capture rc and stderr themselves (the run_init* helpers run
+# init.sh, not check-pins.sh).
+case_pins_ok() {
+	local tag rc
+	tag=$(sed -n 's/^DESK_IMAGE=//p' "$REPO_ROOT/deploy/.env.example" | sed 's/.*://')
+	set +e
+	scripts/check-pins.sh "$tag" >/dev/null 2>"$SYSROOT/pins.err"
+	rc=$?
+	set -e
+	a_eq "exit code" "$rc" "0"
+	[ ! -s "$SYSROOT/pins.err" ] || a_fail "stderr not empty: $(cat "$SYSROOT/pins.err")"
+}
+
+case_pins_tag_mismatch() {
+	local rc
+	set +e
+	scripts/check-pins.sh v0.0.0-none >/dev/null 2>"$SYSROOT/pins.err"
+	rc=$?
+	set -e
+	a_eq "exit code" "$rc" "1"
+	ERR=$(cat "$SYSROOT/pins.err")
+	a_err_has "check-pins: DESK_IMAGE tag"
+	a_err_has "check-pins: DESKPROXY_IMAGE tag"
+}
+
 run_case ok-fresh case_ok_fresh
 run_case python-repr-params case_python_repr_params
 run_case placeholder-role case_placeholder_role
@@ -761,6 +787,8 @@ run_case update-tag-mismatch case_update_tag_mismatch
 run_case update-template-changed case_update_template_changed
 run_case update-template-digest-changed case_update_template_digest_changed
 run_case update-pins-invalid case_update_pins_invalid
+run_case pins-ok case_pins_ok
+run_case pins-tag-mismatch case_pins_tag_mismatch
 
 echo "$PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
