@@ -9,7 +9,8 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 REPO_ROOT=$PWD
 
-# The suite deletes deploy/.env; never run it against a deployed copy.
+# Every case runs against a minimal installed copy under the sysroot; the
+# suite never writes into the checkout. Never run it from a deployed copy.
 case $REPO_ROOT in
 /rsc/*)
 	echo "refusing to run from a deployed copy under /rsc/: $REPO_ROOT" >&2
@@ -28,12 +29,10 @@ OUT=""
 ERR=""
 CASE_ERR_FILE=""
 
+# run_init runs init.sh from the installed copy the case's run_case built at
+# $SYSROOT/repo.
 run_init() {
-	set +e
-	OUT=$(sh "$REPO_ROOT/deploy/init.sh" "$@" 2>"$SYSROOT/stderr.txt")
-	RC=$?
-	set -e
-	ERR=$(cat "$SYSROOT/stderr.txt")
+	run_init_repo "$SYSROOT/repo" "$@"
 }
 
 # run_init_repo runs init.sh from a copied repository (used by the update
@@ -90,7 +89,7 @@ run_case() {
 	export DESK_TEMPLATE_FILE=$FIX/template.tar DESK_CO_MEMBERS_FILE=$FIX/members.json
 	PLUGIN_PARAMETERS=$(cat "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
-	rm -f "$REPO_ROOT/deploy/.env"
+	make_installed_copy "$SYSROOT/repo"
 	local errfile rc
 	errfile=$(mktemp)
 	# The case runs in a subshell as a plain command (not an if condition, where
@@ -113,31 +112,35 @@ run_case() {
 		FAILED+=("$name")
 	fi
 	rm -f "$errfile"
-	rm -f "$REPO_ROOT/deploy/.env"
 	rm -rf "$SYSROOT"
 	SYSROOT=""
 }
 
 desk() { printf '%s/data/vol1/desk' "$SYSROOT"; }
-envval() { grep "^$1=" "$REPO_ROOT/deploy/.env" | cut -d= -f2-; }
+envval() { grep "^$1=" "$SYSROOT/repo/deploy/.env" | cut -d= -f2-; }
 
 # a_nothing_written asserts that a refused run left nothing behind: no desk
 # root (and so no layout directories), no deploy/.env, no nginx files.
 a_nothing_written() {
 	[ ! -e "$(desk)" ] || a_fail "desk root was written"
-	[ ! -e "$REPO_ROOT/deploy/.env" ] || a_fail ".env was written"
+	[ ! -e "$SYSROOT/repo/deploy/.env" ] || a_fail ".env was written"
 	[ -z "$(ls -A "$SYSROOT/etc/nginx/app-location-conf.d")" ] ||
 		a_fail "nginx files were written"
 }
 
 # make_release_tarball builds a minimal release tarball at $1: a top-level
-# <name>/ holding deploy/.env.example (FOURCAT_IMAGE pin) and deploy/compose.yml.
+# <name>/ holding deploy/.env.example (the release's literal pins) and
+# deploy/compose.yml.
 make_release_tarball() {
 	local dest=$1 rel
 	rel=$(mktemp -d "$SYSROOT/rel-XXXXXX")
 	mkdir -p "$rel/ddp-comments-v0.2.0-test/deploy"
-	printf 'FOURCAT_IMAGE=digitalmethodsinitiative/4cat:v9.99\n' \
-		>"$rel/ddp-comments-v0.2.0-test/deploy/.env.example"
+	{
+		printf 'GHCR_NS=ghcr.io/daniellemccool/researchcloud-ddp-comments\n'
+		printf 'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.2.0-test\n'
+		printf 'DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.2.0-test\n'
+		printf 'FOURCAT_IMAGE=digitalmethodsinitiative/4cat:v9.99\n'
+	} >"$rel/ddp-comments-v0.2.0-test/deploy/.env.example"
 	printf 'name: desk\nservices: {}\n' \
 		>"$rel/ddp-comments-v0.2.0-test/deploy/compose.yml"
 	tar -czf "$dest" -C "$rel" ddp-comments-v0.2.0-test
@@ -146,19 +149,35 @@ make_release_tarball() {
 
 # make_installed_copy creates a MINIMAL "installed repository copy" at $1,
 # holding only what init.sh, update_mode and the harness read from the old
-# copy: deploy/ (init.sh, lib.sh, compose.yml, .env.example, the nginx
-# configs) and the platform definition the parameters name. It never copies
-# $REPO_ROOT itself, so editor/sandbox files in the checkout cannot break
-# the test.
+# copy: deploy/ (init.sh, lib.sh, compose.yml, the nginx configs) and the
+# platform definition the parameters name. It never copies $REPO_ROOT itself,
+# so editor/sandbox files in the checkout cannot break the test; in
+# particular it writes its OWN deploy/.env.example (literal pin lines) and
+# platforms/tiktok/template.json rather than copying the checkout's.
+# Arguments: <dest> [desk_tag] [fourcat_src] [zsv] [sha]; the sha defaults to
+# the runtime sha256 of the fixture template.tar.
 make_installed_copy() {
-	local dest=$1
+	local dest=$1 desk_tag=${2:-v0.1.0-alpha.1}
+	local fourcat_src=${3:-digitalmethodsinitiative/4cat:v1.57}
+	local zsv=${4:-1.14.3}
+	local sha=${5:-$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)}
 	mkdir -p "$dest/deploy/nginx" "$dest/platforms/tiktok"
 	cp -a "$REPO_ROOT/deploy/init.sh" "$REPO_ROOT/deploy/lib.sh" \
-		"$REPO_ROOT/deploy/compose.yml" "$REPO_ROOT/deploy/.env.example" \
-		"$dest/deploy/"
+		"$REPO_ROOT/deploy/compose.yml" "$dest/deploy/"
 	cp -a "$REPO_ROOT/deploy/nginx/desk.conf" "$REPO_ROOT/deploy/nginx/fourcat.conf" \
 		"$dest/deploy/nginx/"
 	cp -a "$REPO_ROOT/platforms/tiktok/platform.json" "$dest/platforms/tiktok/"
+	{
+		printf 'GHCR_NS=ghcr.io/daniellemccool/researchcloud-ddp-comments\n'
+		printf 'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:%s\n' "$desk_tag"
+		printf 'DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:%s\n' "$desk_tag"
+		printf 'FOURCAT_IMAGE=%s\n' "$fourcat_src"
+	} >"$dest/deploy/.env.example"
+	jq -n --arg zsv "$zsv" --arg sha "$sha" \
+		--arg artifact "ddp-comments-template-tiktok-$zsv.tar" \
+		--arg built_on "2026-10-30" \
+		'{zeeschuimer_version: $zsv, template_sha256: $sha, artifact: $artifact, built_on: $built_on}' \
+		>"$dest/platforms/tiktok/template.json"
 }
 
 case_ok_fresh() {
@@ -170,10 +189,23 @@ case_ok_fresh() {
 	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "24"
 	a_eq "layout_version" "$(jq -r '.layout_version' "$d/desk.json")" "1"
 	a_eq "package_version" "$(jq -r '.package_version' "$d/desk.json")" "v0.1.0-alpha.1"
-	a_file "$REPO_ROOT/deploy/.env"
+	a_eq "desk.json desk_image" "$(jq -r '.desk_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.1.0-alpha.1"
+	a_eq "desk.json deskproxy_image" "$(jq -r '.deskproxy_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.1.0-alpha.1"
+	a_eq "desk.json fourcat_image" "$(jq -r '.fourcat_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57"
+	a_eq "desk.json zeeschuimer_version" "$(jq -r '.zeeschuimer_version' "$d/desk.json")" "1.14.3"
+	a_eq "desk.json template_sha256" "$(jq -r '.template_sha256' "$d/desk.json")" \
+		"$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)"
+	a_file "$SYSROOT/repo/deploy/.env"
 	a_eq "env DESK_ROOT" "$(envval DESK_ROOT)" "$d"
 	a_eq "env FQDN" "$(envval FQDN)" "example.co.src.surf-hosted.nl"
-	a_eq "env REPO_ROOT" "$(envval REPO_ROOT)" "$REPO_ROOT"
+	a_eq "env REPO_ROOT" "$(envval REPO_ROOT)" "$SYSROOT/repo"
+	a_eq "env DESK_IMAGE" "$(envval DESK_IMAGE)" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.1.0-alpha.1"
+	a_eq "env FOURCAT_IMAGE" "$(envval FOURCAT_IMAGE)" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57"
 	a_mode "gate mode" "$d/secrets/gate" "600"
 	local gate
 	gate=$(cat "$d/secrets/gate")
@@ -364,18 +396,12 @@ case_reattach_newer_layout() {
 }
 
 case_sha_mismatch() {
-	PLUGIN_PARAMETERS=$(jq -c '.template_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"' "$FIX/params-ok.json")
-	export PLUGIN_PARAMETERS
+	# The installed copy's manifest pins a sha the fixture tar does not match.
+	make_installed_copy "$SYSROOT/repo" v0.1.0-alpha.1 digitalmethodsinitiative/4cat:v1.57 1.14.3 \
+		"0000000000000000000000000000000000000000000000000000000000000000"
 	run_init
 	a_rc 2
-	a_err_has "template_sha256"
-	local d
-	d=$(desk)
-	if [ -e "$d/templates/release/tiktok-1.14.3" ]; then
-		a_fail "template was extracted despite sha mismatch"
-	fi
-	[ -z "$(ls -A "$d/templates/release" 2>/dev/null)" ] ||
-		a_fail "templates/release not empty after mismatch"
+	a_err_has "template_sha256: mismatch"
 	# The sha256 is verified before any file is written.
 	a_nothing_written
 }
@@ -383,11 +409,11 @@ case_sha_mismatch() {
 case_apply_mode() {
 	run_init
 	a_rc 0
-	cp "$REPO_ROOT/deploy/.env" "$SYSROOT/env.before"
+	cp "$SYSROOT/repo/deploy/.env" "$SYSROOT/env.before"
 	run_init apply
 	a_rc 0
 	a_out_has "exec desk desk render"
-	cmp -s "$SYSROOT/env.before" "$REPO_ROOT/deploy/.env" ||
+	cmp -s "$SYSROOT/env.before" "$SYSROOT/repo/deploy/.env" ||
 		a_fail "apply modified deploy/.env"
 }
 
@@ -395,6 +421,54 @@ case_bad_mode() {
 	run_init frobnicate
 	a_rc 2
 	a_err_has "usage"
+}
+
+case_retired_param() {
+	PLUGIN_PARAMETERS=$(jq -c '. + {"desk_image": "ghcr.io/x/desk:v1"}' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	run_init
+	a_rc 2
+	a_err_has "desk_image: no longer a parameter; the release pins it"
+	a_nothing_written
+}
+
+case_manifest_bad_sha() {
+	make_installed_copy "$SYSROOT/repo" v0.1.0-alpha.1 digitalmethodsinitiative/4cat:v1.57 1.14.3 \
+		"$(printf 'z%.0s' $(seq 64))"
+	run_init
+	a_rc 2
+	a_err_has "template.json: template_sha256"
+	a_nothing_written
+}
+
+case_manifest_artifact_mismatch() {
+	jq '.artifact = "ddp-comments-template-tiktok-9.9.9.tar"' \
+		"$SYSROOT/repo/platforms/tiktok/template.json" \
+		>"$SYSROOT/repo/platforms/tiktok/template.json.new"
+	mv "$SYSROOT/repo/platforms/tiktok/template.json.new" \
+		"$SYSROOT/repo/platforms/tiktok/template.json"
+	run_init
+	a_rc 2
+	a_err_has "template.json: artifact"
+	a_nothing_written
+}
+
+case_manifest_missing() {
+	rm -f "$SYSROOT/repo/platforms/tiktok/template.json"
+	run_init
+	a_rc 2
+	a_err_has "template.json: not found"
+	a_nothing_written
+}
+
+case_env_example_missing_pin() {
+	grep -v '^DESKPROXY_IMAGE=' "$SYSROOT/repo/deploy/.env.example" \
+		>"$SYSROOT/repo/deploy/.env.example.new"
+	mv "$SYSROOT/repo/deploy/.env.example.new" "$SYSROOT/repo/deploy/.env.example"
+	run_init
+	a_rc 2
+	a_err_has "pins: DESKPROXY_IMAGE"
+	a_nothing_written
 }
 
 # The update cases run against a minimal installed copy inside the sysroot,
@@ -452,10 +526,10 @@ case_update_pull_fails() {
 	a_eq "desk_image unchanged" "$(jq -r '.desk_image' "$d/desk.json")" \
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.1.0-alpha.1"
 	a_eq "fourcat_image unchanged" "$(jq -r '.fourcat_image' "$d/desk.json")" \
-		"digitalmethodsinitiative/4cat:v1.57"
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57"
 	a_eq "env FOURCAT_IMAGE unchanged" \
 		"$(grep '^FOURCAT_IMAGE=' "$SYSROOT/repo/deploy/.env" | cut -d= -f2-)" \
-		"digitalmethodsinitiative/4cat:v1.57"
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57"
 	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
 		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
 	fi
@@ -503,6 +577,11 @@ run_case reattach-newer-layout case_reattach_newer_layout
 run_case sha-mismatch case_sha_mismatch
 run_case apply-mode case_apply_mode
 run_case bad-mode case_bad_mode
+run_case retired-param case_retired_param
+run_case manifest-bad-sha case_manifest_bad_sha
+run_case manifest-artifact-mismatch case_manifest_artifact_mismatch
+run_case manifest-missing case_manifest_missing
+run_case env-example-missing-pin case_env_example_missing_pin
 run_case update-ok case_update_ok
 run_case update-pull-fails case_update_pull_fails
 run_case update-explicit-storage-path case_update_explicit_storage_path

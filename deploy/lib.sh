@@ -23,11 +23,23 @@ CLEANUP_DIRS=""
 
 GHCR_NS="ghcr.io/daniellemccool/researchcloud-ddp-comments"
 
+# ADR-0020: the image and template pins come from the checked-out release
+# (deploy/.env.example and platforms/<platform>/template.json), never from
+# the catalog item. resolve_pins sets these globals; a component that still
+# sends one of the retired names is refused.
+PIN_DESK_IMAGE=
+PIN_DESKPROXY_IMAGE=
+PIN_FOURCAT_IMAGE=
+PIN_ZSV=
+PIN_TEMPLATE_SHA256=
+PIN_RELEASE=
+
 PARAM_NAMES="desk_collector_role desk_admin_role desk_platform desk_contact
 desk_hide_media desk_batch_sizes desk_idle_seconds desk_timer_minutes
 desk_max_sessions desk_max_running desk_storage_path fourcat_enabled
-fourcat_image desk_image deskproxy_image zeeschuimer_version template_sha256
 co_id co_name workspace_fqdn"
+
+RETIRED_PARAMS="fourcat_image desk_image deskproxy_image zeeschuimer_version template_sha256"
 
 die() {
 	printf 'init: %s\n' "$*" >&2
@@ -132,6 +144,13 @@ validate_params() {
 	done <"$keys_file"
 	rm -f "$keys_file"
 
+	# ADR-0020: a pin sent as a parameter is refused; the release pins it.
+	for k in $RETIRED_PARAMS; do
+		if printf '%s' "$PARAMS_JSON" | jq -e --arg k "$k" 'has($k)' >/dev/null 2>&1; then
+			param_err "$k" "no longer a parameter; the release pins it"
+		fi
+	done
+
 	for k in $PARAM_NAMES; do
 		if ! printf '%s' "$PARAMS_JSON" | jq -e --arg k "$k" 'has($k)' >/dev/null 2>&1; then
 			param_err "$k" "missing"
@@ -190,22 +209,92 @@ validate_params() {
 			*) param_err "$k" "must be auto or an absolute path" ;;
 			esac
 			;;
-		fourcat_image | desk_image | deskproxy_image)
-			printf '%s' "$v" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9./_-]*:[A-Za-z0-9._-]+$' ||
-				param_err "$k" "must be a registry path with a tag"
-			;;
-		zeeschuimer_version)
-			printf '%s' "$v" | grep -Eq '^[0-9]+(\.[0-9]+)*$' || param_err "$k" "must match ^[0-9]+(\.[0-9]+)*$"
-			;;
-		template_sha256)
-			printf '%s' "$v" | grep -Eq '^[0-9a-f]{64}$' || param_err "$k" "must be 64 lowercase hex chars"
-			;;
 		workspace_fqdn)
 			printf '%s' "$v" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$' ||
 				param_err "$k" "not a valid FQDN"
 			;;
 		esac
 	done
+}
+
+# resolve_pins reads the release's own pins (ADR-0020): the three image
+# references from <repo_root>/deploy/.env.example and the Zeeschuimer version
+# plus template digest from <repo_root>/platforms/<platform>/template.json.
+# It sets the PIN_* globals and collects problems with collect_err (prefix
+# "pins: <KEY>" for .env.example, "template.json: <field>" for the manifest);
+# returns 1 when any problem was found, 0 otherwise. It never calls die.
+resolve_pins() {
+	pins_repo=$1
+	pins_platform=$2
+	pins_env=$pins_repo/deploy/.env.example
+	pins_manifest=$pins_repo/platforms/$pins_platform/template.json
+	pins_rc=0
+	pins_desk=""
+	pins_deskproxy=""
+	pins_fourcat_src=""
+	for pins_key in DESK_IMAGE DESKPROXY_IMAGE FOURCAT_IMAGE; do
+		pins_val=$(sed -n "s/^$pins_key=//p" "$pins_env" | head -n 1)
+		if [ -z "$pins_val" ]; then
+			collect_err "pins: $pins_key missing in deploy/.env.example"
+			pins_rc=1
+			continue
+		fi
+		if ! printf '%s' "$pins_val" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9./_-]*:[A-Za-z0-9._-]+$'; then
+			collect_err "pins: $pins_key must be a registry path with a tag"
+			pins_rc=1
+			continue
+		fi
+		case $pins_key in
+		DESK_IMAGE) pins_desk=$pins_val ;;
+		DESKPROXY_IMAGE) pins_deskproxy=$pins_val ;;
+		FOURCAT_IMAGE) pins_fourcat_src=$pins_val ;;
+		esac
+	done
+	if [ "$pins_rc" -eq 0 ]; then
+		PIN_DESK_IMAGE=$pins_desk
+		PIN_DESKPROXY_IMAGE=$pins_deskproxy
+		PIN_RELEASE=${pins_desk##*:}
+		if [ "${pins_deskproxy##*:}" != "$PIN_RELEASE" ]; then
+			collect_err "pins: DESKPROXY_IMAGE tag differs from DESK_IMAGE tag"
+			pins_rc=1
+		fi
+		# The regex check above ran first, so the source always has a tag.
+		PIN_FOURCAT_IMAGE=$(fourcat_mirror_ref "$pins_fourcat_src")
+	fi
+	if [ ! -f "$pins_manifest" ]; then
+		collect_err "template.json: not found at $pins_manifest"
+		return 1
+	fi
+	if ! jq -e 'type == "object" and (keys == ["artifact","built_on","template_sha256","zeeschuimer_version"])' \
+		"$pins_manifest" >/dev/null 2>&1; then
+		collect_err "template.json: must hold exactly artifact, built_on, template_sha256, zeeschuimer_version"
+		return 1
+	fi
+	pins_zsv=$(jq -r '.zeeschuimer_version' "$pins_manifest")
+	pins_sha=$(jq -r '.template_sha256' "$pins_manifest")
+	pins_artifact=$(jq -r '.artifact' "$pins_manifest")
+	pins_built_on=$(jq -r '.built_on' "$pins_manifest")
+	if ! printf '%s' "$pins_zsv" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
+		collect_err "template.json: zeeschuimer_version must match ^[0-9]+(\.[0-9]+)*$"
+		pins_rc=1
+	fi
+	if ! printf '%s' "$pins_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+		collect_err "template.json: template_sha256 must be 64 lowercase hex chars"
+		pins_rc=1
+	fi
+	if [ "$pins_artifact" != "ddp-comments-template-$pins_platform-$pins_zsv.tar" ]; then
+		collect_err "template.json: artifact must be ddp-comments-template-$pins_platform-$pins_zsv.tar"
+		pins_rc=1
+	fi
+	if ! printf '%s' "$pins_built_on" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+		collect_err "template.json: built_on must be YYYY-MM-DD"
+		pins_rc=1
+	fi
+	if [ "$pins_rc" -eq 0 ]; then
+		PIN_ZSV=$pins_zsv
+		PIN_TEMPLATE_SHA256=$pins_sha
+	fi
+	return "$pins_rc"
 }
 
 read_workspace() {
@@ -362,9 +451,9 @@ write_env() {
 			printf 'DESK_ROOT=%s\n' "$DESK_ROOT"
 			printf 'FQDN=%s\n' "$(param workspace_fqdn)"
 			printf 'GHCR_NS=%s\n' "$GHCR_NS"
-			printf 'DESK_IMAGE=%s\n' "$(param desk_image)"
-			printf 'DESKPROXY_IMAGE=%s\n' "$(param deskproxy_image)"
-			printf 'FOURCAT_IMAGE=%s\n' "$(param fourcat_image)"
+			printf 'DESK_IMAGE=%s\n' "$PIN_DESK_IMAGE"
+			printf 'DESKPROXY_IMAGE=%s\n' "$PIN_DESKPROXY_IMAGE"
+			printf 'FOURCAT_IMAGE=%s\n' "$PIN_FOURCAT_IMAGE"
 			printf 'POSTGRES_PASSWORD=%s\n' "$PG_SECRET"
 			printf 'REPO_ROOT=%s\n' "$REPO_ROOT"
 		} >"$REPO_ROOT/deploy/.env"
@@ -374,15 +463,20 @@ write_env() {
 
 write_desk_json() {
 	applied_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-	pkg=$(param desk_image)
-	pkg=${pkg##*:}
 	set --
 	for k in $PARAM_NAMES; do
 		set -- "$@" --arg "$k" "$(param "$k")"
 	done
+	# The five retired names are still recorded, from the release's pins, so
+	# the key set stays at 24 for the Go side.
 	jq -n "$@" \
+		--arg fourcat_image "$PIN_FOURCAT_IMAGE" \
+		--arg desk_image "$PIN_DESK_IMAGE" \
+		--arg deskproxy_image "$PIN_DESKPROXY_IMAGE" \
+		--arg zeeschuimer_version "$PIN_ZSV" \
+		--arg template_sha256 "$PIN_TEMPLATE_SHA256" \
 		--arg desk_root "$DESK_ROOT" \
-		--arg package_version "$pkg" \
+		--arg package_version "$PIN_RELEASE" \
 		--arg applied_at "$applied_at" \
 		'$ARGS.named + {layout_version: 1}' >"$DESK_ROOT/desk.json"
 	chmod 0644 "$DESK_ROOT/desk.json"
@@ -420,11 +514,8 @@ install_nginx() {
 # mismatch refuses the launch with nothing on disk.
 fetch_template() {
 	platform=$(param desk_platform)
-	zsv=$(param zeeschuimer_version)
-	pkg=$(param desk_image)
-	pkg=${pkg##*:}
-	artifact="ddp-comments-template-$platform-$zsv.tar"
-	url="https://github.com/daniellemccool/researchcloud-ddp-comments/releases/download/$pkg/$artifact"
+	artifact="ddp-comments-template-$platform-$PIN_ZSV.tar"
+	url="https://github.com/daniellemccool/researchcloud-ddp-comments/releases/download/$PIN_RELEASE/$artifact"
 	tmp=$(mktemp)
 	register_cleanup_file "$tmp"
 	if [ "${DESK_NO_FETCH:-0}" = "1" ]; then
@@ -435,7 +526,7 @@ fetch_template() {
 			die "template: download failed: $url"
 	fi
 	got=$(sha256sum "$tmp" | awk '{print $1}')
-	want=$(param template_sha256)
+	want=$PIN_TEMPLATE_SHA256
 	if [ "$got" != "$want" ]; then
 		die "template_sha256: mismatch (expected $want, got $got)"
 	fi
@@ -447,8 +538,7 @@ fetch_template() {
 install_template() {
 	tmp=$1
 	platform=$(param desk_platform)
-	zsv=$(param zeeschuimer_version)
-	dest=$DESK_ROOT/templates/release/$platform-$zsv
+	dest=$DESK_ROOT/templates/release/$platform-$PIN_ZSV
 	staging=$(mktemp -d "$DESK_ROOT/templates/release/.stage-XXXXXX")
 	register_cleanup_dir "$staging"
 	tar -xf "$tmp" -C "$staging"
@@ -482,7 +572,7 @@ pull_images() {
 	if [ $# -ne 2 ]; then
 		die "compose: expected exactly 2 fixed images (postgres, memcached), found $#"
 	fi
-	for img in "$(param desk_image)" "$(param deskproxy_image)" "$(param fourcat_image)" "$@"; do
+	for img in "$PIN_DESK_IMAGE" "$PIN_DESKPROXY_IMAGE" "$PIN_FOURCAT_IMAGE" "$@"; do
 		docker pull "$img" || die "docker pull failed: $img"
 	done
 }
@@ -502,6 +592,12 @@ write_wrapper() {
 platform_mode() {
 	parse_plugin_parameters
 	validate_params
+	# ADR-0020: resolve the release's pins; the ERRORS check below refuses
+	# everything at once, so the return value is ignored here.
+	platform=$(param desk_platform)
+	if [ -f "$REPO_ROOT/platforms/$platform/platform.json" ]; then
+		resolve_pins "$REPO_ROOT" "$platform" || true
+	fi
 	if read_workspace; then
 		if load_members; then
 			check_roles
@@ -541,7 +637,7 @@ platform_mode() {
 	echo "init: desk root: $DESK_ROOT"
 	echo "init: .env: $REPO_ROOT/deploy/.env"
 	echo "init: nginx: $SYSROOT/etc/nginx/app-location-conf.d/desk.conf $SYSROOT/etc/nginx/app-location-conf.d/fourcat.conf"
-	echo "init: template: $DESK_ROOT/templates/release/$(param desk_platform)-$(param zeeschuimer_version)"
+	echo "init: template: $DESK_ROOT/templates/release/$(param desk_platform)-$PIN_ZSV"
 	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
 		echo "init: images: skipped (DESK_NO_DOCKER=1)"
 	else
@@ -697,10 +793,15 @@ update_mode() {
 		die "update: FOURCAT_IMAGE missing in the release's deploy/.env.example"
 	fi
 	fourcat_image=$(fourcat_mirror_ref "$src_fourcat")
-	PARAMS_JSON=$(jq --arg di "${desk_image%:*}:$release" --arg dpi "${deskproxy_image%:*}:$release" \
-		--arg fci "$fourcat_image" --arg release "$release" \
-		'.desk_image = $di | .deskproxy_image = $dpi | .fourcat_image = $fci | .package_version = $release
-		 | del(.desk_root, .layout_version, .package_version, .applied_at)' "$dj")
+	# pull_images and write_env read the PIN_* globals, so the update path
+	# sets them from the kept desk.json and the new copy's .env.example.
+	PIN_DESK_IMAGE=${desk_image%:*}:$release
+	PIN_DESKPROXY_IMAGE=${deskproxy_image%:*}:$release
+	PIN_FOURCAT_IMAGE=$fourcat_image
+	PIN_RELEASE=$release
+	PIN_ZSV=$(jq -r '.zeeschuimer_version' "$dj")
+	PIN_TEMPLATE_SHA256=$(jq -r '.template_sha256' "$dj")
+	PARAMS_JSON=$(jq 'del(.desk_root, .layout_version, .package_version, .applied_at)' "$dj")
 	pull_images
 	# The swap itself: two renames on one filesystem.
 	mv "$REPO_ROOT" "$backup"
@@ -724,8 +825,8 @@ update_mode() {
 	PG_SECRET=$(cat "$DESK_ROOT/secrets/4cat-postgres")
 	write_env
 	dj_new=$dj.new
-	if ! jq --arg di "${desk_image%:*}:$release" --arg dpi "${deskproxy_image%:*}:$release" \
-		--arg fci "$fourcat_image" --arg release "$release" \
+	if ! jq --arg di "$PIN_DESK_IMAGE" --arg dpi "$PIN_DESKPROXY_IMAGE" \
+		--arg fci "$PIN_FOURCAT_IMAGE" --arg release "$release" \
 		'.desk_image = $di | .deskproxy_image = $dpi | .fourcat_image = $fci | .package_version = $release' \
 		"$dj" >"$dj_new"; then
 		update_fail "update: could not rewrite desk.json"
