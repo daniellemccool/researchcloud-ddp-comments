@@ -87,8 +87,8 @@ overwrites below.
 ## Pre-launch checklist
 
 - The release's three images (`desk`, `deskproxy`, `4cat`) and the template
-  artifact for (`desk_platform`, `zeeschuimer_version`) are published, and the
-  GHCR packages are public.
+  artifact named by its `platforms/<platform>/template.json` are published, and
+  the GHCR packages are public.
 - The two SRAM groups (collector and admin roles) exist and each has at least one
   member; the init script refuses otherwise.
 - The volume exists in the launching CO.
