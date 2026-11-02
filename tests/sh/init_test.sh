@@ -471,6 +471,30 @@ case_env_example_missing_pin() {
 	a_nothing_written
 }
 
+case_manifest_multiline_value() {
+	# The JSON carries a real newline escape in zeeschuimer_version.
+	jq --arg v "$(printf '1.14.3\nzz')" '.zeeschuimer_version = $v' \
+		"$SYSROOT/repo/platforms/tiktok/template.json" \
+		>"$SYSROOT/repo/platforms/tiktok/template.json.new"
+	mv "$SYSROOT/repo/platforms/tiktok/template.json.new" \
+		"$SYSROOT/repo/platforms/tiktok/template.json"
+	run_init
+	a_rc 2
+	a_err_has "template.json: zeeschuimer_version must be a single-line string"
+	a_nothing_written
+}
+
+case_manifest_nonstring_value() {
+	jq '.built_on = 1' "$SYSROOT/repo/platforms/tiktok/template.json" \
+		>"$SYSROOT/repo/platforms/tiktok/template.json.new"
+	mv "$SYSROOT/repo/platforms/tiktok/template.json.new" \
+		"$SYSROOT/repo/platforms/tiktok/template.json"
+	run_init
+	a_rc 2
+	a_err_has "template.json: built_on must be a single-line string"
+	a_nothing_written
+}
+
 # The update cases run against a minimal installed copy inside the sysroot,
 # because update swaps the repository copy in place.
 case_update_ok() {
@@ -582,6 +606,8 @@ run_case manifest-bad-sha case_manifest_bad_sha
 run_case manifest-artifact-mismatch case_manifest_artifact_mismatch
 run_case manifest-missing case_manifest_missing
 run_case env-example-missing-pin case_env_example_missing_pin
+run_case manifest-multiline-value case_manifest_multiline_value
+run_case manifest-nonstring-value case_manifest_nonstring_value
 run_case update-ok case_update_ok
 run_case update-pull-fails case_update_pull_fails
 run_case update-explicit-storage-path case_update_explicit_storage_path

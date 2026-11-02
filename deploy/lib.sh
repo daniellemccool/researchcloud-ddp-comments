@@ -274,22 +274,53 @@ resolve_pins() {
 	pins_sha=$(jq -r '.template_sha256' "$pins_manifest")
 	pins_artifact=$(jq -r '.artifact' "$pins_manifest")
 	pins_built_on=$(jq -r '.built_on' "$pins_manifest")
-	if ! printf '%s' "$pins_zsv" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
-		collect_err "template.json: zeeschuimer_version must match ^[0-9]+(\.[0-9]+)*$"
-		pins_rc=1
-	fi
-	if ! printf '%s' "$pins_sha" | grep -Eq '^[0-9a-f]{64}$'; then
-		collect_err "template.json: template_sha256 must be 64 lowercase hex chars"
-		pins_rc=1
-	fi
-	if [ "$pins_artifact" != "ddp-comments-template-$pins_platform-$pins_zsv.tar" ]; then
-		collect_err "template.json: artifact must be ddp-comments-template-$pins_platform-$pins_zsv.tar"
-		pins_rc=1
-	fi
-	if ! printf '%s' "$pins_built_on" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
-		collect_err "template.json: built_on must be YYYY-MM-DD"
-		pins_rc=1
-	fi
+	pins_zsv_ok=0
+	for pins_field in zeeschuimer_version template_sha256 artifact built_on; do
+		case $pins_field in
+		zeeschuimer_version) pins_val=$pins_zsv ;;
+		template_sha256) pins_val=$pins_sha ;;
+		artifact) pins_val=$pins_artifact ;;
+		built_on) pins_val=$pins_built_on ;;
+		esac
+		# A field must be a JSON string without CR or LF before any pattern is
+		# applied: grep matches line by line, so a multi-line value would pass
+		# whenever one of its lines fits, and jq -r stringifies non-strings.
+		if ! jq -e --arg f "$pins_field" '.[$f] | type == "string" and (test("[\\r\\n]") | not)' \
+			"$pins_manifest" >/dev/null 2>&1; then
+			collect_err "template.json: $pins_field must be a single-line string"
+			pins_rc=1
+			continue
+		fi
+		# The value is a single line now, so -x anchors the whole value.
+		case $pins_field in
+		zeeschuimer_version)
+			if printf '%s' "$pins_val" | grep -Eqx '[0-9]+(\.[0-9]+)*'; then
+				pins_zsv_ok=1
+			else
+				collect_err "template.json: zeeschuimer_version must match ^[0-9]+(\.[0-9]+)*$"
+				pins_rc=1
+			fi
+			;;
+		template_sha256)
+			if ! printf '%s' "$pins_val" | grep -Eqx '[0-9a-f]{64}'; then
+				collect_err "template.json: template_sha256 must be 64 lowercase hex chars"
+				pins_rc=1
+			fi
+			;;
+		artifact)
+			if [ "$pins_zsv_ok" = 1 ] && [ "$pins_val" != "ddp-comments-template-$pins_platform-$pins_zsv.tar" ]; then
+				collect_err "template.json: artifact must be ddp-comments-template-$pins_platform-$pins_zsv.tar"
+				pins_rc=1
+			fi
+			;;
+		built_on)
+			if ! printf '%s' "$pins_val" | grep -Eqx '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+				collect_err "template.json: built_on must be YYYY-MM-DD"
+				pins_rc=1
+			fi
+			;;
+		esac
+	done
 	if [ "$pins_rc" -eq 0 ]; then
 		PIN_ZSV=$pins_zsv
 		PIN_TEMPLATE_SHA256=$pins_sha
