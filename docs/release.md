@@ -6,40 +6,8 @@ is `ghcr.io/daniellemccool/researchcloud-ddp-comments`.
 
 ## Steps
 
-1. Bump the pins in the local checkout: `DESK_IMAGE` and `DESKPROXY_IMAGE` in
-   `deploy/.env.example` to the new tag (`FOURCAT_IMAGE` only on a deliberate
-   4CAT bump) and, when a new template artifact was built, the
-   `platforms/<platform>/template.json` values from step 4. Commit, then run
-   `scripts/check-pins.sh vX.Y.Z` — it must exit 0.
-
-2. Tag from the local checkout, on a commit that passed `scripts/check.sh`:
-
-   ```
-   git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
-   ```
-
-3. Wait for the `release` workflow in GitHub Actions. It checks the pins,
-   pushes `desk:<tag>`, `deskproxy:<tag>` and mirrors `4cat:<4CAT tag>` under
-   the namespace, then fast-forwards the branch `release` to the tagged
-   commit. First release: make the packages public (section "First release
-   only") before this check. Then verify anonymously, from a machine that is
-   not logged in to GHCR:
-
-   ```
-   docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:vX.Y.Z
-   docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:vX.Y.Z
-   docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57
-   ```
-
-   The 4CAT tag is currently v1.57; it follows `FOURCAT_IMAGE` in
-   `deploy/.env.example`. Also verify that the branch moved to the tagged
-   commit:
-
-   ```
-   gh api repos/daniellemccool/researchcloud-ddp-comments/branches/release --jq .commit.sha
-   ```
-
-4. Build the template artifact on the box. First build the image once
+1. Build the template artifact on the box (when the template changed). First
+   build the image once
    (`sudo docker build -f cmd/desk/Dockerfile -t desk:dev .`), then run the
    tool; the profile is a copy of a sanitisable Firefox profile owned by
    uid 1000. Example for TikTok with Zeeschuimer 1.14.3 (the version check
@@ -53,19 +21,59 @@ is `ghcr.io/daniellemccool/researchcloud-ddp-comments`.
    Generic form: `--platform <platform> --zeeschuimer <zeeschuimer_version>`.
    It writes `/w/out/ddp-comments-template-<platform>-<zeeschuimer_version>.tar`
    and the sibling `.sha256` file, and prints the manifest JSON plus a
-   `sha256 <hex>  <filename>` line. When the template changed, its
-   `zeeschuimer_version`, `sha256`, filename and build date go into
-   `platforms/<platform>/template.json` in step 1, BEFORE the tag: the init
-   script fetches the artifact the manifest names from the release and
-   refuses a digest mismatch.
+   `sha256 <hex>  <filename>` line. Copy both files to the local checkout.
 
-5. Create the GitHub release and upload the artifact and its checksum, from
-   the local checkout (GitHub is not reached from the box):
+2. Bump the pins in the local checkout: `DESK_IMAGE` and `DESKPROXY_IMAGE` in
+   `deploy/.env.example` to the new tag (`FOURCAT_IMAGE` only on a deliberate
+   4CAT bump) and, when the artifact changed, the `zeeschuimer_version`,
+   `sha256`, filename and build date in `platforms/<platform>/template.json`
+   (step 1's values). Commit, then run `scripts/check-pins.sh vX.Y.Z` — it
+   must exit 0.
+
+3. Tag from the local checkout, on a commit that passed `scripts/check.sh`:
+
+   ```
+   git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
+   ```
+
+4. Immediately create the GitHub release and upload the artifact and its
+   checksum, from the local checkout (GitHub is not reached from the box):
 
    ```
    gh release create vX.Y.Z --title vX.Y.Z --notes "vX.Y.Z"
    gh release upload vX.Y.Z <tar> <tar>.sha256
    ```
+
+   Every release needs the artifact uploaded under its own tag, even when the
+   template did not change, because the init script derives the artifact
+   download URL from the tag.
+
+5. Wait for the `release` workflow in GitHub Actions. It checks the pins,
+   pushes `desk:<tag>`, `deskproxy:<tag>` and mirrors `4cat:<4CAT tag>` under
+   the namespace, waits until the GitHub release carries the artifact named
+   by every `platforms/*/template.json`, and only then fast-forwards the
+   branch `release` to the tagged commit — the branch moves only once the
+   workflow sees the artifact for every platform manifest, so a workspace
+   launched from it can always fetch its template. First release: make the
+   packages public (section "First release only") before this check. Then
+   verify anonymously, from a machine that is not logged in to GHCR:
+
+   ```
+   docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:vX.Y.Z
+   docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:vX.Y.Z
+   docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57
+   ```
+
+   The 4CAT tag is currently v1.57; it follows `FOURCAT_IMAGE` in
+   `deploy/.env.example`. Also verify that the branch moved to the tagged
+   commit:
+
+   ```
+   gh api repos/daniellemccool/researchcloud-ddp-comments/branches/release --jq .commit.sha
+   git rev-parse vX.Y.Z^{commit}
+   ```
+
+   The two shas must be equal.
 
 ## The catalog component
 
@@ -91,8 +99,8 @@ is not usable until this is done.
 
 The workflow reads `FOURCAT_IMAGE` from `deploy/.env.example` and mirrors
 that tag. To change the pin, edit `deploy/.env.example`, tag a release, and
-run `sudo /rsc/plugins/<repo>/deploy/init.sh update <tag>` on each workspace
-(`<repo>` is the basename the platform gives the plugin directory): `update`
+run `sudo /rsc/plugins/<uuid>/deploy/init.sh update <tag>` on each workspace
+(`<uuid>` is the plugin directory the platform created): `update`
 adopts the TAG from that release's `deploy/.env.example` and maps it onto the
 GHCR mirror (`ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:<tag>`),
 writing that reference into `desk.json` and `.env`, so 4CAT's database

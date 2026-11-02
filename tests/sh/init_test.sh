@@ -728,12 +728,13 @@ case_update_pins_invalid() {
 
 # The pin cases run against the REAL checkout files, not the installed copy,
 # so they capture rc and stderr themselves (the run_init* helpers run
-# init.sh, not check-pins.sh).
+# init.sh, not check-pins.sh). The script is called by absolute path; the
+# duplicate-key and empty-tag cases point CHECK_PINS_ROOT at a scratch tree.
 case_pins_ok() {
 	local tag rc
 	tag=$(sed -n 's/^DESK_IMAGE=//p' "$REPO_ROOT/deploy/.env.example" | sed 's/.*://')
 	set +e
-	scripts/check-pins.sh "$tag" >/dev/null 2>"$SYSROOT/pins.err"
+	"$REPO_ROOT/scripts/check-pins.sh" "$tag" >/dev/null 2>"$SYSROOT/pins.err"
 	rc=$?
 	set -e
 	a_eq "exit code" "$rc" "0"
@@ -743,13 +744,60 @@ case_pins_ok() {
 case_pins_tag_mismatch() {
 	local rc
 	set +e
-	scripts/check-pins.sh v0.0.0-none >/dev/null 2>"$SYSROOT/pins.err"
+	"$REPO_ROOT/scripts/check-pins.sh" v0.0.0-none >/dev/null 2>"$SYSROOT/pins.err"
 	rc=$?
 	set -e
 	a_eq "exit code" "$rc" "1"
 	ERR=$(cat "$SYSROOT/pins.err")
 	a_err_has "check-pins: DESK_IMAGE tag"
 	a_err_has "check-pins: DESKPROXY_IMAGE tag"
+}
+
+# make_pins_tree builds a tiny tree at $1 with a deploy/.env.example holding
+# the given extra lines and a valid platforms/tiktok/template.json.
+make_pins_tree() {
+	local dest=$1
+	shift
+	mkdir -p "$dest/deploy" "$dest/platforms/tiktok"
+	{
+		printf 'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v1.0.0\n'
+		printf 'DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v1.0.0\n'
+		printf 'FOURCAT_IMAGE=digitalmethodsinitiative/4cat:v1.57\n'
+		printf '%s\n' "$@"
+	} >"$dest/deploy/.env.example"
+	cp "$REPO_ROOT/platforms/tiktok/template.json" "$dest/platforms/tiktok/template.json"
+}
+
+case_pins_duplicate_key() {
+	local rc
+	make_pins_tree "$SYSROOT/tree" \
+		'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v2.0.0'
+	set +e
+	CHECK_PINS_ROOT="$SYSROOT/tree" "$REPO_ROOT/scripts/check-pins.sh" v1.0.0 \
+		>/dev/null 2>"$SYSROOT/pins.err"
+	rc=$?
+	set -e
+	a_eq "exit code" "$rc" "1"
+	ERR=$(cat "$SYSROOT/pins.err")
+	a_err_has "check-pins: DESK_IMAGE appears more than once in deploy/.env.example"
+}
+
+case_pins_empty_tag() {
+	local rc
+	make_pins_tree "$SYSROOT/tree"
+	grep -v '^FOURCAT_IMAGE=' "$SYSROOT/tree/deploy/.env.example" \
+		>"$SYSROOT/tree/deploy/.env.example.new"
+	printf 'FOURCAT_IMAGE=digitalmethodsinitiative/4cat:\n' \
+		>>"$SYSROOT/tree/deploy/.env.example.new"
+	mv "$SYSROOT/tree/deploy/.env.example.new" "$SYSROOT/tree/deploy/.env.example"
+	set +e
+	CHECK_PINS_ROOT="$SYSROOT/tree" "$REPO_ROOT/scripts/check-pins.sh" v1.0.0 \
+		>/dev/null 2>"$SYSROOT/pins.err"
+	rc=$?
+	set -e
+	a_eq "exit code" "$rc" "1"
+	ERR=$(cat "$SYSROOT/pins.err")
+	a_err_has "check-pins: FOURCAT_IMAGE must be a registry path with a tag"
 }
 
 run_case ok-fresh case_ok_fresh
@@ -789,6 +837,8 @@ run_case update-template-digest-changed case_update_template_digest_changed
 run_case update-pins-invalid case_update_pins_invalid
 run_case pins-ok case_pins_ok
 run_case pins-tag-mismatch case_pins_tag_mismatch
+run_case pins-duplicate-key case_pins_duplicate_key
+run_case pins-empty-tag case_pins_empty_tag
 
 echo "$PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then

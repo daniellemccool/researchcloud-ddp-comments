@@ -3,10 +3,15 @@
 # Exits 0 when deploy/.env.example pins DESK_IMAGE and DESKPROXY_IMAGE to
 # <tag>, FOURCAT_IMAGE carries a tag, and every platforms/*/template.json is
 # a well-formed manifest; otherwise one line per failure on stderr, exit 1.
-# No argument: usage, exit 2.
+# No argument: usage, exit 2. CHECK_PINS_ROOT overrides the repository root
+# (default: the checkout this script lives in); the tests use it.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+if [ -n "${CHECK_PINS_ROOT:-}" ]; then
+	cd "$CHECK_PINS_ROOT"
+else
+	cd "$(dirname "${BASH_SOURCE[0]}")/.."
+fi
 
 if [ "$#" -ne 1 ]; then
 	echo "usage: scripts/check-pins.sh <tag>" >&2
@@ -21,25 +26,42 @@ fail() {
 	failed=1
 }
 
-env_pin() {
-	sed -n "s/^$1=//p" deploy/.env.example
+env_example=deploy/.env.example
+
+# env_value reads KEY the way deploy/lib.sh does: the FIRST matching line.
+env_value() {
+	sed -n "s/^$1=//p" "$env_example" | head -n 1
 }
 
-for key in DESK_IMAGE DESKPROXY_IMAGE; do
-	value=$(env_pin "$key")
-	if [ -z "$value" ]; then
-		fail "$key missing in deploy/.env.example"
-	elif [ "${value##*:}" != "$tag" ]; then
-		fail "$key tag ${value##*:} differs from $tag"
-	fi
-done
+# env_count counts the KEY= lines; a duplicate is a failure of its own.
+env_count() {
+	grep -c "^$1=" "$env_example" || true
+}
 
-fourcat=$(env_pin FOURCAT_IMAGE)
-if [ -z "$fourcat" ]; then
-	fail "FOURCAT_IMAGE missing in deploy/.env.example"
-elif [[ "$fourcat" != *:* ]]; then
-	fail "FOURCAT_IMAGE has no tag"
-fi
+for key in DESK_IMAGE DESKPROXY_IMAGE FOURCAT_IMAGE; do
+	count=$(env_count "$key")
+	if [ "$count" -eq 0 ]; then
+		fail "$key missing in $env_example"
+		continue
+	fi
+	if [ "$count" -gt 1 ]; then
+		fail "$key appears more than once in $env_example"
+	fi
+	value=$(env_value "$key")
+	# Same regex as deploy/lib.sh; printf '%s' adds no newline, so a trailing
+	# CR cannot hide behind line matching.
+	if ! printf '%s' "$value" | grep -Eqx '^[A-Za-z0-9][A-Za-z0-9./_-]*:[A-Za-z0-9._-]+$'; then
+		fail "$key must be a registry path with a tag"
+		continue
+	fi
+	case $key in
+	DESK_IMAGE | DESKPROXY_IMAGE)
+		if [ "${value##*:}" != "$tag" ]; then
+			fail "$key tag ${value##*:} differs from $tag"
+		fi
+		;;
+	esac
+done
 
 shopt -s nullglob
 manifests=(platforms/*/template.json)

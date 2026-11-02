@@ -77,9 +77,53 @@ jobs:
           printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GH_USER" --password-stdin
           skopeo copy --all "docker://$SRC" "docker://$DEST:$TAG"
 
+      # The branch `release` moves only when everything a launch needs
+      # exists: the artifact named by every platforms/*/template.json must be
+      # an asset of the GitHub release for this tag (uploaded by hand right
+      # after the tag was pushed). Poll every 30 s for up to 40 minutes; a
+      # missing release counts as "not yet". On timeout the job fails, so the
+      # branch does not move.
+      - name: Wait for the template artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 40 * 60))
+          while :; do
+            assets=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            missing=""
+            for m in platforms/*/template.json; do
+              artifact=$(jq -r '.artifact' "$m")
+              if ! printf '%s\n' "$assets" | grep -qx "$artifact"; then
+                missing="$missing $artifact"
+              fi
+            done
+            if [ -z "$missing" ]; then
+              echo "all template artifacts are uploaded for $GITHUB_REF_NAME"
+              exit 0
+            fi
+            echo "check at ${SECONDS}s: still missing:$missing"
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "timed out after 40 minutes waiting for template artifacts:$missing" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
       # The catalog component's tag field is the branch `release` and never
       # changes; this push fast-forwards it to the tagged commit. No force
       # flag: a tag that is not a descendant of the branch fails the job, and
       # the component keeps pointing at the previous release.
       - name: Move the release branch
-        run: git push origin HEAD:refs/heads/release
+        run: |
+          set -euo pipefail
+          # actions/checkout@v4 checks out the tag only, so fetch the branch
+          # explicitly; tolerate it missing on the very first release.
+          git fetch --no-tags origin +refs/heads/release:refs/remotes/origin/release || true
+          if git rev-parse --verify -q refs/remotes/origin/release >/dev/null; then
+            git merge-base --is-ancestor refs/remotes/origin/release HEAD || {
+              echo "release branch is not an ancestor of $GITHUB_REF_NAME" >&2
+              exit 1
+            }
+          fi
+          git push origin HEAD:refs/heads/release
