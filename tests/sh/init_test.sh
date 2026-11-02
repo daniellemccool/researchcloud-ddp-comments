@@ -602,6 +602,8 @@ case_update_pull_fails() {
 	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
 		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
 	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
 }
 
 case_update_explicit_storage_path() {
@@ -648,6 +650,8 @@ case_update_tag_mismatch() {
 	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
 		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
 	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
 }
 
 case_update_template_changed() {
@@ -672,6 +676,8 @@ case_update_template_changed() {
 	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
 		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
 	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
 }
 
 case_update_template_digest_changed() {
@@ -698,6 +704,8 @@ case_update_template_digest_changed() {
 	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
 		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
 	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
 }
 
 case_update_pins_invalid() {
@@ -705,6 +713,8 @@ case_update_pins_invalid() {
 	touch "$SYSROOT/repo/old-copy-marker"
 	run_init_repo "$SYSROOT/repo"
 	a_rc 0
+	local d
+	d=$(desk)
 	make_release_tarball "$SYSROOT/release.tar.gz"
 	# Drop the DESKPROXY_IMAGE line inside the tarball's .env.example.
 	mkdir "$SYSROOT/relx"
@@ -724,6 +734,8 @@ case_update_pins_invalid() {
 	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
 		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
 	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
 }
 
 # N1: the verified template tar must not survive the launch in $TMPDIR.
@@ -778,7 +790,7 @@ case_update_postswap_exit() {
 	make_release_tarball "$SYSROOT/release.tar.gz"
 	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz DESK_FAIL_POSTSWAP=1
 	run_init_repo "$SYSROOT/repo" update v0.2.0-test
-	[ "$RC" -ne 0 ] || a_fail "expected a non-zero exit, got 0"
+	a_rc 1
 	a_err_has "update: restoring previous repository copy"
 	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
 	a_eq "desk.json and .env byte-identical" \
@@ -805,6 +817,49 @@ case_update_fixed_images_from_new_compose() {
 	a_rc 0
 	a_out_has "would pull postgres:99"
 	a_out_has "would pull memcached:99"
+}
+
+# Re-entrancy of update_restore: a signal landing after the backup move but
+# before swap_state was recorded re-enters with swap_state=2 while $backup is
+# already consumed and $REPO_ROOT holds the restored copy. The second call
+# must not delete the restored copy. The case sources lib.sh directly and
+# drives update_restore twice; the swap_state=2 re-set models the state at the
+# moment of the signal.
+case_update_restore_reentrant() {
+	local out rc
+	set +e
+	out=$(bash -c '
+		set -eu
+		. "$1/deploy/lib.sh"
+		rr=$2
+		REPO_ROOT=$rr/repo
+		backup=$rr/repo.old.123
+		DESK_ROOT=$rr/desk
+		dj=$DESK_ROOT/desk.json
+		dj_keep=$DESK_ROOT/desk.json.keep.123
+		dj_new=""
+		swap_state=2
+		update_done=0
+		mkdir -p "$REPO_ROOT" "$backup" "$DESK_ROOT"
+		touch "$REPO_ROOT/new-copy" "$backup/old-copy"
+		printf "old desk\n" >"$dj"
+		cp "$dj" "$dj_keep"
+		update_restore
+		# Re-entry state: the signal arrived after the backup move, before
+		# swap_state was recorded as 0.
+		swap_state=2
+		update_restore
+		[ -f "$REPO_ROOT/old-copy" ] || { echo "restored copy missing"; exit 1; }
+		[ ! -e "$REPO_ROOT/new-copy" ] || { echo "new copy remains"; exit 1; }
+		[ -z "$(ls "$rr"/*.failed.* 2>/dev/null)" ] || { echo "failed.* remains"; exit 1; }
+		[ -z "$(ls "$rr"/*.old.* 2>/dev/null)" ] || { echo "old.* remains"; exit 1; }
+		[ "$(cat "$dj")" = "old desk" ] || { echo "desk.json not restored"; exit 1; }
+		[ ! -e "$dj_keep" ] || { echo "keep file remains"; exit 1; }
+	' bash "$REPO_ROOT" "$SYSROOT/rr" 2>&1)
+	rc=$?
+	set -e
+	a_eq "reentrant restore exit" "$rc" "0"
+	[ -z "$out" ] || a_fail "restore output: $out"
 }
 
 # The pin cases run against the REAL checkout files, not the installed copy,
@@ -920,6 +975,7 @@ run_case template-tmp-cleaned case_template_tmp_cleaned
 run_case update-postswap-fails case_update_postswap_fails
 run_case update-postswap-exit case_update_postswap_exit
 run_case update-fixed-images-from-new-compose case_update_fixed_images_from_new_compose
+run_case update-restore-reentrant case_update_restore_reentrant
 run_case pins-ok case_pins_ok
 run_case pins-tag-mismatch case_pins_tag_mismatch
 run_case pins-duplicate-key case_pins_duplicate_key

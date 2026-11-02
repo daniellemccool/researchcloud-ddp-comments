@@ -736,21 +736,36 @@ fourcat_mirror_ref() {
 # update_restore puts the previous repository copy back according to
 # swap_state (0 = not swapped, 1 = old copy moved to $backup, 2 = new copy in
 # place), restores the kept desk.json, removes $dj_new and resets swap_state.
-# Idempotent; runs with set +e so one failing step cannot abort the rollback
-# (the kept desk.json is outside the cleanup list and survives until here).
+# Idempotent: a call with swap_state = 0 touches nothing. It runs with set +e
+# and with HUP/INT/TERM ignored, so one failing step or a signal cannot abort
+# or re-enter the rollback (the kept desk.json is outside the cleanup list and
+# survives until here). State is recorded after each step, so a re-entry does
+# the right thing; the new copy is moved aside, never rm -rf'd in place, and
+# nothing is ever mv'd onto an existing $REPO_ROOT.
 update_restore() {
+	trap '' HUP INT TERM
 	set +e
-	if [ "$swap_state" = "2" ]; then
-		rm -rf "$REPO_ROOT"
+	if [ "$swap_state" = "2" ] && [ -e "$backup" ] && [ -e "$REPO_ROOT" ]; then
+		if mv "$REPO_ROOT" "$REPO_ROOT.failed.$$"; then
+			swap_state=1
+		else
+			printf 'init: update: could not move %s aside\n' "$REPO_ROOT" >&2
+		fi
 	fi
-	if [ "$swap_state" -ge 1 ]; then
-		if ! mv "$backup" "$REPO_ROOT"; then
+	if [ "$swap_state" -ge 1 ] && [ -e "$backup" ] && [ ! -e "$REPO_ROOT" ]; then
+		if mv "$backup" "$REPO_ROOT"; then
+			swap_state=0
+		else
 			printf 'init: update: could not move %s back\n' "$backup" >&2
 		fi
 	fi
+	if [ "$swap_state" = "0" ] && [ -e "$REPO_ROOT.failed.$$" ]; then
+		rm -rf "$REPO_ROOT.failed.$$"
+	fi
 	if [ -n "${dj_keep:-}" ] && [ -f "$dj_keep" ]; then
-		if cp "$dj_keep" "$dj" && rm -f "$dj_keep"; then
-			:
+		if cp "$dj_keep" "$dj"; then
+			rm -f "$dj_keep" ||
+				printf 'init: update: could not remove %s\n' "$dj_keep" >&2
 		else
 			printf 'init: update: desk.json restore failed; the previous desk.json is kept at %s\n' "$dj_keep" >&2
 		fi
@@ -856,11 +871,6 @@ update_mode() {
 	# pins are resolved and checked, and the images are pulled from the new
 	# copy's compose file.
 	resolve_update_desk_root
-	# The kept desk.json lives OUTSIDE the cleanup list ($tmp is removed by
-	# cleanup), so a failed rollback cannot delete the only copy of the
-	# previous desk.json.
-	dj_keep=$DESK_ROOT/desk.json.keep.$$
-	cp "$dj" "$dj_keep"
 	backup=$REPO_ROOT.old.$$
 	if [ -f "$REPO_ROOT/deploy/.env" ]; then
 		cp "$REPO_ROOT/deploy/.env" "$tmp/env.keep"
@@ -888,6 +898,12 @@ update_mode() {
 	# it is never validated, validate_params would refuse the retired names.
 	PARAMS_JSON=$(jq 'del(.desk_root, .layout_version, .package_version, .applied_at)' "$dj")
 	pull_images "$new/deploy/compose.yml"
+	# The kept desk.json lives OUTSIDE the cleanup list ($tmp is removed by
+	# cleanup), so a failed rollback cannot delete the only copy of the
+	# previous desk.json. It is created only now, after every pre-swap
+	# refusal, so a refused update leaves no desk.json.keep.<pid> behind.
+	dj_keep=$DESK_ROOT/desk.json.keep.$$
+	cp "$dj" "$dj_keep"
 	# The swap itself: two renames on one filesystem. Signals are ignored
 	# between them, so a HUP/INT/TERM cannot land between the renames and
 	# leave $REPO_ROOT missing; the EXIT trap still covers a set -e exit in
@@ -897,7 +913,11 @@ update_mode() {
 	swap_state=1
 	if ! mv "$new" "$REPO_ROOT"; then
 		update_restore
-		die "update: install failed, original restored"
+		if [ -e "$REPO_ROOT" ]; then
+			die "update: install failed, original restored"
+		else
+			die "update: could not move $backup back; the previous copy is at $backup"
+		fi
 	fi
 	swap_state=2
 	trap 'exit 130' HUP INT TERM
