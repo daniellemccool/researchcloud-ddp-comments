@@ -12,12 +12,12 @@ priority: default
 
 ## Decision
 
-A collector's Firefox profile is created only by unpacking the release template artifact for the workspace's platform and Zeeschuimer version, after its sha256 matched the digest pinned in the catalog item's `template_sha256` parameter; no profile is prepared by hand on a workspace for a logged-out platform.
+A collector's Firefox profile is created only by unpacking the release template artifact for the workspace's platform and Zeeschuimer version, after its sha256 matched the digest pinned in the release's template manifest; no profile is prepared by hand on a workspace for a logged-out platform.
 
 ## Guidance
 
 - Provisioning copies `templates/release/<platform>-<version>/` into `state/firefox/<user>/` and records the template's generation in `provision.json`; a missing or mismatched artifact stops provisioning with a message naming the artifact, never a silent fallback to an empty profile (`internal/provision/template_test.go`).
-- The trust root is the catalog item, not the release: the init script compares the downloaded artifact against the digest the component parameter carries, so a substituted release file cannot pass; a digest shipped beside the artifact would guard against corruption only.
+- The trust root is the release's git ref: the init script compares the downloaded artifact against the digest in the release's own `platforms/<platform>/template.json` (ADR-0020), so a substituted release file cannot pass; a digest shipped beside the artifact would guard against corruption only.
 - Login-required platforms get their own workspace-template mechanism; it must not reuse the release path or its verification.
 
 ## Why

@@ -41,3 +41,4 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0017 — Keep init.sh to validation, files and pulls; start nothing](./0017-keep-init-sh-to-validation-files-and-pulls-start-nothing.md)
 - [0018 — Never modify or reload nginx from the running desk](./0018-never-modify-or-reload-nginx-from-the-running-desk.md)
 - [0019 — Ship no Python in the product tree](./0019-ship-no-python-in-the-product-tree.md)
+- [0020 — Take every image and template pin from the checked-out release, never from the catalog item](./0020-take-every-image-and-template-pin-from-the-checked-out-release-never-from-the-catalog-item.md)
