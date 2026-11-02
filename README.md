@@ -5,9 +5,8 @@ donated TikTok watch histories. Each collector gets their own SRAM-gated, stream
 Firefox session where Zeeschuimer captures the comments and uploads them to 4CAT; a
 mitmproxy sidecar keeps an automatic copy.
 
-Design: `docs/superpowers/specs/2026-10-02-monday-handover-chain-design.md` (the desk
-part is superseded by per-user sessions, see `docs/students-runbook.md` once written).
-Spike record (2026-09-07): `docs/spike-runbook.md`, `docs/spike-compose-2026-09-07.yml`.
+Architecture decisions: `docs/decisions/README.md`. Release runbook: `docs/release.md`.
+Catalog item record: `docs/catalog-item.md`.
 
 | Path | Runs on | Purpose |
 |---|---|---|

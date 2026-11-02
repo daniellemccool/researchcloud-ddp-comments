@@ -1,7 +1,6 @@
 ---
 status: accepted
 date: "2026-10-30"
-source: docs/superpowers/specs/2026-10-29-box-first-desk-design.md
 category: Provisioning
 applies_to:
     - internal/provision/steps.go

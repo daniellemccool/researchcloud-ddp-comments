@@ -8,3 +8,11 @@ __pycache__/
 /.cache/
 deploy/.resolved.yml
 deploy/.env
+/CLAUDE.md
+/.claude/
+/docs/superpowers/
+/docs/box-inventory-*.md
+/docs/proxy-spike-*.md
+/docs/sandbox-log.md
+/docs/spike-runbook.md
+/docs/spike-compose-*.yml
