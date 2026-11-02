@@ -17,8 +17,13 @@ jobs:
   images:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 is load-bearing: the Move the release branch step runs
+      # git merge-base --is-ancestor against origin/release, which needs the
+      # tagged commit's full history, not the default shallow tag checkout.
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Check the pins
         run: scripts/check-pins.sh "$GITHUB_REF_NAME"
@@ -79,22 +84,37 @@ jobs:
 
       # The branch `release` moves only when everything a launch needs
       # exists: the artifact named by every platforms/*/template.json must be
-      # an asset of the GitHub release for this tag (uploaded by hand right
-      # after the tag was pushed). Poll every 30 s for up to 40 minutes; a
-      # missing release counts as "not yet". On timeout the job fails, so the
-      # branch does not move.
+      # a fully uploaded asset of the published (non-draft) GitHub release
+      # for this tag (uploaded by hand right after the tag was pushed). Poll
+      # every 30 s for up to 40 minutes; a missing release counts as "not
+      # yet". On timeout the job fails, so the branch does not move.
       - name: Wait for the template artifacts
+        timeout-minutes: 45
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           deadline=$((SECONDS + 40 * 60))
           while :; do
-            assets=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            if json=$(gh release view "$GITHUB_REF_NAME" --json assets,isDraft 2>/tmp/gh-err); then
+              :
+            else
+              gh_err=$(cat /tmp/gh-err)
+              case $gh_err in
+              *"not found"* | *"Not Found"* | *"404"*)
+                json="" # release not created yet: keep polling
+                ;;
+              *)
+                echo "gh release view error (continuing to poll): $gh_err"
+                json=""
+                ;;
+              esac
+            fi
             missing=""
             for m in platforms/*/template.json; do
               artifact=$(jq -r '.artifact' "$m")
-              if ! printf '%s\n' "$assets" | grep -qx "$artifact"; then
+              if ! printf '%s' "$json" | jq -e --arg n "$artifact" \
+                '(.isDraft | not) and any(.assets[]; .name == $n and .state == "uploaded")' >/dev/null; then
                 missing="$missing $artifact"
               fi
             done
@@ -117,8 +137,9 @@ jobs:
       - name: Move the release branch
         run: |
           set -euo pipefail
-          # actions/checkout@v4 checks out the tag only, so fetch the branch
-          # explicitly; tolerate it missing on the very first release.
+          # The checkout is full (fetch-depth: 0), so the ancestor check has
+          # the history it needs; fetch the branch ref explicitly and tolerate
+          # it missing on the very first release.
           git fetch --no-tags origin +refs/heads/release:refs/remotes/origin/release || true
           if git rev-parse --verify -q refs/remotes/origin/release >/dev/null; then
             git merge-base --is-ancestor refs/remotes/origin/release HEAD || {
