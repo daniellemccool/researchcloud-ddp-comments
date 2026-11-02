@@ -13,8 +13,8 @@ launch), where the two SRAM groups and the volume must exist.
 Script type Docker Compose. Repository
 `https://github.com/daniellemccool/researchcloud-ddp-comments` (public), path
 `deploy/compose.yml`, tag field = the branch `release`, a moving ref the
-release workflow fast-forwards to every tagged commit (so the component is
-never edited per release; `v0.1.0-alpha.2` = bcf4473 today). The script
+release workflow fast-forwards to every tagged commit, so the component is
+never edited per release (`v0.1.0-alpha.3` = the alpha.3 commit). The script
 `init.sh` is named on the ITEM, as the overwrite `docker_initialization_command`
 of the SRC-External Docker Compose component (there is no field for it on this
 component): the plugin resolves it relative to the compose file's directory,
@@ -44,24 +44,17 @@ none; both are N/A for the platform-sourced parameters.
 | `desk_max_running` | Fixed | `auto` | yes | no | keep |
 | `desk_storage_path` | Fixed | `auto` | yes | no | keep |
 | `fourcat_enabled` | Fixed | `true` | yes | no | keep |
-| `fourcat_image` | Fixed | `ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57` | yes | no | keep (leaves in alpha.3) |
-| `desk_image` | Fixed | `ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.1.0-alpha.2` | yes | no | keep (leaves in alpha.3) |
-| `deskproxy_image` | Fixed | `ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.1.0-alpha.2` | yes | no | keep (leaves in alpha.3) |
-| `zeeschuimer_version` | Fixed | `1.14.3` | yes | no | keep (leaves in alpha.3) |
-| `template_sha256` | Fixed | `143aa7b6055ad6c4d740a2cccf8b24209c2acf5424ce4aa33e724557e22d507c` | yes | no | keep (leaves in alpha.3) |
 | `co_id` | Workspace (`co_id`) | none | N/A | N/A | keep |
 | `co_name` | Workspace (`co_name`) | none | N/A | N/A | keep |
 | `workspace_fqdn` | Resource (the workspace's FQDN) | none | N/A | N/A | keep |
 
-The five pin parameters (images, Zeeschuimer version, digest) duplicate what the
-checked-out release already pins in `deploy/.env.example`; they move into the
-repository in alpha.3 so that a release never needs a portal edit.
+Image references and the template digest are not parameters: the init script reads
+them from the checked-out release (`deploy/.env.example`,
+`platforms/<platform>/template.json`; ADR-0020), and refuses a component that still
+declares one.
 
 Notes on the values:
 
-- The image parameters are full references into the GHCR mirror, not Docker Hub.
-  The init script derives the release tag, and so the template artifact's
-  download URL, from the tag of `desk_image`; it must equal the git tag.
 - `desk_collector_role` and `desk_admin_role` must match `^src_co_[A-Za-z0-9_-]+$`
   and each be held by at least one CO member. The collector default is the
   placeholder so an unedited launch fails loudly.
@@ -99,13 +92,15 @@ overwrites below.
 - The two SRAM groups (collector and admin roles) exist and each has at least one
   member; the init script refuses otherwise.
 - The volume exists in the launching CO.
-- `template_sha256` and the three image parameters match the release.
+- The checked-out release's `.env.example` names images that exist in GHCR and its
+  `template.json` digest matches the uploaded artifact (`scripts/check-pins.sh <tag>`
+  passed when the release was tagged).
 
 ## Template artifacts
 
-| Platform | Zeeschuimer | Artifact | SHA256 | Built on |
-|---|---|---|---|---|
-| tiktok | 1.14.3 | `ddp-comments-template-tiktok-1.14.3.tar` | `143aa7b6055ad6c4d740a2cccf8b24209c2acf5424ce4aa33e724557e22d507c` | 2026-10-30, from the sandbox `state/firefox/_template` profile |
+| Platform | Zeeschuimer | Artifact | SHA256 | Built on | Manifest |
+|---|---|---|---|---|---|
+| tiktok | 1.14.3 | `ddp-comments-template-tiktok-1.14.3.tar` | `143aa7b6055ad6c4d740a2cccf8b24209c2acf5424ce4aa33e724557e22d507c` | 2026-10-30, from the sandbox `state/firefox/_template` profile | `platforms/tiktok/template.json` |
 
 ## Snags
 
