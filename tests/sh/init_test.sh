@@ -154,9 +154,9 @@ make_release_tarball() {
 		printf 'name: desk\n'
 		printf 'services:\n'
 		printf '  db:\n'
-		printf '    image: postgres:16\n'
+		printf '    image: %s\n' "${DESK_TEST_PG_IMAGE:-postgres:16}"
 		printf '  cache:\n'
-		printf '    image: memcached:1.6\n'
+		printf '    image: %s\n' "${DESK_TEST_MEMCACHED_IMAGE:-memcached:1.6}"
 	} >"$top/deploy/compose.yml"
 	jq -n --arg zsv "$zsv" --arg sha "$sha" \
 		--arg artifact "ddp-comments-template-tiktok-$zsv.tar" \
@@ -726,6 +726,87 @@ case_update_pins_invalid() {
 	fi
 }
 
+# N1: the verified template tar must not survive the launch in $TMPDIR.
+case_template_tmp_cleaned() {
+	mkdir -p "$SYSROOT/tmp"
+	TMPDIR=$SYSROOT/tmp
+	export TMPDIR
+	run_init
+	a_rc 0
+	[ -z "$(ls -A "$SYSROOT/tmp")" ] || a_fail "temp files remain: $(ls -A "$SYSROOT/tmp")"
+	unset TMPDIR
+}
+
+# N4: a post-swap failure (missing 4cat-postgres secret) must restore the old
+# repository copy and leave desk.json/.env byte-identical.
+case_update_postswap_fails() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d before
+	d=$(desk)
+	before=$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")
+	rm "$d/secrets/4cat-postgres"
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 2
+	a_err_has "4cat-postgres"
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	a_eq "desk.json and .env byte-identical" \
+		"$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")" "$before"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+	[ ! -e "$d/desk.json.new" ] || a_fail "desk.json.new remains"
+	if ls "$d"/desk.json.keep.* >/dev/null 2>&1; then
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
+	fi
+}
+
+# N3: a set -e exit inside the post-swap window (DESK_FAIL_POSTSWAP) must go
+# through the EXIT trap and restore the previous repository copy.
+case_update_postswap_exit() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d before
+	d=$(desk)
+	before=$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz DESK_FAIL_POSTSWAP=1
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	[ "$RC" -ne 0 ] || a_fail "expected a non-zero exit, got 0"
+	a_err_has "update: restoring previous repository copy"
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	a_eq "desk.json and .env byte-identical" \
+		"$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")" "$before"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+	[ ! -e "$d/desk.json.new" ] || a_fail "desk.json.new remains"
+	if ls "$d"/desk.json.keep.* >/dev/null 2>&1; then
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
+	fi
+}
+
+# N2: the pre-swap pull must read the fixed images from the NEW copy's
+# compose.yml, not the old copy's.
+case_update_fixed_images_from_new_compose() {
+	make_installed_copy "$SYSROOT/repo"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	DESK_TEST_PG_IMAGE=postgres:99 DESK_TEST_MEMCACHED_IMAGE=memcached:99 \
+		make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz DESK_LIST_PULLS=1
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 0
+	a_out_has "would pull postgres:99"
+	a_out_has "would pull memcached:99"
+}
+
 # The pin cases run against the REAL checkout files, not the installed copy,
 # so they capture rc and stderr themselves (the run_init* helpers run
 # init.sh, not check-pins.sh). The script is called by absolute path; the
@@ -835,6 +916,10 @@ run_case update-tag-mismatch case_update_tag_mismatch
 run_case update-template-changed case_update_template_changed
 run_case update-template-digest-changed case_update_template_digest_changed
 run_case update-pins-invalid case_update_pins_invalid
+run_case template-tmp-cleaned case_template_tmp_cleaned
+run_case update-postswap-fails case_update_postswap_fails
+run_case update-postswap-exit case_update_postswap_exit
+run_case update-fixed-images-from-new-compose case_update_fixed_images_from_new_compose
 run_case pins-ok case_pins_ok
 run_case pins-tag-mismatch case_pins_tag_mismatch
 run_case pins-duplicate-key case_pins_duplicate_key

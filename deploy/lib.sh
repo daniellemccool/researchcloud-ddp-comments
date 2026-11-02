@@ -17,7 +17,9 @@ backup=
 dj=
 dj_keep=
 dj_new=
-update_swapped=0
+swap_state=0
+update_done=0
+TEMPLATE_TMP=
 CLEANUP_FILES=""
 CLEANUP_DIRS=""
 
@@ -75,6 +77,14 @@ register_cleanup_dir() {
 }
 
 cleanup() {
+	# A set -e exit or a signal after the swap (swap_state != 0) but before
+	# the update completed restores the previous repository copy first; the
+	# kept desk.json lives outside the cleanup list, so it survives until
+	# the restore has used it.
+	if [ "${swap_state:-0}" != 0 ] && [ "${update_done:-0}" = 0 ]; then
+		printf 'init: update: restoring previous repository copy from %s\n' "$backup" >&2
+		update_restore
+	fi
 	# Newline-separated lists, split on newlines only, so a registered path
 	# containing a space is removed as one path.
 	oldifs=$IFS
@@ -548,9 +558,12 @@ install_nginx() {
 
 # fetch_template downloads the release artifact (or copies DESK_TEMPLATE_FILE
 # when DESK_NO_FETCH=1) to a temp file and verifies template_sha256 against it.
-# It prints the verified temp path; install_template reuses that file, so the
-# artifact is fetched exactly once. Called before any file is written, so a
-# mismatch refuses the launch with nothing on disk.
+# It sets TEMPLATE_TMP to the verified temp path and prints nothing, so the
+# caller invokes it directly (no command substitution): the temp file is then
+# registered for cleanup in THIS shell and the EXIT trap removes it.
+# install_template reuses that file, so the artifact is fetched exactly once.
+# Called before any file is written, so a mismatch refuses the launch with
+# nothing on disk.
 fetch_template() {
 	platform=$(param desk_platform)
 	artifact="ddp-comments-template-$platform-$PIN_ZSV.tar"
@@ -569,7 +582,7 @@ fetch_template() {
 	if [ "$got" != "$want" ]; then
 		die "template_sha256: mismatch (expected $want, got $got)"
 	fi
-	printf '%s' "$tmp"
+	TEMPLATE_TMP=$tmp
 }
 
 # install_template extracts the already-verified artifact ($1) into the staging
@@ -600,13 +613,6 @@ install_template() {
 # update path pre-pulls from the NEW copy's compose file.
 pull_images() {
 	pull_compose=$1
-	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
-		# Test override: simulate a failed pull while docker is disabled.
-		if [ "${DESK_FAIL_PULL:-0}" = "1" ]; then
-			die "docker pull failed: simulated failure (DESK_FAIL_PULL=1)"
-		fi
-		return 0
-	fi
 	# The two fixed images are read from the compose file, not hardcoded; a
 	# compose edit that changes their count must fail loudly, not drop a pull.
 	fixed=$(grep -E '^[[:space:]]+image: (postgres|memcached):[A-Za-z0-9._-]+$' "$pull_compose" | awk '{print $2}')
@@ -614,6 +620,19 @@ pull_images() {
 	set -- $fixed
 	if [ $# -ne 2 ]; then
 		die "compose: expected exactly 2 fixed images (postgres, memcached), found $#"
+	fi
+	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
+		# Test override: simulate a failed pull while docker is disabled.
+		if [ "${DESK_FAIL_PULL:-0}" = "1" ]; then
+			die "docker pull failed: simulated failure (DESK_FAIL_PULL=1)"
+		fi
+		# Test override: list the images that would be pulled.
+		if [ "${DESK_LIST_PULLS:-0}" = "1" ]; then
+			for img in "$PIN_DESK_IMAGE" "$PIN_DESKPROXY_IMAGE" "$PIN_FOURCAT_IMAGE" "$@"; do
+				printf 'init: would pull %s\n' "$img"
+			done
+		fi
+		return 0
 	fi
 	for img in "$PIN_DESK_IMAGE" "$PIN_DESKPROXY_IMAGE" "$PIN_FOURCAT_IMAGE" "$@"; do
 		docker pull "$img" || die "docker pull failed: $img"
@@ -667,13 +686,13 @@ platform_mode() {
 	fi
 	# The template artifact is fetched and its sha256 verified before any file
 	# is written, so a mismatch refuses the launch with nothing on disk.
-	template_tmp=$(fetch_template)
+	fetch_template
 	make_layout
 	write_secrets
 	write_env
 	write_desk_json
 	install_nginx
-	install_template "$template_tmp"
+	install_template "$TEMPLATE_TMP"
 	pull_images "$REPO_ROOT/deploy/compose.yml"
 	write_wrapper
 	echo "init: mode: $MODE"
@@ -714,22 +733,39 @@ fourcat_mirror_ref() {
 	printf '%s/4cat:%s\n' "$GHCR_NS" "$tag"
 }
 
-update_fail() {
-	printf 'init: %s\n' "$*" >&2
-	if [ "${update_swapped:-0}" = "1" ]; then
-		printf 'init: update: restoring previous repository copy from %s\n' "$backup" >&2
+# update_restore puts the previous repository copy back according to
+# swap_state (0 = not swapped, 1 = old copy moved to $backup, 2 = new copy in
+# place), restores the kept desk.json, removes $dj_new and resets swap_state.
+# Idempotent; runs with set +e so one failing step cannot abort the rollback
+# (the kept desk.json is outside the cleanup list and survives until here).
+update_restore() {
+	set +e
+	if [ "$swap_state" = "2" ]; then
 		rm -rf "$REPO_ROOT"
-		mv "$backup" "$REPO_ROOT"
-		update_swapped=0
-		if [ -n "${dj_keep:-}" ] && [ -f "$dj_keep" ]; then
-			cp "$dj_keep" "$dj"
+	fi
+	if [ "$swap_state" -ge 1 ]; then
+		if ! mv "$backup" "$REPO_ROOT"; then
+			printf 'init: update: could not move %s back\n' "$backup" >&2
 		fi
-	else
-		printf 'init: update: previous repository copy kept at %s\n' "$backup" >&2
+	fi
+	if [ -n "${dj_keep:-}" ] && [ -f "$dj_keep" ]; then
+		if cp "$dj_keep" "$dj" && rm -f "$dj_keep"; then
+			:
+		else
+			printf 'init: update: desk.json restore failed; the previous desk.json is kept at %s\n' "$dj_keep" >&2
+		fi
 	fi
 	if [ -n "${dj_new:-}" ]; then
 		rm -f "$dj_new"
 	fi
+	swap_state=0
+	set -e
+}
+
+update_fail() {
+	printf 'init: %s\n' "$*" >&2
+	printf 'init: update: restoring previous repository copy from %s\n' "$backup" >&2
+	update_restore
 	exit 2
 }
 
@@ -820,7 +856,10 @@ update_mode() {
 	# pins are resolved and checked, and the images are pulled from the new
 	# copy's compose file.
 	resolve_update_desk_root
-	dj_keep=$tmp/dj.keep
+	# The kept desk.json lives OUTSIDE the cleanup list ($tmp is removed by
+	# cleanup), so a failed rollback cannot delete the only copy of the
+	# previous desk.json.
+	dj_keep=$DESK_ROOT/desk.json.keep.$$
 	cp "$dj" "$dj_keep"
 	backup=$REPO_ROOT.old.$$
 	if [ -f "$REPO_ROOT/deploy/.env" ]; then
@@ -849,13 +888,19 @@ update_mode() {
 	# it is never validated, validate_params would refuse the retired names.
 	PARAMS_JSON=$(jq 'del(.desk_root, .layout_version, .package_version, .applied_at)' "$dj")
 	pull_images "$new/deploy/compose.yml"
-	# The swap itself: two renames on one filesystem.
+	# The swap itself: two renames on one filesystem. Signals are ignored
+	# between them, so a HUP/INT/TERM cannot land between the renames and
+	# leave $REPO_ROOT missing; the EXIT trap still covers a set -e exit in
+	# the window.
+	trap '' HUP INT TERM
 	mv "$REPO_ROOT" "$backup"
+	swap_state=1
 	if ! mv "$new" "$REPO_ROOT"; then
-		mv "$backup" "$REPO_ROOT"
+		update_restore
 		die "update: install failed, original restored"
 	fi
-	update_swapped=1
+	swap_state=2
+	trap 'exit 130' HUP INT TERM
 	if [ -f "$tmp/env.keep" ]; then
 		mkdir -p "$REPO_ROOT/deploy"
 		cp "$tmp/env.keep" "$REPO_ROOT/deploy/.env"
@@ -870,6 +915,11 @@ update_mode() {
 	fi
 	PG_SECRET=$(cat "$DESK_ROOT/secrets/4cat-postgres")
 	write_env
+	# Test hook (DESK_NO_DOCKER=1 only): a set -e exit inside the post-swap
+	# window, to exercise the EXIT-trap restore path.
+	if [ "${DESK_NO_DOCKER:-0}" = "1" ] && [ "${DESK_FAIL_POSTSWAP:-0}" = "1" ]; then
+		false
+	fi
 	dj_new=$dj.new
 	if ! jq --arg di "$PIN_DESK_IMAGE" --arg dpi "$PIN_DESKPROXY_IMAGE" \
 		--arg fci "$PIN_FOURCAT_IMAGE" --arg release "$release" \
@@ -888,6 +938,8 @@ update_mode() {
 			update_fail "update: compose up failed"
 	fi
 	echo "docker compose -f $REPO_ROOT/deploy/compose.yml exec desk desk render"
+	update_done=1
+	rm -f "$dj_keep"
 	rm -rf "$backup"
 }
 
