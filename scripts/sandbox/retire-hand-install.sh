@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # retire-hand-install.sh — remove every trace of the hand-made desk install on this box.
 #
+# Run-once: refuses (exit 2) after the compose desk is installed, since it shares the new desk's paths.
+#
 # Dry-run by default: prints one line per action it WOULD take and changes nothing.
 # Real run (owner only, as root):  retire-hand-install.sh --yes
 #
@@ -78,6 +80,24 @@ die() {
 }
 
 docker info >/dev/null 2>&1 || die "docker daemon not reachable (docker info failed)"
+
+# Run-once guard: these are the compose desk's own paths, so any of them means the
+# old hand install is already retired and a second run would wipe the new desk.
+readonly -a NEW_DESK_MARKERS=(
+	/rsc/plugins/ddp-comments/deploy/.env
+	/data/onlinehate_zeeschuimer/desk/desk.json
+	/data/onlinehate_zeeschuimer/desk/secrets/gate
+)
+for marker in "${NEW_DESK_MARKERS[@]}"; do
+	if [[ -e $marker || -L $marker ]]; then
+		echo "error: refusing to run: $marker exists, so the compose desk is installed; this script is run-once" >&2
+		exit 2
+	fi
+done
+if docker inspect desk-desk-1 >/dev/null 2>&1; then
+	echo "error: refusing to run: container desk-desk-1 exists, so the compose desk is installed; this script is run-once" >&2
+	exit 2
+fi
 
 # --- Helpers -----------------------------------------------------------------
 
@@ -253,9 +273,7 @@ run_yes() {
 	fi
 
 	echo "== 5. remove /opt/ddp-comments, symlinks, hand nginx files =="
-	# shellcheck disable=SC2115
 	echo "rm -rf --one-file-system $OPT_DIR"
-	# shellcheck disable=SC2115
 	rm -rf --one-file-system "$OPT_DIR"
 	for f in "${BIN_LINKS[@]}"; do
 		echo "rm -f $f"
@@ -278,23 +296,19 @@ run_yes() {
 
 	echo "== 6. validate and reload nginx =="
 	if ! nginx -t; then
-		echo "error: nginx -t failed; NOT reloading nginx, leaving it untouched (copies in $dir)" >&2
+		echo "error: nginx -t failed; NOT reloading nginx. The four hand nginx files were already removed; their copies are in $dir" >&2
 		exit 1
 	fi
 	echo "systemctl reload nginx"
 	systemctl reload nginx
 
 	echo "== 7. remove the old desk root =="
-	# shellcheck disable=SC2115
 	echo "rm -rf --one-file-system $DESK_ROOT"
-	# shellcheck disable=SC2115
 	rm -rf --one-file-system "$DESK_ROOT"
 
 	echo "== 8. remove home-directory leftovers =="
 	for f in "${HOME_LEFTOVERS[@]}"; do
-		# shellcheck disable=SC2115
 		echo "rm -rf --one-file-system $f"
-		# shellcheck disable=SC2115
 		rm -rf --one-file-system "$f"
 	done
 
