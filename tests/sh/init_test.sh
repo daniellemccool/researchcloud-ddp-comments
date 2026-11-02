@@ -495,6 +495,26 @@ case_manifest_nonstring_value() {
 	a_nothing_written
 }
 
+case_manifest_two_objects() {
+	printf '{"zeeschuimer_version":"zz"}\n' \
+		>>"$SYSROOT/repo/platforms/tiktok/template.json"
+	run_init
+	a_rc 2
+	a_err_has "template.json: must hold exactly one JSON object"
+	a_nothing_written
+}
+
+case_manifest_not_json() {
+	printf 'not json\n' >"$SYSROOT/repo/platforms/tiktok/template.json"
+	run_init
+	a_rc 2
+	a_err_has "template.json: must hold exactly one JSON object"
+	case $ERR in
+	*"jq: error"*) a_fail "raw jq error leaked to stderr: $ERR" ;;
+	esac
+	a_nothing_written
+}
+
 # The update cases run against a minimal installed copy inside the sysroot,
 # because update swaps the repository copy in place.
 case_update_ok() {
@@ -608,6 +628,8 @@ run_case manifest-missing case_manifest_missing
 run_case env-example-missing-pin case_env_example_missing_pin
 run_case manifest-multiline-value case_manifest_multiline_value
 run_case manifest-nonstring-value case_manifest_nonstring_value
+run_case manifest-two-objects case_manifest_two_objects
+run_case manifest-not-json case_manifest_not_json
 run_case update-ok case_update_ok
 run_case update-pull-fails case_update_pull_fails
 run_case update-explicit-storage-path case_update_explicit_storage_path

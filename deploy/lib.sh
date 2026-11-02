@@ -265,6 +265,14 @@ resolve_pins() {
 		collect_err "template.json: not found at $pins_manifest"
 		return 1
 	fi
+	# The manifest must be exactly ONE JSON object: jq judges only the last
+	# value of a multi-object stream and prints one line per object, so two
+	# concatenated objects would otherwise slip through the checks below.
+	# Invalid JSON fails the same check; jq's own error stays off stderr.
+	if ! jq -s -e 'length == 1 and (.[0] | type == "object")' "$pins_manifest" >/dev/null 2>&1; then
+		collect_err "template.json: must hold exactly one JSON object"
+		return 1
+	fi
 	if ! jq -e 'type == "object" and (keys == ["artifact","built_on","template_sha256","zeeschuimer_version"])' \
 		"$pins_manifest" >/dev/null 2>&1; then
 		collect_err "template.json: must hold exactly artifact, built_on, template_sha256, zeeschuimer_version"
