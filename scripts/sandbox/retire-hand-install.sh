@@ -79,13 +79,10 @@ die() {
 	exit 1
 }
 
-docker info >/dev/null 2>&1 || die "docker daemon not reachable (docker info failed)"
-
-# Run-once guard: these are the compose desk's own paths, so any of them means the
-# old hand install is already retired and a second run would wipe the new desk.
+# Run-once guard: these exist only in the compose desk's layout (the legacy hand
+# install had neither), so any of them means a second run would wipe the new desk.
 readonly -a NEW_DESK_MARKERS=(
 	/rsc/plugins/ddp-comments/deploy/.env
-	/data/onlinehate_zeeschuimer/desk/desk.json
 	/data/onlinehate_zeeschuimer/desk/secrets/gate
 )
 for marker in "${NEW_DESK_MARKERS[@]}"; do
@@ -94,6 +91,9 @@ for marker in "${NEW_DESK_MARKERS[@]}"; do
 		exit 2
 	fi
 done
+
+docker info >/dev/null 2>&1 || die "docker daemon not reachable (docker info failed)"
+
 if docker inspect desk-desk-1 >/dev/null 2>&1; then
 	echo "error: refusing to run: container desk-desk-1 exists, so the compose desk is installed; this script is run-once" >&2
 	exit 2
