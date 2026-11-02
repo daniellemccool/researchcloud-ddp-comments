@@ -177,4 +177,43 @@ func TestLoadDeskJSONStrict(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("layout_version 2 is refused and names the value", func(t *testing.T) {
+		dir := writeDeskRoot(t, func(m map[string]any) { m["layout_version"] = 2 }, true)
+		_, err := Load(filepath.Join(dir, "desk.json"))
+		if err == nil || !strings.Contains(err.Error(), "layout_version") || !strings.Contains(err.Error(), "2") {
+			t.Fatalf("err = %v, want one naming layout_version and the value 2", err)
+		}
+	})
+}
+
+// TestNumericParamBounds: the numeric parameters accept 1-9 digits, matching
+// the shell layer's ^[0-9]{1,9}$.
+func TestNumericParamBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+		want  bool // true: Load must succeed
+	}{
+		{"nine digits ok", "desk_max_sessions", "123456789", true},
+		{"ten digits refused", "desk_max_sessions", "1234567890", false},
+		{"twenty digits refused", "desk_max_sessions", "12345678901234567890", false},
+		{"non-digit refused", "desk_idle_seconds", "90a", false},
+		{"empty refused", "desk_timer_minutes", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeDeskRoot(t, func(m map[string]any) { m[tc.key] = tc.value }, true)
+			_, err := Load(filepath.Join(dir, "desk.json"))
+			if tc.want {
+				if err != nil {
+					t.Fatalf("Load: %v, want success", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), "1-9 digits") {
+				t.Fatalf("err = %v, want one naming %s and \"1-9 digits\"", err, tc.key)
+			}
+		})
+	}
 }

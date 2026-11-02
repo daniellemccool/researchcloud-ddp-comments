@@ -330,17 +330,27 @@ func TestRedirectReturnedNotFollowed(t *testing.T) {
 	var hits atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		http.Redirect(w, r, "/login/", http.StatusFound)
+		w.Header().Set("Location", "/login/")
+		w.WriteHeader(http.StatusFound)
+		_, _ = io.WriteString(w, "redirect-body-7f3a")
 	}))
 	defer up.Close()
 
 	rig := newRig(t, up.URL, strp("abc"), nil)
-	resp, _ := rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k", nil, "")
+	resp, body := rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k", nil, "")
 	if resp.StatusCode != 302 || resp.Header.Get("Location") != "/login/" {
 		t.Errorf("got %d Location %q, want 302 /login/", resp.StatusCode, resp.Header.Get("Location"))
 	}
+	// The response body reaches the client unmodified.
+	if body != "redirect-body-7f3a" {
+		t.Errorf("body %q, want the upstream body unmodified", body)
+	}
 	if hits.Load() != 1 {
 		t.Errorf("upstream saw %d requests, want 1 (redirect not followed)", hits.Load())
+	}
+	// The token value appears nowhere in the proxy log.
+	if strings.Contains(rig.logs.String(), "abc") {
+		t.Errorf("token leaked into the log: %s", rig.logs.String())
 	}
 }
 

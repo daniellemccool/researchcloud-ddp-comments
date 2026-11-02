@@ -111,10 +111,9 @@ func newProxy(p *platform.Platform, meta Meta, out *recordWriter, b *boundary) *
 	proxy.Tr.DisableCompression = true
 	b.install(proxy)
 
-	// The browser speaks HTTP/1.1 to the proxy: goproxy's AllowHTTP2 (the
-	// h2 ALPN) is left off. The spike's websocket pass-through is proven on
-	// h1 only, and h2 and websockets (RFC 8441) cannot be verified in this
-	// task, so Task 4's box check re-tests turning it on.
+	// The browser speaks HTTP/1.1 to the proxy: HTTP/2 to the browser is
+	// disabled (the TLS-next-proto list is left empty, so no h2 ALPN is
+	// offered). Re-enabling it is a plan 2 item.
 	proxy.AllowHTTP2 = false
 
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)

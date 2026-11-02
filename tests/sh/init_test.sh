@@ -36,6 +36,18 @@ run_init() {
 	ERR=$(cat "$SYSROOT/stderr.txt")
 }
 
+# run_init_repo runs init.sh from a copied repository (used by the update
+# cases, which swap the repository copy in place).
+run_init_repo() {
+	local repo=$1
+	shift
+	set +e
+	OUT=$(sh "$repo/deploy/init.sh" "$@" 2>"$SYSROOT/stderr.txt")
+	RC=$?
+	set -e
+	ERR=$(cat "$SYSROOT/stderr.txt")
+}
+
 a_fail() {
 	printf '%s\n' "$*" >"$CASE_ERR_FILE"
 	return 1
@@ -109,6 +121,46 @@ run_case() {
 desk() { printf '%s/data/vol1/desk' "$SYSROOT"; }
 envval() { grep "^$1=" "$REPO_ROOT/deploy/.env" | cut -d= -f2-; }
 
+# a_nothing_written asserts that a refused run left nothing behind: no desk
+# root (and so no layout directories), no deploy/.env, no nginx files.
+a_nothing_written() {
+	[ ! -e "$(desk)" ] || a_fail "desk root was written"
+	[ ! -e "$REPO_ROOT/deploy/.env" ] || a_fail ".env was written"
+	[ -z "$(ls -A "$SYSROOT/etc/nginx/app-location-conf.d")" ] ||
+		a_fail "nginx files were written"
+}
+
+# make_release_tarball builds a minimal release tarball at $1: a top-level
+# <name>/ holding deploy/.env.example (FOURCAT_IMAGE pin) and deploy/compose.yml.
+make_release_tarball() {
+	local dest=$1 rel
+	rel=$(mktemp -d "$SYSROOT/rel-XXXXXX")
+	mkdir -p "$rel/ddp-comments-v0.2.0-test/deploy"
+	printf 'FOURCAT_IMAGE=digitalmethodsinitiative/4cat:v9.99\n' \
+		>"$rel/ddp-comments-v0.2.0-test/deploy/.env.example"
+	printf 'name: desk\nservices: {}\n' \
+		>"$rel/ddp-comments-v0.2.0-test/deploy/compose.yml"
+	tar -czf "$dest" -C "$rel" ddp-comments-v0.2.0-test
+	rm -rf "$rel"
+}
+
+# make_installed_copy creates a MINIMAL "installed repository copy" at $1,
+# holding only what init.sh, update_mode and the harness read from the old
+# copy: deploy/ (init.sh, lib.sh, compose.yml, .env.example, the nginx
+# configs) and the platform definition the parameters name. It never copies
+# $REPO_ROOT itself, so editor/sandbox files in the checkout cannot break
+# the test.
+make_installed_copy() {
+	local dest=$1
+	mkdir -p "$dest/deploy/nginx" "$dest/platforms/tiktok"
+	cp -a "$REPO_ROOT/deploy/init.sh" "$REPO_ROOT/deploy/lib.sh" \
+		"$REPO_ROOT/deploy/compose.yml" "$REPO_ROOT/deploy/.env.example" \
+		"$dest/deploy/"
+	cp -a "$REPO_ROOT/deploy/nginx/desk.conf" "$REPO_ROOT/deploy/nginx/fourcat.conf" \
+		"$dest/deploy/nginx/"
+	cp -a "$REPO_ROOT/platforms/tiktok/platform.json" "$dest/platforms/tiktok/"
+}
+
 case_ok_fresh() {
 	run_init
 	a_rc 0
@@ -175,10 +227,7 @@ case_placeholder_role() {
 	run_init
 	a_rc 2
 	a_err_has "desk_collector_role"
-	[ ! -e "$(desk)" ] || a_fail "desk root was written"
-	[ ! -e "$REPO_ROOT/deploy/.env" ] || a_fail ".env was written"
-	[ -z "$(ls -A "$SYSROOT/etc/nginx/app-location-conf.d")" ] ||
-		a_fail "nginx files were written"
+	a_nothing_written
 }
 
 case_uppercase_role() {
@@ -187,6 +236,7 @@ case_uppercase_role() {
 	run_init
 	a_rc 2
 	a_err_has "desk_collector_role"
+	a_nothing_written
 }
 
 case_crlf_value() {
@@ -195,6 +245,44 @@ case_crlf_value() {
 	run_init
 	a_rc 2
 	a_err_has "desk_contact"
+	a_nothing_written
+}
+
+case_trailing_lf_value() {
+	PLUGIN_PARAMETERS=$(jq -c --arg c $'Danielle\n' '.desk_contact = $c' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	run_init
+	a_rc 2
+	a_err_has "desk_contact"
+	a_nothing_written
+}
+
+case_storage_path_with_space() {
+	PLUGIN_PARAMETERS=$(jq -c --arg sp "$SYSROOT/data/vol 1" '.desk_storage_path = $sp' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	run_init
+	a_rc 2
+	a_err_has "desk_storage_path"
+	a_err_has "whitespace"
+	a_nothing_written
+}
+
+case_too_many_digits() {
+	PLUGIN_PARAMETERS=$(jq -c '.desk_max_sessions = "12345678901234567890"' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	run_init
+	a_rc 2
+	a_err_has "desk_max_sessions"
+	a_err_has "1-9 digits"
+	a_nothing_written
+}
+
+case_fourcat_mirror_ref() {
+	local out
+	out=$(sh -c '. "$1/deploy/lib.sh"; fourcat_mirror_ref "$2"' sh "$REPO_ROOT" 'digitalmethodsinitiative/4cat:v1.57')
+	a_eq "mirror ref" "$out" "ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57"
+	out=$(sh -c '. "$1/deploy/lib.sh"; fourcat_mirror_ref "$2"' sh "$REPO_ROOT" 'registry:5000/x/4cat:v2')
+	a_eq "registry-port ref" "$out" "ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v2"
 }
 
 case_quote_in_contact() {
@@ -288,6 +376,8 @@ case_sha_mismatch() {
 	fi
 	[ -z "$(ls -A "$d/templates/release" 2>/dev/null)" ] ||
 		a_fail "templates/release not empty after mismatch"
+	# The sha256 is verified before any file is written.
+	a_nothing_written
 }
 
 case_apply_mode() {
@@ -307,21 +397,115 @@ case_bad_mode() {
 	a_err_has "usage"
 }
 
+# The update cases run against a minimal installed copy inside the sysroot,
+# because update swaps the repository copy in place.
+case_update_ok() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d repoenv
+	d=$(desk)
+	repoenv=$SYSROOT/repo/deploy/.env
+	a_file "$repoenv"
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 0
+	a_eq "desk_image" "$(jq -r '.desk_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.2.0-test"
+	a_eq "deskproxy_image" "$(jq -r '.deskproxy_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.2.0-test"
+	a_eq "fourcat_image" "$(jq -r '.fourcat_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v9.99"
+	a_eq "package_version" "$(jq -r '.package_version' "$d/desk.json")" "v0.2.0-test"
+	a_eq "env DESK_IMAGE" "$(grep '^DESK_IMAGE=' "$repoenv" | cut -d= -f2-)" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.2.0-test"
+	a_eq "env DESKPROXY_IMAGE" "$(grep '^DESKPROXY_IMAGE=' "$repoenv" | cut -d= -f2-)" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.2.0-test"
+	a_eq "env FOURCAT_IMAGE" "$(grep '^FOURCAT_IMAGE=' "$repoenv" | cut -d= -f2-)" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v9.99"
+	# The old copy is gone: the marker file the minimal copy carried must not
+	# be there any more (the release tarball holds only deploy/).
+	[ ! -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy still present"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+	[ ! -e "$d/desk.json.new" ] || a_fail "desk.json.new remains"
+}
+
+case_update_pull_fails() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d
+	d=$(desk)
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz DESK_FAIL_PULL=1
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 2
+	a_err_has "docker pull failed"
+	# The pull happens before the swap: the old copy, desk.json and .env are
+	# unchanged.
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	a_eq "desk_image unchanged" "$(jq -r '.desk_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.1.0-alpha.1"
+	a_eq "fourcat_image unchanged" "$(jq -r '.fourcat_image' "$d/desk.json")" \
+		"digitalmethodsinitiative/4cat:v1.57"
+	a_eq "env FOURCAT_IMAGE unchanged" \
+		"$(grep '^FOURCAT_IMAGE=' "$SYSROOT/repo/deploy/.env" | cut -d= -f2-)" \
+		"digitalmethodsinitiative/4cat:v1.57"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+}
+
+case_update_explicit_storage_path() {
+	mkdir -p "$SYSROOT/data/vol2"
+	PLUGIN_PARAMETERS=$(jq -c --arg sp "$SYSROOT/data/vol2" '.desk_storage_path = $sp' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	make_installed_copy "$SYSROOT/repo"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d
+	d=$SYSROOT/data/vol2/desk
+	a_file "$d/desk.json"
+	# Drop .env so update must discover desk.json and use its explicit
+	# desk_storage_path despite the two volumes under the sysroot.
+	rm -f "$SYSROOT/repo/deploy/.env"
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 0
+	a_eq "desk_image" "$(jq -r '.desk_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.2.0-test"
+	a_eq "fourcat_image" "$(jq -r '.fourcat_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v9.99"
+}
+
 run_case ok-fresh case_ok_fresh
 run_case python-repr-params case_python_repr_params
 run_case placeholder-role case_placeholder_role
 run_case uppercase-role case_uppercase_role
 run_case crlf-value case_crlf_value
+run_case trailing-lf-value case_trailing_lf_value
 run_case quote-in-contact case_quote_in_contact
 run_case two-failures case_two_failures
 run_case role-held-by-nobody case_role_held_by_nobody
 run_case admin-role-held-by-nobody case_admin_role_held_by_nobody
 run_case two-volumes case_two_volumes
+run_case storage-path-with-space case_storage_path_with_space
+run_case too-many-digits case_too_many_digits
+run_case fourcat-mirror-ref case_fourcat_mirror_ref
 run_case reattach case_reattach
 run_case reattach-newer-layout case_reattach_newer_layout
 run_case sha-mismatch case_sha_mismatch
 run_case apply-mode case_apply_mode
 run_case bad-mode case_bad_mode
+run_case update-ok case_update_ok
+run_case update-pull-fails case_update_pull_fails
+run_case update-explicit-storage-path case_update_explicit_storage_path
 
 echo "$PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then

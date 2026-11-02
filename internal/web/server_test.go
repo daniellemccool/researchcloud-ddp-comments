@@ -102,6 +102,20 @@ func TestForgedGate(t *testing.T) {
 	}
 }
 
+func TestDeskRouteIsExact(t *testing.T) {
+	srv, _ := newTestServer(t)
+	// GET /desk/ still serves the page.
+	rec := do(t, srv, "dmccool2", collectorRole, testGate, "/desk/")
+	if rec.Code != http.StatusOK {
+		t.Errorf("/desk/: status = %d, want 200", rec.Code)
+	}
+	// An authenticated GET /desk/x is 404: the route is exact, not a subtree.
+	rec = do(t, srv, "dmccool2", collectorRole, testGate, "/desk/x")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("/desk/x: status = %d, want 404", rec.Code)
+	}
+}
+
 func TestFourcatNotYet(t *testing.T) {
 	srv, _ := newTestServer(t)
 	for _, path := range []string{"/fourcat/", "/fourcat/anything"} {

@@ -14,6 +14,10 @@ CO_ENDPOINT=
 MEMBERS_FILE=
 VOLUME=
 backup=
+dj=
+dj_keep=
+dj_new=
+update_swapped=0
 CLEANUP_FILES=""
 CLEANUP_DIRS=""
 
@@ -49,22 +53,32 @@ gen_hex32() {
 }
 
 register_cleanup_file() {
-	CLEANUP_FILES="$CLEANUP_FILES $1"
+	CLEANUP_FILES="$CLEANUP_FILES$1
+"
 }
 
 register_cleanup_dir() {
-	CLEANUP_DIRS="$CLEANUP_DIRS $1"
+	CLEANUP_DIRS="$CLEANUP_DIRS$1
+"
 }
 
 cleanup() {
+	# Newline-separated lists, split on newlines only, so a registered path
+	# containing a space is removed as one path.
+	oldifs=$IFS
+	IFS='
+'
 	# shellcheck disable=SC2086
 	for f in $CLEANUP_FILES; do
+		[ -n "$f" ] || continue
 		rm -f "$f"
 	done
 	# shellcheck disable=SC2086
 	for d in $CLEANUP_DIRS; do
+		[ -n "$d" ] || continue
 		rm -rf "$d"
 	done
+	IFS=$oldifs
 }
 
 parse_plugin_parameters() {
@@ -155,16 +169,23 @@ validate_params() {
 			printf '%s' "$v" | grep -Eq '^[0-9]+(,[0-9]+)*$' || param_err "$k" "must match ^[0-9]+(,[0-9]+)*$"
 			;;
 		desk_idle_seconds | desk_timer_minutes | desk_max_sessions)
-			printf '%s' "$v" | grep -Eq '^[0-9]+$' || param_err "$k" "must match ^[0-9]+$"
+			printf '%s' "$v" | grep -Eq '^[0-9]{1,9}$' || param_err "$k" "must be 1-9 digits"
 			;;
 		desk_max_running)
 			case $v in
 			auto) ;;
-			*) printf '%s' "$v" | grep -Eq '^[0-9]+$' || param_err "$k" "must be auto or a number" ;;
+			*) printf '%s' "$v" | grep -Eq '^[0-9]{1,9}$' || param_err "$k" "must be auto or 1-9 digits" ;;
 			esac
 			;;
 		desk_storage_path)
+			tab=$(printf '\t')
+			cr=$(printf '\r')
+			lf=$(printf '\nX')
+			lf=${lf%X}
 			case $v in
+			*" "* | *"$tab"* | *"$cr"* | *"$lf"*)
+				param_err "$k" "must not contain whitespace"
+				;;
 			auto | /*) ;;
 			*) param_err "$k" "must be auto or an absolute path" ;;
 			esac
@@ -230,7 +251,7 @@ load_members() {
 			printf 'header = "Authorization: %s"\n' "$CO_TOKEN"
 			printf 'url = "%s"\n' "$CO_ENDPOINT"
 		} >"$curlcfg"
-		if ! curl --config "$curlcfg" --output "$MEMBERS_FILE"; then
+		if ! curl --config "$curlcfg" --max-time 60 --connect-timeout 10 --output "$MEMBERS_FILE"; then
 			collect_err "co_members: CO user API unreachable"
 			return 1
 		fi
@@ -392,7 +413,12 @@ install_nginx() {
 	fi
 }
 
-install_template() {
+# fetch_template downloads the release artifact (or copies DESK_TEMPLATE_FILE
+# when DESK_NO_FETCH=1) to a temp file and verifies template_sha256 against it.
+# It prints the verified temp path; install_template reuses that file, so the
+# artifact is fetched exactly once. Called before any file is written, so a
+# mismatch refuses the launch with nothing on disk.
+fetch_template() {
 	platform=$(param desk_platform)
 	zsv=$(param zeeschuimer_version)
 	pkg=$(param desk_image)
@@ -403,15 +429,25 @@ install_template() {
 	register_cleanup_file "$tmp"
 	if [ "${DESK_NO_FETCH:-0}" = "1" ]; then
 		[ -n "${DESK_TEMPLATE_FILE:-}" ] || die "template: DESK_NO_FETCH=1 but DESK_TEMPLATE_FILE is unset"
-		cp "$DESK_TEMPLATE_FILE" "$tmp"
+		cp "$DESK_TEMPLATE_FILE" "$tmp" || die "template: cannot copy $DESK_TEMPLATE_FILE"
 	else
-		curl --fail --location --silent --output "$tmp" "$url" || die "template: download failed: $url"
+		curl --fail --location --silent --max-time 60 --connect-timeout 10 --output "$tmp" "$url" ||
+			die "template: download failed: $url"
 	fi
 	got=$(sha256sum "$tmp" | awk '{print $1}')
 	want=$(param template_sha256)
 	if [ "$got" != "$want" ]; then
 		die "template_sha256: mismatch (expected $want, got $got)"
 	fi
+	printf '%s' "$tmp"
+}
+
+# install_template extracts the already-verified artifact ($1) into the staging
+# directory and moves it into place.
+install_template() {
+	tmp=$1
+	platform=$(param desk_platform)
+	zsv=$(param zeeschuimer_version)
 	dest=$DESK_ROOT/templates/release/$platform-$zsv
 	staging=$(mktemp -d "$DESK_ROOT/templates/release/.stage-XXXXXX")
 	register_cleanup_dir "$staging"
@@ -432,6 +468,10 @@ install_template() {
 
 pull_images() {
 	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
+		# Test override: simulate a failed pull while docker is disabled.
+		if [ "${DESK_FAIL_PULL:-0}" = "1" ]; then
+			die "docker pull failed: simulated failure (DESK_FAIL_PULL=1)"
+		fi
 		return 0
 	fi
 	# The two fixed images are read from the compose file, not hardcoded; a
@@ -462,9 +502,10 @@ write_wrapper() {
 platform_mode() {
 	parse_plugin_parameters
 	validate_params
-	read_workspace || true
-	if load_members; then
-		check_roles
+	if read_workspace; then
+		if load_members; then
+			check_roles
+		fi
 	fi
 	if [ -n "$ERRORS" ]; then
 		printf '%s' "$ERRORS" >&2
@@ -485,12 +526,15 @@ platform_mode() {
 	else
 		MODE=fresh
 	fi
+	# The template artifact is fetched and its sha256 verified before any file
+	# is written, so a mismatch refuses the launch with nothing on disk.
+	template_tmp=$(fetch_template)
 	make_layout
 	write_secrets
 	write_env
 	write_desk_json
 	install_nginx
-	install_template
+	install_template "$template_tmp"
 	pull_images
 	write_wrapper
 	echo "init: mode: $MODE"
@@ -517,10 +561,85 @@ apply_mode() {
 	fi
 }
 
+# fourcat_mirror_ref maps a 4CAT source reference (the Docker Hub image the
+# release workflow mirrors from) onto the GHCR mirror, keeping only the tag:
+# digitalmethodsinitiative/4cat:v1.57 -> <GHCR_NS>/4cat:v1.57. The .env.example
+# value is never used verbatim; workspaces pull from the mirror.
+fourcat_mirror_ref() {
+	src=$1
+	case $src in
+	*:*) ;;
+	*) die "fourcat_image: no tag in source reference: $src" ;;
+	esac
+	tag=${src##*:}
+	printf '%s/4cat:%s\n' "$GHCR_NS" "$tag"
+}
+
 update_fail() {
 	printf 'init: %s\n' "$*" >&2
-	printf 'init: update: previous repository copy kept at %s\n' "$backup" >&2
+	if [ "${update_swapped:-0}" = "1" ]; then
+		printf 'init: update: restoring previous repository copy from %s\n' "$backup" >&2
+		rm -rf "$REPO_ROOT"
+		mv "$backup" "$REPO_ROOT"
+		update_swapped=0
+		if [ -n "${dj_keep:-}" ] && [ -f "$dj_keep" ]; then
+			cp "$dj_keep" "$dj"
+		fi
+	else
+		printf 'init: update: previous repository copy kept at %s\n' "$backup" >&2
+	fi
+	if [ -n "${dj_new:-}" ]; then
+		rm -f "$dj_new"
+	fi
 	exit 2
+}
+
+# resolve_update_desk_root determines the desk root (and desk.json path) from
+# the KEPT repository copy, before the swap: DESK_ROOT from deploy/.env, else
+# desk_storage_path from the discovered desk.json, else the single-volume scan.
+resolve_update_desk_root() {
+	if [ -f "$REPO_ROOT/deploy/.env" ]; then
+		dr=$(sed -n 's/^DESK_ROOT=//p' "$REPO_ROOT/deploy/.env" | head -n 1)
+		if [ -n "$dr" ]; then
+			DESK_ROOT=$dr
+			dj=$DESK_ROOT/desk.json
+			[ -f "$dj" ] || die "update: no desk.json at $dj"
+			return 0
+		fi
+	fi
+	found=""
+	for d in "$SYSROOT/data"/*/; do
+		[ -d "$d" ] || continue
+		name=$(basename "$d")
+		if [ "$name" = "datasets" ]; then
+			continue
+		fi
+		if [ -f "$d/desk/desk.json" ]; then
+			if [ -n "$found" ]; then
+				die "update: more than one desk.json under $SYSROOT/data"
+			fi
+			found=$d/desk
+		fi
+	done
+	if [ -n "$found" ]; then
+		sp=$(jq -r '.desk_storage_path // empty' "$found/desk.json")
+		if [ -n "$sp" ] && [ "$sp" != "auto" ]; then
+			case $sp in
+			/*) ;;
+			*) die "update: desk_storage_path in desk.json is not an absolute path: $sp" ;;
+			esac
+			[ -d "$sp" ] || die "update: desk_storage_path in desk.json is not a directory: $sp"
+			DESK_ROOT=$sp/desk
+		else
+			DESK_ROOT=$found
+		fi
+		dj=$DESK_ROOT/desk.json
+		[ -f "$dj" ] || die "update: no desk.json at $dj"
+		return 0
+	fi
+	scan_single_volume
+	dj=$DESK_ROOT/desk.json
+	[ -f "$dj" ] || die "update: no desk.json at $dj"
 }
 
 update_mode() {
@@ -528,57 +647,92 @@ update_mode() {
 	if ! printf '%s' "$release" | grep -Eq '^v[0-9A-Za-z._-]+$'; then
 		die "update: invalid release name: $release"
 	fi
-	if [ "${DESK_NO_FETCH:-0}" = "1" ]; then
+	if [ -n "${DESK_RELEASE_TARBALL:-}" ]; then
+		tarball=$DESK_RELEASE_TARBALL
+		[ -f "$tarball" ] || die "update: DESK_RELEASE_TARBALL not found: $tarball"
+	elif [ "${DESK_NO_FETCH:-0}" = "1" ]; then
 		die "update: downloads are disabled (DESK_NO_FETCH=1)"
+	else
+		tarball=""
 	fi
-	tmp=$(mktemp -d)
+	# Extract under the repository's parent directory, so the swap is two
+	# renames on one filesystem and a failed rename cannot nest the backup
+	# inside a partial copy.
+	parent=$(dirname "$REPO_ROOT")
+	tmp=$(mktemp -d "$parent/.ddp-update-XXXXXX")
 	register_cleanup_dir "$tmp"
-	url="https://github.com/daniellemccool/researchcloud-ddp-comments/archive/refs/tags/$release.tar.gz"
-	if ! curl --fail --location --silent --output "$tmp/repo.tar.gz" "$url"; then
-		die "update: download failed: $url"
+	if [ -z "$tarball" ]; then
+		url="https://github.com/daniellemccool/researchcloud-ddp-comments/archive/refs/tags/$release.tar.gz"
+		tarball=$tmp/repo.tar.gz
+		if ! curl --fail --location --silent --max-time 60 --connect-timeout 10 --output "$tarball" "$url"; then
+			die "update: download failed: $url"
+		fi
 	fi
 	mkdir "$tmp/x"
-	if ! tar -xzf "$tmp/repo.tar.gz" -C "$tmp/x"; then
+	if ! tar -xzf "$tarball" -C "$tmp/x"; then
 		die "update: archive extraction failed"
 	fi
 	new=$(find "$tmp/x" -mindepth 1 -maxdepth 1 -type d)
 	if [ -z "$new" ]; then
 		die "update: archive layout unexpected"
 	fi
+	# Every fallible step that can leave the old copy behind happens before
+	# the swap: the desk root is resolved from the kept copy, the new image
+	# references are computed, and the images are pulled.
+	resolve_update_desk_root
+	dj_keep=$tmp/dj.keep
+	cp "$dj" "$dj_keep"
 	backup=$REPO_ROOT.old.$$
 	if [ -f "$REPO_ROOT/deploy/.env" ]; then
 		cp "$REPO_ROOT/deploy/.env" "$tmp/env.keep"
 	fi
+	desk_image=$(jq -r '.desk_image' "$dj")
+	deskproxy_image=$(jq -r '.deskproxy_image' "$dj")
+	new_env_example=$new/deploy/.env.example
+	if [ ! -f "$new_env_example" ]; then
+		die "update: the release has no deploy/.env.example"
+	fi
+	src_fourcat=$(sed -n 's/^FOURCAT_IMAGE=//p' "$new_env_example" | head -n 1)
+	if [ -z "$src_fourcat" ]; then
+		die "update: FOURCAT_IMAGE missing in the release's deploy/.env.example"
+	fi
+	fourcat_image=$(fourcat_mirror_ref "$src_fourcat")
+	PARAMS_JSON=$(jq --arg di "${desk_image%:*}:$release" --arg dpi "${deskproxy_image%:*}:$release" \
+		--arg fci "$fourcat_image" --arg release "$release" \
+		'.desk_image = $di | .deskproxy_image = $dpi | .fourcat_image = $fci | .package_version = $release
+		 | del(.desk_root, .layout_version, .package_version, .applied_at)' "$dj")
+	pull_images
+	# The swap itself: two renames on one filesystem.
 	mv "$REPO_ROOT" "$backup"
 	if ! mv "$new" "$REPO_ROOT"; then
 		mv "$backup" "$REPO_ROOT"
 		die "update: install failed, original restored"
 	fi
+	update_swapped=1
 	if [ -f "$tmp/env.keep" ]; then
 		mkdir -p "$REPO_ROOT/deploy"
 		cp "$tmp/env.keep" "$REPO_ROOT/deploy/.env"
 	fi
 	# From here on the running (old) lib.sh performs the remaining steps; the
 	# new copy's own init.sh apply path is equivalent and is not re-exec'd.
-	scan_single_volume
-	dj=$DESK_ROOT/desk.json
-	if [ ! -f "$dj" ]; then
-		update_fail "update: no desk.json at $dj"
+	# desk.json is only moved into place once everything before compose up has
+	# succeeded; every failure goes through update_fail, which restores the
+	# backup and leaves desk.json/.env as they were.
+	if [ ! -f "$DESK_ROOT/secrets/4cat-postgres" ]; then
+		update_fail "update: no 4cat-postgres secret at $DESK_ROOT/secrets/4cat-postgres"
 	fi
-	desk_image=$(jq -r '.desk_image' "$dj")
-	deskproxy_image=$(jq -r '.deskproxy_image' "$dj")
-	if ! jq --arg di "${desk_image%:*}:$release" --arg dpi "${deskproxy_image%:*}:$release" \
-		--arg release "$release" \
-		'.desk_image = $di | .deskproxy_image = $dpi | .package_version = $release' \
-		"$dj" >"$dj.new"; then
-		update_fail "update: could not rewrite desk.json"
-	fi
-	mv "$dj.new" "$dj"
-	chmod 0644 "$dj"
-	PARAMS_JSON=$(jq 'del(.desk_root, .layout_version, .package_version, .applied_at)' "$dj")
 	PG_SECRET=$(cat "$DESK_ROOT/secrets/4cat-postgres")
 	write_env
-	pull_images
+	dj_new=$dj.new
+	if ! jq --arg di "${desk_image%:*}:$release" --arg dpi "${deskproxy_image%:*}:$release" \
+		--arg fci "$fourcat_image" --arg release "$release" \
+		'.desk_image = $di | .deskproxy_image = $dpi | .fourcat_image = $fci | .package_version = $release' \
+		"$dj" >"$dj_new"; then
+		update_fail "update: could not rewrite desk.json"
+	fi
+	mv "$dj_new" "$dj"
+	dj_new=""
+	chmod 0644 "$dj"
 	up="docker compose -f $REPO_ROOT/deploy/compose.yml up -d"
 	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
 		echo "$up"

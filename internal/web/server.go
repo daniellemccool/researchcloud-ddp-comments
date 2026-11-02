@@ -42,8 +42,8 @@ func New(cfg *config.Config, ac access.Config, p *platform.Platform, logPath str
 		pages:    mustLoadPages(),
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /desk/", h.serveDesk)
-	mux.HandleFunc("/fourcat/", h.serveFourcat) // every method under the prefix
+	mux.HandleFunc("GET /desk/{$}", h.serveDesk) // the desk page, exactly /desk/
+	mux.HandleFunc("/fourcat/", h.serveFourcat)  // every method under the prefix
 	h.routes = mux
 	return &http.Server{Addr: defaultGatedAddr, Handler: h}
 }

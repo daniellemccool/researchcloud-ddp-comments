@@ -129,6 +129,9 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("desk.json %s: key %q is null", path, k)
 		}
 	}
+	if raw.LayoutVersion != 1 {
+		return nil, fmt.Errorf("desk.json %s: layout_version: must be 1, got %d", path, raw.LayoutVersion)
+	}
 
 	cfg, err := convert(path, &raw)
 	if err != nil {
@@ -243,8 +246,10 @@ func parseBool(v string) (bool, error) {
 }
 
 func parseInt(v string) (int, error) {
-	if !intRe.MatchString(v) {
-		return 0, fmt.Errorf("must be a non-negative integer, got %q", v)
+	// Bound the value the same way the shell layer does: 1-9 digits, so a
+	// huge string can never reach Atoi.
+	if len(v) > 9 || !intRe.MatchString(v) {
+		return 0, fmt.Errorf("must be 1-9 digits, got %q", v)
 	}
 	return strconv.Atoi(v)
 }
