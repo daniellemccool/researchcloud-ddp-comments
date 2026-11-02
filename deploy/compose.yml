@@ -11,6 +11,8 @@ x-fourcat-env: &fourcat-env
   POSTGRES_HOST: 4cat-db
   POSTGRES_PORT: "5432"
   SERVER_NAME: ${FQDN}
+  # The port users reach 4CAT through (SRC-Nginx on 443); 4CAT reads it to build its own URL. Not a binding.
+  PUBLIC_PORT: "443"
   API_HOST: 4cat-backend
   MEMCACHED_HOST: 4cat-memcached
   MEMCACHED_PORT: "11211"
