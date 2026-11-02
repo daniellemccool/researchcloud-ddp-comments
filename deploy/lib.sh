@@ -595,7 +595,11 @@ install_template() {
 	fi
 }
 
+# pull_images <compose_path> pulls the three pinned images plus the two
+# fixed images (postgres, memcached) read from the given compose file, so the
+# update path pre-pulls from the NEW copy's compose file.
 pull_images() {
+	pull_compose=$1
 	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
 		# Test override: simulate a failed pull while docker is disabled.
 		if [ "${DESK_FAIL_PULL:-0}" = "1" ]; then
@@ -605,7 +609,7 @@ pull_images() {
 	fi
 	# The two fixed images are read from the compose file, not hardcoded; a
 	# compose edit that changes their count must fail loudly, not drop a pull.
-	fixed=$(grep -E '^[[:space:]]+image: (postgres|memcached):[A-Za-z0-9._-]+$' "$REPO_ROOT/deploy/compose.yml" | awk '{print $2}')
+	fixed=$(grep -E '^[[:space:]]+image: (postgres|memcached):[A-Za-z0-9._-]+$' "$pull_compose" | awk '{print $2}')
 	# shellcheck disable=SC2086
 	set -- $fixed
 	if [ $# -ne 2 ]; then
@@ -670,7 +674,7 @@ platform_mode() {
 	write_desk_json
 	install_nginx
 	install_template "$template_tmp"
-	pull_images
+	pull_images "$REPO_ROOT/deploy/compose.yml"
 	write_wrapper
 	echo "init: mode: $MODE"
 	echo "init: desk root: $DESK_ROOT"
@@ -812,8 +816,9 @@ update_mode() {
 		die "update: archive layout unexpected"
 	fi
 	# Every fallible step that can leave the old copy behind happens before
-	# the swap: the desk root is resolved from the kept copy, the new image
-	# references are computed, and the images are pulled.
+	# the swap: the desk root is resolved from the kept copy, the new copy's
+	# pins are resolved and checked, and the images are pulled from the new
+	# copy's compose file.
 	resolve_update_desk_root
 	dj_keep=$tmp/dj.keep
 	cp "$dj" "$dj_keep"
@@ -821,27 +826,29 @@ update_mode() {
 	if [ -f "$REPO_ROOT/deploy/.env" ]; then
 		cp "$REPO_ROOT/deploy/.env" "$tmp/env.keep"
 	fi
-	desk_image=$(jq -r '.desk_image' "$dj")
-	deskproxy_image=$(jq -r '.deskproxy_image' "$dj")
-	new_env_example=$new/deploy/.env.example
-	if [ ! -f "$new_env_example" ]; then
-		die "update: the release has no deploy/.env.example"
+	# ADR-0020: the update adopts the NEW copy's pins (ADR-0020), so the
+	# release's own .env.example and template.json are the source of truth.
+	platform=$(jq -r '.desk_platform' "$dj")
+	if ! resolve_pins "$new" "$platform"; then
+		printf '%s' "$ERRORS" >&2
+		die "update: the release's pins are invalid"
 	fi
-	src_fourcat=$(sed -n 's/^FOURCAT_IMAGE=//p' "$new_env_example" | head -n 1)
-	if [ -z "$src_fourcat" ]; then
-		die "update: FOURCAT_IMAGE missing in the release's deploy/.env.example"
+	# The desk tag IS the release tag: a tarball built for another release
+	# must not be installed under this name.
+	[ "$PIN_RELEASE" = "$release" ] ||
+		die "update: the release's DESK_IMAGE tag $PIN_RELEASE differs from $release"
+	# Installing a new template at update is not supported yet: refuse a
+	# release whose manifest differs from what desk.json recorded.
+	old_zsv=$(jq -r '.zeeschuimer_version' "$dj")
+	old_sha=$(jq -r '.template_sha256' "$dj")
+	if [ "$old_zsv" != "$PIN_ZSV" ] || [ "$old_sha" != "$PIN_TEMPLATE_SHA256" ]; then
+		die "update: the release changes the template ($old_zsv -> $PIN_ZSV, sha $old_sha -> $PIN_TEMPLATE_SHA256); installing a new template at update is not supported yet, reattach the workspace on this release instead"
 	fi
-	fourcat_image=$(fourcat_mirror_ref "$src_fourcat")
-	# pull_images and write_env read the PIN_* globals, so the update path
-	# sets them from the kept desk.json and the new copy's .env.example.
-	PIN_DESK_IMAGE=${desk_image%:*}:$release
-	PIN_DESKPROXY_IMAGE=${deskproxy_image%:*}:$release
-	PIN_FOURCAT_IMAGE=$fourcat_image
-	PIN_RELEASE=$release
-	PIN_ZSV=$(jq -r '.zeeschuimer_version' "$dj")
-	PIN_TEMPLATE_SHA256=$(jq -r '.template_sha256' "$dj")
+	# PARAMS_JSON carries desk.json's parameters (including the five retired
+	# names) so param workspace_fqdn and the like keep working for write_env;
+	# it is never validated, validate_params would refuse the retired names.
 	PARAMS_JSON=$(jq 'del(.desk_root, .layout_version, .package_version, .applied_at)' "$dj")
-	pull_images
+	pull_images "$new/deploy/compose.yml"
 	# The swap itself: two renames on one filesystem.
 	mv "$REPO_ROOT" "$backup"
 	if ! mv "$new" "$REPO_ROOT"; then

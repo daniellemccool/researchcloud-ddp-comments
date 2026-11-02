@@ -128,22 +128,42 @@ a_nothing_written() {
 		a_fail "nginx files were written"
 }
 
-# make_release_tarball builds a minimal release tarball at $1: a top-level
-# <name>/ holding deploy/.env.example (the release's literal pins) and
-# deploy/compose.yml.
+# make_release_tarball builds a minimal release tarball at $1: one top-level
+# directory holding deploy/.env.example (the GHCR_NS line plus the three
+# literal pins), deploy/compose.yml (minimal, but with the two fixed-image
+# lines so the fixed-image count is 2) and platforms/tiktok/template.json
+# (four keys, artifact derived from <zsv>). Arguments:
+# <dest> [desk_tag] [fourcat_src] [zsv] [sha]; the sha defaults to the
+# runtime sha256 of the fixture template.tar.
 make_release_tarball() {
-	local dest=$1 rel
+	local dest=$1 desk_tag=${2:-v0.2.0-test}
+	local fourcat_src=${3:-digitalmethodsinitiative/4cat:v9.99}
+	local zsv=${4:-1.14.3}
+	local sha=${5:-$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)}
+	local rel top
 	rel=$(mktemp -d "$SYSROOT/rel-XXXXXX")
-	mkdir -p "$rel/ddp-comments-v0.2.0-test/deploy"
+	top=$rel/ddp-comments-$desk_tag
+	mkdir -p "$top/deploy" "$top/platforms/tiktok"
 	{
 		printf 'GHCR_NS=ghcr.io/daniellemccool/researchcloud-ddp-comments\n'
-		printf 'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.2.0-test\n'
-		printf 'DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.2.0-test\n'
-		printf 'FOURCAT_IMAGE=digitalmethodsinitiative/4cat:v9.99\n'
-	} >"$rel/ddp-comments-v0.2.0-test/deploy/.env.example"
-	printf 'name: desk\nservices: {}\n' \
-		>"$rel/ddp-comments-v0.2.0-test/deploy/compose.yml"
-	tar -czf "$dest" -C "$rel" ddp-comments-v0.2.0-test
+		printf 'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:%s\n' "$desk_tag"
+		printf 'DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:%s\n' "$desk_tag"
+		printf 'FOURCAT_IMAGE=%s\n' "$fourcat_src"
+	} >"$top/deploy/.env.example"
+	{
+		printf 'name: desk\n'
+		printf 'services:\n'
+		printf '  db:\n'
+		printf '    image: postgres:16\n'
+		printf '  cache:\n'
+		printf '    image: memcached:1.6\n'
+	} >"$top/deploy/compose.yml"
+	jq -n --arg zsv "$zsv" --arg sha "$sha" \
+		--arg artifact "ddp-comments-template-tiktok-$zsv.tar" \
+		--arg built_on "2026-10-30" \
+		'{zeeschuimer_version: $zsv, template_sha256: $sha, artifact: $artifact, built_on: $built_on}' \
+		>"$top/platforms/tiktok/template.json"
+	tar -czf "$dest" -C "$rel" "ddp-comments-$desk_tag"
 	rm -rf "$rel"
 }
 
@@ -537,6 +557,11 @@ case_update_ok() {
 	a_eq "fourcat_image" "$(jq -r '.fourcat_image' "$d/desk.json")" \
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v9.99"
 	a_eq "package_version" "$(jq -r '.package_version' "$d/desk.json")" "v0.2.0-test"
+	# The template pins are adopted from the new copy's manifest, which the
+	# default tarball pins to the same values as the fresh launch.
+	a_eq "zeeschuimer_version unchanged" "$(jq -r '.zeeschuimer_version' "$d/desk.json")" "1.14.3"
+	a_eq "template_sha256 unchanged" "$(jq -r '.template_sha256' "$d/desk.json")" \
+		"$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)"
 	a_eq "env DESK_IMAGE" "$(grep '^DESK_IMAGE=' "$repoenv" | cut -d= -f2-)" \
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.2.0-test"
 	a_eq "env DESKPROXY_IMAGE" "$(grep '^DESKPROXY_IMAGE=' "$repoenv" | cut -d= -f2-)" \
@@ -602,6 +627,79 @@ case_update_explicit_storage_path() {
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v9.99"
 }
 
+case_update_tag_mismatch() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d before
+	d=$(desk)
+	before=$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")
+	make_release_tarball "$SYSROOT/release.tar.gz" v0.3.0-other
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 2
+	a_err_has "update: the release's DESK_IMAGE tag v0.3.0-other differs from v0.2.0-test"
+	# The refusal happens before the swap: the old copy, desk.json and .env
+	# are untouched.
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	a_eq "desk.json and .env byte-identical" \
+		"$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")" "$before"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+}
+
+case_update_template_changed() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d before
+	d=$(desk)
+	before=$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")
+	make_release_tarball "$SYSROOT/release.tar.gz" v0.2.0-test \
+		digitalmethodsinitiative/4cat:v9.99 1.15.0 \
+		1111111111111111111111111111111111111111111111111111111111111111
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 2
+	a_err_has "update: the release changes the template (1.14.3 -> 1.15.0"
+	a_err_has "reattach"
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	a_eq "desk.json and .env byte-identical" \
+		"$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")" "$before"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+}
+
+case_update_pins_invalid() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	# Drop the DESKPROXY_IMAGE line inside the tarball's .env.example.
+	mkdir "$SYSROOT/relx"
+	tar -xzf "$SYSROOT/release.tar.gz" -C "$SYSROOT/relx"
+	grep -v '^DESKPROXY_IMAGE=' \
+		"$SYSROOT/relx/ddp-comments-v0.2.0-test/deploy/.env.example" \
+		>"$SYSROOT/relx/ddp-comments-v0.2.0-test/deploy/.env.example.new"
+	mv "$SYSROOT/relx/ddp-comments-v0.2.0-test/deploy/.env.example.new" \
+		"$SYSROOT/relx/ddp-comments-v0.2.0-test/deploy/.env.example"
+	tar -czf "$SYSROOT/release-broken.tar.gz" -C "$SYSROOT/relx" ddp-comments-v0.2.0-test
+	export DESK_RELEASE_TARBALL=$SYSROOT/release-broken.tar.gz
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 2
+	a_err_has "pins: DESKPROXY_IMAGE"
+	a_err_has "update: the release's pins are invalid"
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+}
+
 run_case ok-fresh case_ok_fresh
 run_case python-repr-params case_python_repr_params
 run_case placeholder-role case_placeholder_role
@@ -633,6 +731,9 @@ run_case manifest-not-json case_manifest_not_json
 run_case update-ok case_update_ok
 run_case update-pull-fails case_update_pull_fails
 run_case update-explicit-storage-path case_update_explicit_storage_path
+run_case update-tag-mismatch case_update_tag_mismatch
+run_case update-template-changed case_update_template_changed
+run_case update-pins-invalid case_update_pins_invalid
 
 echo "$PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
