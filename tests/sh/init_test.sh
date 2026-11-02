@@ -674,6 +674,32 @@ case_update_template_changed() {
 	fi
 }
 
+case_update_template_digest_changed() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d before
+	d=$(desk)
+	before=$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")
+	# Same Zeeschuimer version, different digest: a digest-only change must
+	# still be refused.
+	make_release_tarball "$SYSROOT/release.tar.gz" v0.2.0-test \
+		digitalmethodsinitiative/4cat:v9.99 1.14.3 \
+		2222222222222222222222222222222222222222222222222222222222222222
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 2
+	a_err_has "update: the release changes the template (1.14.3 -> 1.14.3, sha"
+	a_err_has "-> 2222222222222222222222222222222222222222222222222222222222222222"
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	a_eq "desk.json and .env byte-identical" \
+		"$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")" "$before"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+}
+
 case_update_pins_invalid() {
 	make_installed_copy "$SYSROOT/repo"
 	touch "$SYSROOT/repo/old-copy-marker"
@@ -733,6 +759,7 @@ run_case update-pull-fails case_update_pull_fails
 run_case update-explicit-storage-path case_update_explicit_storage_path
 run_case update-tag-mismatch case_update_tag_mismatch
 run_case update-template-changed case_update_template_changed
+run_case update-template-digest-changed case_update_template_digest_changed
 run_case update-pins-invalid case_update_pins_invalid
 
 echo "$PASS passed, $FAIL failed"
