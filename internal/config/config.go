@@ -37,6 +37,7 @@ type Config struct {
 	MaxRunning         int    // "auto" → runtime.NumCPU()-1, minimum 1
 	StoragePath        string // as written ("auto" or a path)
 	FourcatImage       string
+	FirefoxImage       string
 	DeskImage          string
 	DeskproxyImage     string
 	ZeeschuimerVersion string
@@ -49,7 +50,7 @@ type Config struct {
 	GateSecret         string // from <DeskRoot>/secrets/gate, trimmed
 }
 
-// rawConfig mirrors the 24 keys of desk.json exactly; DisallowUnknownFields
+// rawConfig mirrors the 25 keys of desk.json exactly; DisallowUnknownFields
 // rejects anything else.
 type rawConfig struct {
 	DeskCollectorRole  string `json:"desk_collector_role"`
@@ -65,6 +66,7 @@ type rawConfig struct {
 	DeskStoragePath    string `json:"desk_storage_path"`
 	FourcatEnabled     string `json:"fourcat_enabled"`
 	FourcatImage       string `json:"fourcat_image"`
+	FirefoxImage       string `json:"firefox_image"`
 	DeskImage          string `json:"desk_image"`
 	DeskproxyImage     string `json:"deskproxy_image"`
 	ZeeschuimerVersion string `json:"zeeschuimer_version"`
@@ -78,12 +80,12 @@ type rawConfig struct {
 	AppliedAt          string `json:"applied_at"`
 }
 
-// knownKeys are the 24 keys desk.json must hold, no others.
+// knownKeys are the 25 keys desk.json must hold, no others.
 var knownKeys = []string{
 	"desk_collector_role", "desk_admin_role", "desk_platform", "desk_contact",
 	"desk_hide_media", "desk_batch_sizes", "desk_idle_seconds", "desk_timer_minutes",
 	"desk_max_sessions", "desk_max_running", "desk_storage_path", "fourcat_enabled",
-	"fourcat_image", "desk_image", "deskproxy_image", "zeeschuimer_version",
+	"fourcat_image", "firefox_image", "desk_image", "deskproxy_image", "zeeschuimer_version",
 	"template_sha256", "co_id", "co_name", "workspace_fqdn",
 	"desk_root", "layout_version", "package_version", "applied_at",
 }
@@ -216,6 +218,7 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 		MaxRunning:         maxRunning,
 		StoragePath:        raw.DeskStoragePath,
 		FourcatImage:       raw.FourcatImage,
+		FirefoxImage:       raw.FirefoxImage,
 		DeskImage:          raw.DeskImage,
 		DeskproxyImage:     raw.DeskproxyImage,
 		ZeeschuimerVersion: raw.ZeeschuimerVersion,

@@ -141,17 +141,18 @@ a_no_update_leftovers() {
 }
 
 # make_release_tarball builds a minimal release tarball at $1: one top-level
-# directory holding deploy/.env.example (the GHCR_NS line plus the three
+# directory holding deploy/.env.example (the GHCR_NS line plus the four
 # literal pins), deploy/compose.yml (minimal, but with the two fixed-image
 # lines so the fixed-image count is 2) and platforms/tiktok/template.json
 # (four keys, artifact derived from <zsv>). Arguments:
-# <dest> [desk_tag] [fourcat_src] [zsv] [sha]; the sha defaults to the
-# runtime sha256 of the fixture template.tar.
+# <dest> [desk_tag] [fourcat_src] [zsv] [sha] [firefox_src]; the sha defaults
+# to the runtime sha256 of the fixture template.tar.
 make_release_tarball() {
 	local dest=$1 desk_tag=${2:-v0.2.0-test}
 	local fourcat_src=${3:-digitalmethodsinitiative/4cat:v9.99}
 	local zsv=${4:-1.14.3}
 	local sha=${5:-$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)}
+	local firefox_src=${6:-jlesage/firefox:v26.08.3}
 	local rel top
 	rel=$(mktemp -d "$SYSROOT/rel-XXXXXX")
 	top=$rel/ddp-comments-$desk_tag
@@ -161,6 +162,7 @@ make_release_tarball() {
 		printf 'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:%s\n' "$desk_tag"
 		printf 'DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:%s\n' "$desk_tag"
 		printf 'FOURCAT_IMAGE=%s\n' "$fourcat_src"
+		printf 'FIREFOX_IMAGE=%s\n' "$firefox_src"
 	} >"$top/deploy/.env.example"
 	{
 		printf 'name: desk\n'
@@ -204,6 +206,7 @@ make_installed_copy() {
 		printf 'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:%s\n' "$desk_tag"
 		printf 'DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:%s\n' "$desk_tag"
 		printf 'FOURCAT_IMAGE=%s\n' "$fourcat_src"
+		printf 'FIREFOX_IMAGE=jlesage/firefox:v26.08.3\n'
 	} >"$dest/deploy/.env.example"
 	jq -n --arg zsv "$zsv" --arg sha "$sha" \
 		--arg artifact "ddp-comments-template-tiktok-$zsv.tar" \
@@ -218,7 +221,7 @@ case_ok_fresh() {
 	local d
 	d=$(desk)
 	a_file "$d/desk.json"
-	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "24"
+	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "25"
 	a_eq "layout_version" "$(jq -r '.layout_version' "$d/desk.json")" "1"
 	a_eq "package_version" "$(jq -r '.package_version' "$d/desk.json")" "v0.1.0-alpha.1"
 	a_eq "desk.json desk_image" "$(jq -r '.desk_image' "$d/desk.json")" \
@@ -227,6 +230,8 @@ case_ok_fresh() {
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.1.0-alpha.1"
 	a_eq "desk.json fourcat_image" "$(jq -r '.fourcat_image' "$d/desk.json")" \
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57"
+	a_eq "desk.json firefox_image" "$(jq -r '.firefox_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/firefox:v26.08.3"
 	a_eq "desk.json zeeschuimer_version" "$(jq -r '.zeeschuimer_version' "$d/desk.json")" "1.14.3"
 	a_eq "desk.json template_sha256" "$(jq -r '.template_sha256' "$d/desk.json")" \
 		"$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)"
@@ -238,6 +243,8 @@ case_ok_fresh() {
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v0.1.0-alpha.1"
 	a_eq "env FOURCAT_IMAGE" "$(envval FOURCAT_IMAGE)" \
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57"
+	a_eq "env FIREFOX_IMAGE" "$(envval FIREFOX_IMAGE)" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/firefox:v26.08.3"
 	a_mode "gate mode" "$d/secrets/gate" "600"
 	local gate
 	gate=$(cat "$d/secrets/gate")
@@ -277,7 +284,7 @@ case_python_repr_params() {
 	local d k
 	d=$(desk)
 	a_file "$d/desk.json"
-	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "24"
+	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "25"
 	while IFS= read -r k; do
 		a_eq "desk.json $k" \
 			"$(jq -r --arg k "$k" '.[$k]' "$d/desk.json")" \
@@ -503,6 +510,16 @@ case_env_example_missing_pin() {
 	a_nothing_written
 }
 
+case_env_example_missing_firefox() {
+	grep -v '^FIREFOX_IMAGE=' "$SYSROOT/repo/deploy/.env.example" \
+		>"$SYSROOT/repo/deploy/.env.example.new"
+	mv "$SYSROOT/repo/deploy/.env.example.new" "$SYSROOT/repo/deploy/.env.example"
+	run_init
+	a_rc 2
+	a_err_has "pins: FIREFOX_IMAGE missing in deploy/.env.example"
+	a_nothing_written
+}
+
 case_manifest_multiline_value() {
 	# The JSON carries a real newline escape in zeeschuimer_version.
 	jq --arg v "$(printf '1.14.3\nzz')" '.zeeschuimer_version = $v' \
@@ -558,7 +575,12 @@ case_update_ok() {
 	d=$(desk)
 	repoenv=$SYSROOT/repo/deploy/.env
 	a_file "$repoenv"
-	make_release_tarball "$SYSROOT/release.tar.gz"
+	# A different Firefox tag in the new copy's .env.example, so the adoption
+	# of the new pin is visible in desk.json and .env.
+	make_release_tarball "$SYSROOT/release.tar.gz" v0.2.0-test \
+		digitalmethodsinitiative/4cat:v9.99 1.14.3 \
+		"$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)" \
+		jlesage/firefox:v26.09.1
 	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
 	run_init_repo "$SYSROOT/repo" update v0.2.0-test
 	a_rc 0
@@ -568,6 +590,8 @@ case_update_ok() {
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.2.0-test"
 	a_eq "fourcat_image" "$(jq -r '.fourcat_image' "$d/desk.json")" \
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v9.99"
+	a_eq "firefox_image" "$(jq -r '.firefox_image' "$d/desk.json")" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/firefox:v26.09.1"
 	a_eq "package_version" "$(jq -r '.package_version' "$d/desk.json")" "v0.2.0-test"
 	# The template pins are adopted from the new copy's manifest, which the
 	# default tarball pins to the same values as the fresh launch.
@@ -580,6 +604,8 @@ case_update_ok() {
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.2.0-test"
 	a_eq "env FOURCAT_IMAGE" "$(grep '^FOURCAT_IMAGE=' "$repoenv" | cut -d= -f2-)" \
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v9.99"
+	a_eq "env FIREFOX_IMAGE" "$(grep '^FIREFOX_IMAGE=' "$repoenv" | cut -d= -f2-)" \
+		"ghcr.io/daniellemccool/researchcloud-ddp-comments/firefox:v26.09.1"
 	# The old copy is gone: the marker file the minimal copy carried must not
 	# be there any more (the release tarball holds only deploy/).
 	[ ! -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy still present"
@@ -944,6 +970,7 @@ case_update_fixed_images_from_new_compose() {
 	a_rc 0
 	a_out_has "would pull postgres:99"
 	a_out_has "would pull memcached:99"
+	a_out_has "would pull ghcr.io/daniellemccool/researchcloud-ddp-comments/firefox:v26.08.3"
 }
 
 # Re-entrancy of update_restore: a signal landing after the backup move but
@@ -1031,6 +1058,7 @@ make_pins_tree() {
 		printf 'DESK_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:v1.0.0\n'
 		printf 'DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v1.0.0\n'
 		printf 'FOURCAT_IMAGE=digitalmethodsinitiative/4cat:v1.57\n'
+		printf 'FIREFOX_IMAGE=jlesage/firefox:v26.08.3\n'
 		printf '%s\n' "$@"
 	} >"$dest/deploy/.env.example"
 	cp "$REPO_ROOT/platforms/tiktok/template.json" "$dest/platforms/tiktok/template.json"
@@ -1068,6 +1096,22 @@ case_pins_empty_tag() {
 	a_err_has "check-pins: FOURCAT_IMAGE must be a registry path with a tag"
 }
 
+case_pins_firefox_missing() {
+	local rc
+	make_pins_tree "$SYSROOT/tree"
+	grep -v '^FIREFOX_IMAGE=' "$SYSROOT/tree/deploy/.env.example" \
+		>"$SYSROOT/tree/deploy/.env.example.new"
+	mv "$SYSROOT/tree/deploy/.env.example.new" "$SYSROOT/tree/deploy/.env.example"
+	set +e
+	CHECK_PINS_ROOT="$SYSROOT/tree" "$REPO_ROOT/scripts/check-pins.sh" v1.0.0 \
+		>/dev/null 2>"$SYSROOT/pins.err"
+	rc=$?
+	set -e
+	a_eq "exit code" "$rc" "1"
+	ERR=$(cat "$SYSROOT/pins.err")
+	a_err_has "check-pins: FIREFOX_IMAGE missing in deploy/.env.example"
+}
+
 # lib.sh side of the pin guard: an installed copy whose DESKPROXY_IMAGE tag
 # differs from the DESK_IMAGE tag is refused before anything is written.
 case_pins_deskproxy_tag_differs() {
@@ -1103,6 +1147,7 @@ run_case manifest-bad-sha case_manifest_bad_sha
 run_case manifest-artifact-mismatch case_manifest_artifact_mismatch
 run_case manifest-missing case_manifest_missing
 run_case env-example-missing-pin case_env_example_missing_pin
+run_case env-example-missing-firefox case_env_example_missing_firefox
 run_case manifest-multiline-value case_manifest_multiline_value
 run_case manifest-nonstring-value case_manifest_nonstring_value
 run_case manifest-two-objects case_manifest_two_objects
@@ -1126,6 +1171,7 @@ run_case pins-ok case_pins_ok
 run_case pins-tag-mismatch case_pins_tag_mismatch
 run_case pins-duplicate-key case_pins_duplicate_key
 run_case pins-empty-tag case_pins_empty_tag
+run_case pins-firefox-missing case_pins_firefox_missing
 run_case pins-deskproxy-tag-differs case_pins_deskproxy_tag_differs
 
 echo "$PASS passed, $FAIL failed"

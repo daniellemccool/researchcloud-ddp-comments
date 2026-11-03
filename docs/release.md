@@ -59,7 +59,8 @@ is `ghcr.io/daniellemccool/researchcloud-ddp-comments`.
    download URL from the tag.
 
 5. Wait for the `release` workflow in GitHub Actions. It checks the pins,
-   pushes `desk:<tag>`, `deskproxy:<tag>` and mirrors `4cat:<4CAT tag>` under
+   pushes `desk:<tag>`, `deskproxy:<tag>` and mirrors `4cat:<4CAT tag>` and
+   `firefox:<Firefox tag>` under
    the namespace, waits until the GitHub release carries the artifact named
    by every `platforms/*/template.json`, and only then fast-forwards the
    branch `release` to the tagged commit — the branch moves only once the
@@ -75,9 +76,11 @@ is `ghcr.io/daniellemccool/researchcloud-ddp-comments`.
    docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/desk:vX.Y.Z
    docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:vX.Y.Z
    docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:v1.57
+   docker pull ghcr.io/daniellemccool/researchcloud-ddp-comments/firefox:v26.08.3
    ```
 
-   The 4CAT tag is currently v1.57; it follows `FOURCAT_IMAGE` in
+   The 4CAT tag is currently v1.57 and the Firefox tag v26.08.3; they follow
+   `FOURCAT_IMAGE` and `FIREFOX_IMAGE` in
    `deploy/.env.example`. Also verify that the branch moved to the tagged
    commit:
 
@@ -105,18 +108,20 @@ installing a new template at update is a later plan's item).
 ## First release only
 
 GHCR packages start private. In the GitHub package settings, set `desk`,
-`deskproxy` and `4cat` to public. Workspaces pull anonymously, so a release
-is not usable until this is done.
+`deskproxy`, `4cat` and `firefox` to public. Workspaces pull anonymously, so a
+release is not usable until this is done.
 
-## The 4CAT mirror
+## The mirrors
 
-The workflow reads `FOURCAT_IMAGE` from `deploy/.env.example` and mirrors
-that tag. To change the pin, edit `deploy/.env.example`, tag a release, and
-run `sudo /rsc/plugins/<uuid>/deploy/init.sh update <tag>` on each workspace
-(`<uuid>` is the plugin directory the platform created): `update`
+The workflow reads `FOURCAT_IMAGE` and `FIREFOX_IMAGE` from
+`deploy/.env.example` and mirrors those tags to `4cat:<tag>` and
+`firefox:<tag>`. To change a pin, edit `deploy/.env.example`, tag a release,
+and run `sudo /rsc/plugins/<uuid>/deploy/init.sh update <tag>` on each
+workspace (`<uuid>` is the plugin directory the platform created): `update`
 adopts the TAG from that release's `deploy/.env.example` and maps it onto the
-GHCR mirror (`ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:<tag>`),
+GHCR mirror (`ghcr.io/daniellemccool/researchcloud-ddp-comments/4cat:<tag>`,
+`ghcr.io/daniellemccool/researchcloud-ddp-comments/firefox:<tag>`),
 writing that reference into `desk.json` and `.env`, so 4CAT's database
-migrations run at that update. The `.env.example` value itself names the
-Docker Hub source and is never used verbatim. Bump it deliberately,
+migrations run at that update. The `.env.example` values themselves name the
+Docker Hub sources and are never used verbatim. Bump them deliberately,
 not as part of an unrelated release.

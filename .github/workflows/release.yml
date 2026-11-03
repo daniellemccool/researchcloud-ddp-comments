@@ -84,6 +84,30 @@ jobs:
           printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GH_USER" --password-stdin
           skopeo copy --all "docker://$SRC" "docker://$DEST:$TAG"
 
+      - name: Read the pinned Firefox image
+        id: firefox
+        run: |
+          set -euo pipefail
+          src="$(sed -n 's/^FIREFOX_IMAGE=//p' deploy/.env.example)"
+          if [ -z "$src" ]; then
+            echo "FIREFOX_IMAGE not found in deploy/.env.example" >&2
+            exit 1
+          fi
+          echo "src=$src" >> "$GITHUB_OUTPUT"
+          echo "tag=${src##*:}" >> "$GITHUB_OUTPUT"
+
+      - name: Mirror Firefox
+        env:
+          SRC: ${{ steps.firefox.outputs.src }}
+          TAG: ${{ steps.firefox.outputs.tag }}
+          DEST: ghcr.io/${{ github.repository }}/firefox
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GH_USER" --password-stdin
+          skopeo copy --all "docker://$SRC" "docker://$DEST:$TAG"
+
   promote:
     needs: images
     runs-on: ubuntu-latest

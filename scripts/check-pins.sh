@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Pin guard for a release tag. Usage: scripts/check-pins.sh <tag>
 # Exits 0 when deploy/.env.example pins DESK_IMAGE and DESKPROXY_IMAGE to
-# <tag>, FOURCAT_IMAGE carries a tag, and every platforms/*/template.json is
-# a well-formed manifest; otherwise one line per failure on stderr, exit 1.
+# <tag>, FOURCAT_IMAGE and FIREFOX_IMAGE carry a tag, and every
+# platforms/*/template.json is a well-formed manifest; otherwise one line per
+# failure on stderr, exit 1.
 # No argument: usage, exit 2. CHECK_PINS_ROOT overrides the repository root
 # (default: the checkout this script lives in); the tests use it.
 set -euo pipefail
@@ -38,7 +39,7 @@ env_count() {
 	grep -c "^$1=" "$env_example" || true
 }
 
-for key in DESK_IMAGE DESKPROXY_IMAGE FOURCAT_IMAGE; do
+for key in DESK_IMAGE DESKPROXY_IMAGE FOURCAT_IMAGE FIREFOX_IMAGE; do
 	count=$(env_count "$key")
 	if [ "$count" -eq 0 ]; then
 		fail "$key missing in $env_example"

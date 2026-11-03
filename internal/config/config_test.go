@@ -31,6 +31,7 @@ func deskJSON(t *testing.T, mutate func(map[string]any)) string {
 		"desk_storage_path":   "auto",
 		"fourcat_enabled":     "true",
 		"fourcat_image":       "ghcr.io/fourcat/fourcat:1.0.0",
+		"firefox_image":       "ghcr.io/ns/firefox:v26.08.3",
 		"desk_image":          "ghcr.io/ns/desk:v1.2.3",
 		"deskproxy_image":     "ghcr.io/ns/deskproxy:v1.2.3",
 		"zeeschuimer_version": "1.2.3",
@@ -108,9 +109,9 @@ func TestLoadDeskJSONStrict(t *testing.T) {
 		if cfg.StoragePath != "auto" {
 			t.Errorf("StoragePath = %q, want auto", cfg.StoragePath)
 		}
-		if cfg.FourcatImage != "ghcr.io/fourcat/fourcat:1.0.0" || cfg.DeskImage != "ghcr.io/ns/desk:v1.2.3" ||
-			cfg.DeskproxyImage != "ghcr.io/ns/deskproxy:v1.2.3" {
-			t.Errorf("images = %q/%q/%q", cfg.FourcatImage, cfg.DeskImage, cfg.DeskproxyImage)
+		if cfg.FourcatImage != "ghcr.io/fourcat/fourcat:1.0.0" || cfg.FirefoxImage != "ghcr.io/ns/firefox:v26.08.3" ||
+			cfg.DeskImage != "ghcr.io/ns/desk:v1.2.3" || cfg.DeskproxyImage != "ghcr.io/ns/deskproxy:v1.2.3" {
+			t.Errorf("images = %q/%q/%q/%q", cfg.FourcatImage, cfg.FirefoxImage, cfg.DeskImage, cfg.DeskproxyImage)
 		}
 		if cfg.ZeeschuimerVersion != "1.2.3" || cfg.TemplateSHA256 != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
 			t.Errorf("zeeschuimer/template = %q/%q", cfg.ZeeschuimerVersion, cfg.TemplateSHA256)
@@ -142,6 +143,15 @@ func TestLoadDeskJSONStrict(t *testing.T) {
 		_, err := Load(filepath.Join(dir, "desk.json"))
 		if err == nil || !strings.Contains(err.Error(), "desk_contact") {
 			t.Fatalf("err = %v, want one naming desk_contact", err)
+		}
+	})
+
+	t.Run("missing firefox_image names the key", func(t *testing.T) {
+		// A 24-key file without firefox_image must be rejected.
+		dir := writeDeskRoot(t, func(m map[string]any) { delete(m, "firefox_image") }, true)
+		_, err := Load(filepath.Join(dir, "desk.json"))
+		if err == nil || !strings.Contains(err.Error(), "firefox_image") {
+			t.Fatalf("err = %v, want one naming firefox_image", err)
 		}
 	})
 

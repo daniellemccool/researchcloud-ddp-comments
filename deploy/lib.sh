@@ -33,6 +33,7 @@ GHCR_NS="ghcr.io/daniellemccool/researchcloud-ddp-comments"
 PIN_DESK_IMAGE=
 PIN_DESKPROXY_IMAGE=
 PIN_FOURCAT_IMAGE=
+PIN_FIREFOX_IMAGE=
 PIN_ZSV=
 PIN_TEMPLATE_SHA256=
 PIN_RELEASE=
@@ -233,7 +234,7 @@ validate_params() {
 	done
 }
 
-# resolve_pins reads the release's own pins (ADR-0020): the three image
+# resolve_pins reads the release's own pins (ADR-0020): the four image
 # references from <repo_root>/deploy/.env.example and the Zeeschuimer version
 # plus template digest from <repo_root>/platforms/<platform>/template.json.
 # It sets the PIN_* globals and collects problems with collect_err (prefix
@@ -248,7 +249,8 @@ resolve_pins() {
 	pins_desk=""
 	pins_deskproxy=""
 	pins_fourcat_src=""
-	for pins_key in DESK_IMAGE DESKPROXY_IMAGE FOURCAT_IMAGE; do
+	pins_firefox_src=""
+	for pins_key in DESK_IMAGE DESKPROXY_IMAGE FOURCAT_IMAGE FIREFOX_IMAGE; do
 		pins_val=$(sed -n "s/^$pins_key=//p" "$pins_env" | head -n 1)
 		if [ -z "$pins_val" ]; then
 			collect_err "pins: $pins_key missing in deploy/.env.example"
@@ -264,6 +266,7 @@ resolve_pins() {
 		DESK_IMAGE) pins_desk=$pins_val ;;
 		DESKPROXY_IMAGE) pins_deskproxy=$pins_val ;;
 		FOURCAT_IMAGE) pins_fourcat_src=$pins_val ;;
+		FIREFOX_IMAGE) pins_firefox_src=$pins_val ;;
 		esac
 	done
 	if [ "$pins_rc" -eq 0 ]; then
@@ -276,6 +279,7 @@ resolve_pins() {
 		fi
 		# The regex check above ran first, so the source always has a tag.
 		PIN_FOURCAT_IMAGE=$(fourcat_mirror_ref "$pins_fourcat_src")
+		PIN_FIREFOX_IMAGE=$(firefox_mirror_ref "$pins_firefox_src")
 	fi
 	if [ ! -f "$pins_manifest" ]; then
 		collect_err "template.json: not found at $pins_manifest"
@@ -509,6 +513,7 @@ write_env() {
 			printf 'DESK_IMAGE=%s\n' "$PIN_DESK_IMAGE"
 			printf 'DESKPROXY_IMAGE=%s\n' "$PIN_DESKPROXY_IMAGE"
 			printf 'FOURCAT_IMAGE=%s\n' "$PIN_FOURCAT_IMAGE"
+			printf 'FIREFOX_IMAGE=%s\n' "$PIN_FIREFOX_IMAGE"
 			printf 'POSTGRES_PASSWORD=%s\n' "$PG_SECRET"
 			printf 'REPO_ROOT=%s\n' "$REPO_ROOT"
 		} >"$REPO_ROOT/deploy/.env"
@@ -523,9 +528,10 @@ write_desk_json() {
 		set -- "$@" --arg "$k" "$(param "$k")"
 	done
 	# The five retired names are still recorded, from the release's pins, so
-	# the key set stays at 24 for the Go side.
+	# the key set stays at 25 for the Go side.
 	jq -n "$@" \
 		--arg fourcat_image "$PIN_FOURCAT_IMAGE" \
+		--arg firefox_image "$PIN_FIREFOX_IMAGE" \
 		--arg desk_image "$PIN_DESK_IMAGE" \
 		--arg deskproxy_image "$PIN_DESKPROXY_IMAGE" \
 		--arg zeeschuimer_version "$PIN_ZSV" \
@@ -614,7 +620,7 @@ install_template() {
 	fi
 }
 
-# pull_images <compose_path> pulls the three pinned images plus the two
+# pull_images <compose_path> pulls the four pinned images plus the two
 # fixed images (postgres, memcached) read from the given compose file, so the
 # update path pre-pulls from the NEW copy's compose file.
 pull_images() {
@@ -634,13 +640,13 @@ pull_images() {
 		fi
 		# Test override: list the images that would be pulled.
 		if [ "${DESK_LIST_PULLS:-0}" = "1" ]; then
-			for img in "$PIN_DESK_IMAGE" "$PIN_DESKPROXY_IMAGE" "$PIN_FOURCAT_IMAGE" "$@"; do
+			for img in "$PIN_DESK_IMAGE" "$PIN_DESKPROXY_IMAGE" "$PIN_FOURCAT_IMAGE" "$PIN_FIREFOX_IMAGE" "$@"; do
 				printf 'init: would pull %s\n' "$img"
 			done
 		fi
 		return 0
 	fi
-	for img in "$PIN_DESK_IMAGE" "$PIN_DESKPROXY_IMAGE" "$PIN_FOURCAT_IMAGE" "$@"; do
+	for img in "$PIN_DESK_IMAGE" "$PIN_DESKPROXY_IMAGE" "$PIN_FOURCAT_IMAGE" "$PIN_FIREFOX_IMAGE" "$@"; do
 		docker pull "$img" || die "docker pull failed: $img"
 	done
 }
@@ -737,6 +743,20 @@ fourcat_mirror_ref() {
 	esac
 	tag=${src##*:}
 	printf '%s/4cat:%s\n' "$GHCR_NS" "$tag"
+}
+
+# firefox_mirror_ref maps a Firefox source reference (the Docker Hub image the
+# release workflow mirrors from) onto the GHCR mirror, keeping only the tag:
+# jlesage/firefox:v26.08.3 -> <GHCR_NS>/firefox:v26.08.3. The .env.example
+# value is never used verbatim; workspaces pull from the mirror.
+firefox_mirror_ref() {
+	src=$1
+	case $src in
+	*:*) ;;
+	*) die "firefox_image: no tag in source reference: $src" ;;
+	esac
+	tag=${src##*:}
+	printf '%s/firefox:%s\n' "$GHCR_NS" "$tag"
 }
 
 # update_restore puts the previous repository copy back according to
@@ -961,8 +981,8 @@ update_mode() {
 	write_env
 	dj_new=$dj.new
 	if ! jq --arg di "$PIN_DESK_IMAGE" --arg dpi "$PIN_DESKPROXY_IMAGE" \
-		--arg fci "$PIN_FOURCAT_IMAGE" --arg release "$release" \
-		'.desk_image = $di | .deskproxy_image = $dpi | .fourcat_image = $fci | .package_version = $release' \
+		--arg fci "$PIN_FOURCAT_IMAGE" --arg ffi "$PIN_FIREFOX_IMAGE" --arg release "$release" \
+		'.desk_image = $di | .deskproxy_image = $dpi | .fourcat_image = $fci | .firefox_image = $ffi | .package_version = $release' \
 		"$dj" >"$dj_new"; then
 		update_fail "update: could not rewrite desk.json"
 	fi

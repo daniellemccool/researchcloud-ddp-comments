@@ -104,8 +104,12 @@ services:
 networks:
   desk-fourcat:
     driver: bridge
+  # ADR-0007: no inter-container communication on the shared egress bridge,
+  # so one collector's proxy cannot talk to another's.
   desk-egress:
     driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
   4cat-internal:
     driver: bridge
     internal: true
