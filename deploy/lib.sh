@@ -752,7 +752,7 @@ fourcat_mirror_ref() {
 # moved-aside new copy is KEPT as $REPO_ROOT.failed.$$, because a running
 # container may still mount it.
 update_restore() {
-	trap '' HUP INT TERM PIPE
+	trap '' HUP INT TERM QUIT PIPE
 	set +e
 	printf 'init: update: restoring previous repository copy from %s\n' "$backup" >&2
 	if [ "$swap_state" = "2" ] && [ -e "$backup" ] && [ -e "$REPO_ROOT" ]; then
@@ -791,6 +791,9 @@ update_restore() {
 }
 
 update_fail() {
+	# PIPE ignored first: with a dead stderr pipe the printf below would
+	# otherwise kill the shell with SIGPIPE before the restore runs.
+	trap '' PIPE
 	printf 'init: %s\n' "$*" >&2 || :
 	update_restore
 	if [ "${compose_started:-0}" = "1" ]; then

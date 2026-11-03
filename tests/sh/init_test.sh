@@ -882,6 +882,55 @@ case_update_compose_fails() {
 	fi
 }
 
+# Micro-fix: a failed compose up with a broken stderr must still restore.
+# Variant 1 sends stderr to /dev/full (every write fails with ENOSPC, the
+# `|| :` path); variant 2 merges stderr into a pipe whose reader exits after
+# one byte, so the next write raises SIGPIPE — without a PIPE trap in
+# update_fail the shell dies before update_restore runs.
+case_update_compose_fails_stderr_closed() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d before
+	d=$(desk)
+	before=$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz DESK_FAIL_COMPOSE=1
+	# Variant 1: stderr to /dev/full.
+	set +e
+	sh "$SYSROOT/repo/deploy/init.sh" update v0.2.0-test 2>/dev/full
+	RC=$?
+	set -e
+	a_rc 2
+	[ -e "$SYSROOT/repo/old-copy-marker" ] ||
+		a_fail "old repository copy was replaced (/dev/full)"
+	a_eq "desk.json and .env byte-identical (/dev/full)" \
+		"$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")" "$before"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
+	ls -d "$SYSROOT"/*.failed.* >/dev/null 2>&1 ||
+		a_fail "no *.failed.* directory was kept (/dev/full)"
+	# Variant 2: stderr into a pipe whose reader has already exited, so the
+	# next stderr write raises SIGPIPE (stdout goes to /dev/null, so the
+	# first write to the dead pipe is update_fail's printf).
+	set +e
+	sh "$SYSROOT/repo/deploy/init.sh" update v0.2.0-test 2> >(true) >/dev/null
+	set -e
+	[ -e "$SYSROOT/repo/old-copy-marker" ] ||
+		a_fail "old repository copy was replaced (dead pipe)"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
+	ls -d "$SYSROOT"/*.failed.* >/dev/null 2>&1 ||
+		a_fail "no *.failed.* directory was kept (dead pipe)"
+}
+
 # N2: the pre-swap pull must read the fixed images from the NEW copy's
 # compose.yml, not the old copy's.
 case_update_fixed_images_from_new_compose() {
@@ -1070,6 +1119,7 @@ run_case update-postswap-fails case_update_postswap_fails
 run_case update-postswap-exit case_update_postswap_exit
 run_case update-postswap-exit-stderr-closed case_update_postswap_exit_stderr_closed
 run_case update-compose-fails case_update_compose_fails
+run_case update-compose-fails-stderr-closed case_update_compose_fails_stderr_closed
 run_case update-fixed-images-from-new-compose case_update_fixed_images_from_new_compose
 run_case update-restore-reentrant case_update_restore_reentrant
 run_case pins-ok case_pins_ok
