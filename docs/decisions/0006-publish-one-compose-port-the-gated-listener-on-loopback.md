@@ -13,11 +13,11 @@ priority: invariant
 
 ## Decision
 
-Across our compose file and every rendered per-user file, exactly one port is published, the desk's gated listener on `127.0.0.1`; 4CAT, the proxies and the browsers publish nothing. The rule is about Compose: SRC-Nginx legitimately listens on 443.
+Across our compose file and every per-user pair the desk creates, exactly one port is published, the desk's gated listener on `127.0.0.1`; 4CAT, the proxies and the browsers publish nothing. The rule is about Compose: SRC-Nginx legitimately listens on 443.
 
 ## Guidance
 
-- `internal/arch/compose_test.go` runs `docker compose config` on `deploy/compose.yml` and on rendered files and fails on any `ports:` entry other than the gated listener, any `0.0.0.0` binding, any `network_mode: host`, and any missing restart policy; `tests/box/ports_test.go` inspects the actual bindings of running containers on the box.
+- `internal/arch/compose_test.go` runs `docker compose config` on `deploy/compose.yml` and fails on any `ports:` entry other than the gated listener, any `0.0.0.0` binding, any `network_mode: host`, and any missing restart policy; for pairs the check is `internal/arch/pair_test.go` over `render.Spec`: no `PortBindings`, `PublishAllPorts` false, no `NetworkMode`, restart `unless-stopped`; `tests/box/ports_test.go` inspects the actual bindings of running containers on the box.
 - 4CAT's frontend is reachable only on the `desk-fourcat` network; the desk proxies it for admins.
 - Review rejects a published port added "for debugging"; use `docker compose exec` or an ssh tunnel to a loopback port.
 

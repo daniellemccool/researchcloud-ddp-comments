@@ -14,7 +14,7 @@ priority: invariant
 
 ## Decision
 
-Each collector's 4CAT token lives in `secrets/4cat-tokens/<user>` (uid 1000, mode 0600) and is bind-mounted only into that collector's proxy, which replaces any client-supplied `Cookie` on an allowed 4CAT request with `remember_token=<that token>`; no other container, page or log ever sees a token.
+Each collector's 4CAT token lives in `secrets/4cat-tokens/<user>/4cat-token` (directory uid 1000 0750, file uid 1000 0600) and the **directory** is bind-mounted read-only only into that collector's proxy at `/token`, so a rotation by rename reaches the running proxy; the proxy replaces any client-supplied `Cookie` on an allowed 4CAT request with `remember_token=<that token>`. No other container, page or log ever sees a token.
 
 ## Guidance
 

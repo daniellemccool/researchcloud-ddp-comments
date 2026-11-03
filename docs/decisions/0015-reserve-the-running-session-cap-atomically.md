@@ -16,6 +16,7 @@ A pair is started only after its slot under `desk_max_running` was reserved unde
 ## Guidance
 
 - `internal/provision/cap.go` reserves, then starts, then releases on failure, all against the registry's running set; `internal/provision/cap_test.go` is the rule's enforcement.
+- The running count is taken from Docker by label (`desk.role=firefox`, state running) under the global lock, immediately before the start; the per-user lock is held around it.
 - "Busy" (runtime cap) and "full" (registry cap) are distinct pages with distinct messages.
 - The reaper's idle stop releases the slot; a crashed container is detected and released by reconcile, not left reserved forever.
 

@@ -6,6 +6,8 @@ applies_to:
     - deploy/compose.yml
     - internal/render/**/*.go
     - tests/box/isolation_test.go
+    - internal/session/**/*.go
+    - cmd/deskproxy/listen.go
 priority: invariant
 ---
 # Route a Firefox only through its own proxy
@@ -18,6 +20,7 @@ Each collector network `net-<user>` is a Docker `internal` network with no gatew
 
 - `tests/box/isolation_test.go` proves from inside a Firefox container that direct connections to the internet, the host, and the bridge gateway address all fail while the proxied path works; if the gateway address is reachable on an `internal` network, create the network with Docker's isolated gateway mode (`com.docker.network.bridge.gateway_mode_ipv4=isolated`; the sandbox runs Docker 29.1, which has it, and a launch installs current docker-ce).
 - The locked proxy preference and the installed CA stay in the policy for the browser's benefit, but they are not the isolation and review does not accept them as such.
+- The proxy binds its listener and health port to its address on `net-<user>` only (`--listen-cidr`, the subnet the desk read back after creating the network), so the shared bridges carry no proxy listener; `desk-egress` is created with `com.docker.network.bridge.enable_icc=false`.
 - The desk joins `net-<user>` only for the screen relay and serves nothing identity-bearing on that network.
 
 ## Why
