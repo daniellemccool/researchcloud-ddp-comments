@@ -23,6 +23,11 @@ is `ghcr.io/daniellemccool/researchcloud-ddp-comments`.
    and the sibling `.sha256` file, and prints the manifest JSON plus a
    `sha256 <hex>  <filename>` line. Copy both files to the local checkout.
 
+   When the template did NOT change, skip the build: download the previous
+   release's artifact and its checksum
+   (`gh release download <previous tag> -p 'ddp-comments-template-*'`) and
+   upload those same files under the new tag in step 4.
+
 2. Bump the pins in the local checkout: `DESK_IMAGE` and `DESKPROXY_IMAGE` in
    `deploy/.env.example` to the new tag (`FOURCAT_IMAGE` only on a deliberate
    4CAT bump) and, when the artifact changed, the `zeeschuimer_version`,
@@ -35,6 +40,11 @@ is `ghcr.io/daniellemccool/researchcloud-ddp-comments`.
    ```
    git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
    ```
+
+   If the pin guard fails after the tag was pushed: nothing was published
+   (no images were pushed and the `release` branch did not move), so delete
+   the tag locally and remotely (`git tag -d vX.Y.Z && git push origin
+   :refs/tags/vX.Y.Z`), fix the pins, and re-tag; or bump to the next tag.
 
 4. Immediately create the GitHub release and upload the artifact and its
    checksum, from the local checkout (GitHub is not reached from the box):
@@ -54,7 +64,10 @@ is `ghcr.io/daniellemccool/researchcloud-ddp-comments`.
    by every `platforms/*/template.json`, and only then fast-forwards the
    branch `release` to the tagged commit — the branch moves only once the
    workflow sees the artifact for every platform manifest, so a workspace
-   launched from it can always fetch its template. First release: make the
+   launched from it can always fetch its template. The wait step also
+   downloads each uploaded artifact and verifies its sha256 against the
+   manifest's `template_sha256`, so a wrong upload fails the workflow
+   instead of moving `release`. First release: make the
    packages public (section "First release only") before this check. Then
    verify anonymously, from a machine that is not logged in to GHCR:
 

@@ -25,6 +25,6 @@ export REPO_ROOT SYSROOT
 . "$SCRIPT_DIR/lib.sh"
 
 trap cleanup EXIT
-trap 'exit 130' HUP INT TERM
+trap 'exit 130' HUP INT TERM QUIT
 
 main "$@"

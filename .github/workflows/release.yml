@@ -5,9 +5,9 @@ on:
     tags:
       - "v*"
 
+# Jobs raise what they need: images writes packages, promote writes contents.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -16,14 +16,16 @@ concurrency:
 jobs:
   images:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      # fetch-depth: 0 is load-bearing: the Move the release branch step runs
-      # git merge-base --is-ancestor against origin/release, which needs the
-      # tagged commit's full history, not the default shallow tag checkout.
+      # persist-credentials: false: this job never pushes to the repository,
+      # so the checkout must not carry a write token.
       - name: Check out
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Check the pins
         run: scripts/check-pins.sh "$GITHUB_REF_NAME"
@@ -82,12 +84,28 @@ jobs:
           printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GH_USER" --password-stdin
           skopeo copy --all "docker://$SRC" "docker://$DEST:$TAG"
 
+  promote:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # fetch-depth: 0 is load-bearing: the Move the release branch step runs
+      # git merge-base --is-ancestor against origin/release, which needs the
+      # tagged commit's full history, not the default shallow tag checkout.
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       # The branch `release` moves only when everything a launch needs
       # exists: the artifact named by every platforms/*/template.json must be
       # a fully uploaded asset of the published (non-draft) GitHub release
-      # for this tag (uploaded by hand right after the tag was pushed). Poll
-      # every 30 s for up to 40 minutes; a missing release counts as "not
-      # yet". On timeout the job fails, so the branch does not move.
+      # for this tag (uploaded by hand right after the tag was pushed), and
+      # its sha256 must match the manifest's template_sha256. Poll every
+      # 30 s for up to 40 minutes; a missing release counts as "not yet". A
+      # digest mismatch fails the job immediately instead of polling. On
+      # timeout the job fails, so the branch does not move.
       - name: Wait for the template artifacts
         timeout-minutes: 45
         env:
@@ -113,13 +131,26 @@ jobs:
             missing=""
             for m in platforms/*/template.json; do
               artifact=$(jq -r '.artifact' "$m")
+              want=$(jq -r '.template_sha256' "$m")
               if ! printf '%s' "$json" | jq -e --arg n "$artifact" \
                 '(.isDraft | not) and any(.assets[]; .name == $n and .state == "uploaded")' >/dev/null; then
                 missing="$missing $artifact"
+                continue
+              fi
+              # The asset is uploaded on a non-draft release: verify its
+              # digest against the manifest before counting it as present.
+              gh release download "$GITHUB_REF_NAME" -p "$artifact" \
+                -O "$RUNNER_TEMP/$artifact" --clobber
+              got=$(sha256sum "$RUNNER_TEMP/$artifact" | awk '{print $1}')
+              p=${m#platforms/}
+              p=${p%/template.json}
+              if [ "$got" != "$want" ]; then
+                echo "artifact $artifact digest $got does not match platforms/$p/template.json" >&2
+                exit 1
               fi
             done
             if [ -z "$missing" ]; then
-              echo "all template artifacts are uploaded for $GITHUB_REF_NAME"
+              echo "all template artifacts are uploaded and their digests match for $GITHUB_REF_NAME"
               exit 0
             fi
             echo "check at ${SECONDS}s: still missing:$missing"

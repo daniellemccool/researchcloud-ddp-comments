@@ -128,6 +128,18 @@ a_nothing_written() {
 		a_fail "nginx files were written"
 }
 
+# a_no_update_leftovers asserts that a failed update left no *.failed.*
+# directory and no .ddp-update-* staging directory under the repository's
+# parent directory (the sysroot).
+a_no_update_leftovers() {
+	if ls "$SYSROOT"/*.failed.* >/dev/null 2>&1; then
+		a_fail "a *.failed.* remains: $(ls "$SYSROOT"/*.failed.*)"
+	fi
+	if ls -d "$SYSROOT"/.ddp-update-* >/dev/null 2>&1; then
+		a_fail "a .ddp-update-* remains: $(ls -d "$SYSROOT"/.ddp-update-*)"
+	fi
+}
+
 # make_release_tarball builds a minimal release tarball at $1: one top-level
 # directory holding deploy/.env.example (the GHCR_NS line plus the three
 # literal pins), deploy/compose.yml (minimal, but with the two fixed-image
@@ -775,6 +787,7 @@ case_update_postswap_fails() {
 	if ls "$d"/desk.json.keep.* >/dev/null 2>&1; then
 		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
 	fi
+	a_no_update_leftovers
 }
 
 # N3: a set -e exit inside the post-swap window (DESK_FAIL_POSTSWAP) must go
@@ -802,6 +815,71 @@ case_update_postswap_exit() {
 	if ls "$d"/desk.json.keep.* >/dev/null 2>&1; then
 		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
 	fi
+	a_no_update_leftovers
+}
+
+# I1: a broken stderr (here /dev/full, where every write fails) must not
+# abort the EXIT-trap restore: the old copy comes back, no backup, keep file
+# or staging directory remains. The update's stderr is redirected to
+# /dev/full, so only the exit code is captured.
+case_update_postswap_exit_stderr_closed() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d before
+	d=$(desk)
+	before=$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz DESK_FAIL_POSTSWAP=1
+	set +e
+	sh "$SYSROOT/repo/deploy/init.sh" update v0.2.0-test 2>/dev/full
+	RC=$?
+	set -e
+	a_rc 1
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	a_eq "desk.json and .env byte-identical" \
+		"$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")" "$before"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
+	a_no_update_leftovers
+}
+
+# I2: a failed `compose up` must not delete the tree a running container
+# mounts: the new copy is kept as *.failed.* and named on stderr, the old
+# copy is restored, and the forward recovery is printed.
+case_update_compose_fails() {
+	make_installed_copy "$SYSROOT/repo"
+	touch "$SYSROOT/repo/old-copy-marker"
+	run_init_repo "$SYSROOT/repo"
+	a_rc 0
+	local d before failed
+	d=$(desk)
+	before=$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")
+	make_release_tarball "$SYSROOT/release.tar.gz"
+	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz DESK_FAIL_COMPOSE=1
+	run_init_repo "$SYSROOT/repo" update v0.2.0-test
+	a_rc 2
+	a_err_has "update: compose up failed"
+	a_err_has "containers may already run v0.2.0-test"
+	a_err_has "do not run compose up on the restored copy"
+	[ -e "$SYSROOT/repo/old-copy-marker" ] || a_fail "old repository copy was replaced"
+	a_eq "desk.json and .env byte-identical" \
+		"$(sha256sum "$d/desk.json" "$SYSROOT/repo/deploy/.env")" "$before"
+	if ls "$SYSROOT"/*.old.* >/dev/null 2>&1; then
+		a_fail "a *.old.* backup remains: $(ls "$SYSROOT"/*.old.*)"
+	fi
+	[ -z "$(ls "$d"/desk.json.keep.* 2>/dev/null)" ] ||
+		a_fail "a desk.json.keep.* remains: $(ls "$d"/desk.json.keep.*)"
+	failed=$(ls -d "$SYSROOT"/*.failed.* 2>/dev/null) ||
+		a_fail "no *.failed.* directory was kept"
+	a_err_has "$failed"
+	if ls -d "$SYSROOT"/.ddp-update-* >/dev/null 2>&1; then
+		a_fail "a .ddp-update-* remains: $(ls -d "$SYSROOT"/.ddp-update-*)"
+	fi
 }
 
 # N2: the pre-swap pull must read the fixed images from the NEW copy's
@@ -828,7 +906,7 @@ case_update_fixed_images_from_new_compose() {
 case_update_restore_reentrant() {
 	local out rc
 	set +e
-	out=$(bash -c '
+	out=$(sh -c '
 		set -eu
 		. "$1/deploy/lib.sh"
 		rr=$2
@@ -855,11 +933,16 @@ case_update_restore_reentrant() {
 		[ -z "$(ls "$rr"/*.old.* 2>/dev/null)" ] || { echo "old.* remains"; exit 1; }
 		[ "$(cat "$dj")" = "old desk" ] || { echo "desk.json not restored"; exit 1; }
 		[ ! -e "$dj_keep" ] || { echo "keep file remains"; exit 1; }
-	' bash "$REPO_ROOT" "$SYSROOT/rr" 2>&1)
+	' sh "$REPO_ROOT" "$SYSROOT/rr" 2>&1)
 	rc=$?
 	set -e
 	a_eq "reentrant restore exit" "$rc" "0"
-	[ -z "$out" ] || a_fail "restore output: $out"
+	# update_restore announces the restore on stderr; nothing else may print.
+	if [ -n "$out" ]; then
+		leftover=$(printf '%s\n' "$out" |
+			grep -v 'init: update: restoring previous repository copy' || true)
+		[ -z "$leftover" ] || a_fail "unexpected restore output: $out"
+	fi
 }
 
 # The pin cases run against the REAL checkout files, not the installed copy,
@@ -936,6 +1019,17 @@ case_pins_empty_tag() {
 	a_err_has "check-pins: FOURCAT_IMAGE must be a registry path with a tag"
 }
 
+# lib.sh side of the pin guard: an installed copy whose DESKPROXY_IMAGE tag
+# differs from the DESK_IMAGE tag is refused before anything is written.
+case_pins_deskproxy_tag_differs() {
+	sed -i 's|^DESKPROXY_IMAGE=.*|DESKPROXY_IMAGE=ghcr.io/daniellemccool/researchcloud-ddp-comments/deskproxy:v0.9.9-other|' \
+		"$SYSROOT/repo/deploy/.env.example"
+	run_init
+	a_rc 2
+	a_err_has "pins: DESKPROXY_IMAGE tag differs from DESK_IMAGE tag"
+	a_nothing_written
+}
+
 run_case ok-fresh case_ok_fresh
 run_case python-repr-params case_python_repr_params
 run_case placeholder-role case_placeholder_role
@@ -974,12 +1068,15 @@ run_case update-pins-invalid case_update_pins_invalid
 run_case template-tmp-cleaned case_template_tmp_cleaned
 run_case update-postswap-fails case_update_postswap_fails
 run_case update-postswap-exit case_update_postswap_exit
+run_case update-postswap-exit-stderr-closed case_update_postswap_exit_stderr_closed
+run_case update-compose-fails case_update_compose_fails
 run_case update-fixed-images-from-new-compose case_update_fixed_images_from_new_compose
 run_case update-restore-reentrant case_update_restore_reentrant
 run_case pins-ok case_pins_ok
 run_case pins-tag-mismatch case_pins_tag_mismatch
 run_case pins-duplicate-key case_pins_duplicate_key
 run_case pins-empty-tag case_pins_empty_tag
+run_case pins-deskproxy-tag-differs case_pins_deskproxy_tag_differs
 
 echo "$PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then

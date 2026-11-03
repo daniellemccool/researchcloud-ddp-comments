@@ -84,6 +84,10 @@ overwrites below.
 | `timeout` | `7200` (image pulls dominate provisioning) |
 | `docker_initialization_command` | `init.sh` |
 
+After the first launch, an admin-role user opens `/fourcat/` through the
+gate and completes 4CAT's setup form once; the desk does not create that
+account (Danielle, 2026-11-02).
+
 ## Pre-launch checklist
 
 - The release's three images (`desk`, `deskproxy`, `4cat`) and the template

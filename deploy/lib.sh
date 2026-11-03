@@ -19,6 +19,7 @@ dj_keep=
 dj_new=
 swap_state=0
 update_done=0
+compose_started=0
 TEMPLATE_TMP=
 CLEANUP_FILES=""
 CLEANUP_DIRS=""
@@ -80,10 +81,15 @@ cleanup() {
 	# A set -e exit or a signal after the swap (swap_state != 0) but before
 	# the update completed restores the previous repository copy first; the
 	# kept desk.json lives outside the cleanup list, so it survives until
-	# the restore has used it.
+	# the restore has used it. update_restore runs FIRST, with no output
+	# before it: a broken stderr (EIO after HUP, EPIPE on a dead pipe) must
+	# not abort the restore.
 	if [ "${swap_state:-0}" != 0 ] && [ "${update_done:-0}" = 0 ]; then
-		printf 'init: update: restoring previous repository copy from %s\n' "$backup" >&2
 		update_restore
+		if [ "${compose_started:-0}" = "1" ]; then
+			printf 'init: update: containers may already run %s; fix the cause and re-run init.sh update %s\n' "${release:-}" "${release:-}" >&2 || :
+			printf 'init: update: do not run compose up on the restored copy if the release changed FOURCAT_IMAGE (4CAT migrations may have run)\n' >&2 || :
+		fi
 	fi
 	# Newline-separated lists, split on newlines only, so a registered path
 	# containing a space is removed as one path.
@@ -737,17 +743,24 @@ fourcat_mirror_ref() {
 # swap_state (0 = not swapped, 1 = old copy moved to $backup, 2 = new copy in
 # place), restores the kept desk.json, removes $dj_new and resets swap_state.
 # Idempotent: a call with swap_state = 0 touches nothing. It runs with set +e
-# and with HUP/INT/TERM ignored, so one failing step or a signal cannot abort
-# or re-enter the rollback (the kept desk.json is outside the cleanup list and
-# survives until here). State is recorded after each step, so a re-entry does
-# the right thing; the new copy is moved aside, never rm -rf'd in place, and
-# nothing is ever mv'd onto an existing $REPO_ROOT.
+# and with HUP/INT/TERM/PIPE ignored, so one failing step, a broken stderr or
+# a signal cannot abort or re-enter the rollback (the kept desk.json is
+# outside the cleanup list and survives until here). State is recorded after
+# each step, so a re-entry does the right thing; the new copy is moved aside,
+# never rm -rf'd in place, and nothing is ever mv'd onto an existing
+# $REPO_ROOT. When compose up had already started (compose_started=1), the
+# moved-aside new copy is KEPT as $REPO_ROOT.failed.$$, because a running
+# container may still mount it.
 update_restore() {
-	trap '' HUP INT TERM
+	trap '' HUP INT TERM PIPE
 	set +e
+	printf 'init: update: restoring previous repository copy from %s\n' "$backup" >&2
 	if [ "$swap_state" = "2" ] && [ -e "$backup" ] && [ -e "$REPO_ROOT" ]; then
 		if mv "$REPO_ROOT" "$REPO_ROOT.failed.$$"; then
 			swap_state=1
+			if [ "${compose_started:-0}" = "1" ]; then
+				printf 'init: update: the new copy is kept at %s because compose up had started\n' "$REPO_ROOT.failed.$$" >&2
+			fi
 		else
 			printf 'init: update: could not move %s aside\n' "$REPO_ROOT" >&2
 		fi
@@ -759,7 +772,7 @@ update_restore() {
 			printf 'init: update: could not move %s back\n' "$backup" >&2
 		fi
 	fi
-	if [ "$swap_state" = "0" ] && [ -e "$REPO_ROOT.failed.$$" ]; then
+	if [ "$swap_state" = "0" ] && [ -e "$REPO_ROOT.failed.$$" ] && [ "${compose_started:-0}" != "1" ]; then
 		rm -rf "$REPO_ROOT.failed.$$"
 	fi
 	if [ -n "${dj_keep:-}" ] && [ -f "$dj_keep" ]; then
@@ -778,9 +791,12 @@ update_restore() {
 }
 
 update_fail() {
-	printf 'init: %s\n' "$*" >&2
-	printf 'init: update: restoring previous repository copy from %s\n' "$backup" >&2
+	printf 'init: %s\n' "$*" >&2 || :
 	update_restore
+	if [ "${compose_started:-0}" = "1" ]; then
+		printf 'init: update: containers may already run %s; fix the cause and re-run init.sh update %s\n' "${release:-}" "${release:-}" >&2 || :
+		printf 'init: update: do not run compose up on the restored copy if the release changed FOURCAT_IMAGE (4CAT migrations may have run)\n' >&2 || :
+	fi
 	exit 2
 }
 
@@ -872,6 +888,9 @@ update_mode() {
 	# copy's compose file.
 	resolve_update_desk_root
 	backup=$REPO_ROOT.old.$$
+	if [ -e "$backup" ] || [ -e "$REPO_ROOT.failed.$$" ]; then
+		die "update: stale $backup or $REPO_ROOT.failed.$$ exists; remove it first"
+	fi
 	if [ -f "$REPO_ROOT/deploy/.env" ]; then
 		cp "$REPO_ROOT/deploy/.env" "$tmp/env.keep"
 	fi
@@ -902,13 +921,15 @@ update_mode() {
 	# cleanup), so a failed rollback cannot delete the only copy of the
 	# previous desk.json. It is created only now, after every pre-swap
 	# refusal, so a refused update leaves no desk.json.keep.<pid> behind.
+	# Signals are ignored from the keep copy through the swap, so no signal
+	# can land between the keep copy and the renames.
+	trap '' HUP INT TERM QUIT
 	dj_keep=$DESK_ROOT/desk.json.keep.$$
 	cp "$dj" "$dj_keep"
-	# The swap itself: two renames on one filesystem. Signals are ignored
-	# between them, so a HUP/INT/TERM cannot land between the renames and
-	# leave $REPO_ROOT missing; the EXIT trap still covers a set -e exit in
-	# the window.
-	trap '' HUP INT TERM
+	# The swap itself: two renames on one filesystem. Signals stay ignored
+	# between them, so a HUP/INT/TERM/QUIT cannot land between the renames
+	# and leave $REPO_ROOT missing; the EXIT trap still covers a set -e exit
+	# in the window.
 	mv "$REPO_ROOT" "$backup"
 	swap_state=1
 	if ! mv "$new" "$REPO_ROOT"; then
@@ -920,7 +941,7 @@ update_mode() {
 		fi
 	fi
 	swap_state=2
-	trap 'exit 130' HUP INT TERM
+	trap 'exit 130' HUP INT TERM QUIT
 	if [ -f "$tmp/env.keep" ]; then
 		mkdir -p "$REPO_ROOT/deploy"
 		cp "$tmp/env.keep" "$REPO_ROOT/deploy/.env"
@@ -935,11 +956,6 @@ update_mode() {
 	fi
 	PG_SECRET=$(cat "$DESK_ROOT/secrets/4cat-postgres")
 	write_env
-	# Test hook (DESK_NO_DOCKER=1 only): a set -e exit inside the post-swap
-	# window, to exercise the EXIT-trap restore path.
-	if [ "${DESK_NO_DOCKER:-0}" = "1" ] && [ "${DESK_FAIL_POSTSWAP:-0}" = "1" ]; then
-		false
-	fi
 	dj_new=$dj.new
 	if ! jq --arg di "$PIN_DESK_IMAGE" --arg dpi "$PIN_DESKPROXY_IMAGE" \
 		--arg fci "$PIN_FOURCAT_IMAGE" --arg release "$release" \
@@ -950,9 +966,19 @@ update_mode() {
 	mv "$dj_new" "$dj"
 	dj_new=""
 	chmod 0644 "$dj"
+	# Test hook (DESK_NO_DOCKER=1 only): a set -e exit inside the post-swap
+	# window, after .env and desk.json were rewritten, to exercise the
+	# EXIT-trap restore path.
+	if [ "${DESK_NO_DOCKER:-0}" = "1" ] && [ "${DESK_FAIL_POSTSWAP:-0}" = "1" ]; then
+		false
+	fi
 	up="docker compose -f $REPO_ROOT/deploy/compose.yml up -d"
+	compose_started=1
 	if [ "${DESK_NO_DOCKER:-0}" = "1" ]; then
 		echo "$up"
+		if [ "${DESK_FAIL_COMPOSE:-0}" = "1" ]; then
+			update_fail "update: compose up failed"
+		fi
 	else
 		docker compose -f "$REPO_ROOT/deploy/compose.yml" up -d ||
 			update_fail "update: compose up failed"
