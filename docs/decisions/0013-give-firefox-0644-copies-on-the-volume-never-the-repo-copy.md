@@ -16,7 +16,7 @@ Every file the Firefox container reads, policies, stylesheet, CA, is a copy writ
 ## Guidance
 
 - `internal/render/policy.go` sets the mode and owner explicitly on every write; `internal/render/modes_test.go` is the rule's enforcement; the init script does the same for the files it places before the desk exists.
-- The policy directory `firefox/<user>/` is mounted at `/usr/lib/firefox/distribution` read-only; the proxy CA directory `state/proxy/<user>/` at `/proxy-ca` read-only, Firefox reads `ca.pem` (0644) and cannot read the key (0600).
+- The policy directory `firefox/<user>/` is mounted at `/usr/lib/firefox/distribution` read-only; the proxy CA certificate `state/proxy/<user>/ca.pem` is bind-mounted as a single file at `/proxy-ca/ca.pem` read-only; the key stays in `state/proxy/<user>/`, which only the proxy mounts, and never enters the Firefox container.
 - Review rejects a bind mount whose source is under `/rsc/plugins/`.
 - A rendered policy is re-read by Firefox only at start, so a changed policy means a pair restart, which the desk performs.
 

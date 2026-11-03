@@ -18,7 +18,7 @@ Each collector's 4CAT token lives in `secrets/4cat-tokens/<user>/4cat-token` (di
 
 ## Guidance
 
-- Rendering a pair mounts exactly one token file, the owner's (`internal/render/mounts.go`, enforced by `internal/render/mounts_test.go`); the proxy reads the file on every allowed request so rotation needs no restart (`cmd/deskproxy/token_test.go`).
+- Rendering a pair mounts exactly one token directory, the owner's (`internal/render/mounts.go`, enforced by `internal/render/mounts_test.go`); the proxy reads the file on every allowed request so rotation needs no restart (`cmd/deskproxy/token_test.go`).
 - The proxy never forwards a client cookie to 4CAT, never logs the token, and answers 403 when the token file is missing rather than forwarding unauthenticated.
 - Rotation and demotion rewrite the file under the user lock in `internal/provision/token.go`; the admin page's "rotate token" is the same code path as the operator command.
 
