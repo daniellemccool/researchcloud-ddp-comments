@@ -1,6 +1,7 @@
 // Command desk is the data-donation desk: one long-lived container serving
 // the gated listener (collector and admin pages) and the container listener
-// (health endpoint only).
+// (health endpoint only), plus the operator commands (status, render, stop)
+// that talk to the serving desk over its unix socket.
 package main
 
 import (
@@ -8,6 +9,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,58 +20,145 @@ import (
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/ctl"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/docker"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/fourcat"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/locks"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/render"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/web"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// dispatch runs one command line and returns the process exit code. It is a
+// pure function of its arguments (serve's blocking loop aside), so the tests
+// exercise it without building a binary.
+func dispatch(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		usage(stderr)
+		return 2
 	}
-	switch os.Args[1] {
+	switch args[0] {
+	case "help", "--help", "-h":
+		usage(stdout)
+		return 0
 	case "serve":
-		if err := serve(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "desk: %v\n", err)
-			os.Exit(1)
+		code, err := serve(args[1:], stdout, stderr)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "desk: %v\n", err)
+			return 1
 		}
+		return code
 	case "template":
-		os.Exit(templateCmd(os.Args[2:]))
+		return templateCmd(args[1:])
+	case "status":
+		return statusCmd(args[1:], stdout, stderr)
+	case "render":
+		return renderCmd(args[1:], stdout, stderr)
+	case "stop":
+		return stopCmd(args[1:], stdout, stderr)
 	default:
-		usage()
-		os.Exit(2)
+		usage(stderr)
+		return 2
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: desk serve --desk-root /desk [--repo /repo] [--listen :8110] [--container-listen :8111]")
-	fmt.Fprintln(os.Stderr, "       desk template release --profile DIR --platform NAME --platforms-dir DIR --zeeschuimer VERSION --out DIR")
+// usage writes the command summary to w (stdout for help, stderr otherwise).
+func usage(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "usage: desk serve --desk-root /desk [--repo /repo] [--listen :8110] [--container-listen :8111]")
+	_, _ = fmt.Fprintln(w, "       desk status [--desk-root /desk]")
+	_, _ = fmt.Fprintln(w, "       desk render [--desk-root /desk]")
+	_, _ = fmt.Fprintln(w, "       desk stop <user> [--desk-root /desk]")
+	_, _ = fmt.Fprintln(w, "       desk template release --profile DIR --platform NAME --platforms-dir DIR --zeeschuimer VERSION --out DIR")
+	_, _ = fmt.Fprintln(w, "       desk help")
 }
 
-func serve(args []string) error {
+// serve runs the desk. It returns the exit code (2 for a usage error, after
+// printing the usage itself) and a fatal error.
+func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	deskRoot := fs.String("desk-root", "", "the desk's directory, holding desk.json (required)")
 	repo := fs.String("repo", "/repo", "read-only repository copy holding platforms/ (the compose mount)")
 	listen := fs.String("listen", ":8110", "gated listener address")
 	containerListen := fs.String("container-listen", ":8111", "container listener address")
 	if err := fs.Parse(args); err != nil {
-		usage()
-		os.Exit(2)
+		usage(stderr)
+		return 2, nil
 	}
 	if *deskRoot == "" {
-		usage()
-		os.Exit(2)
+		usage(stderr)
+		return 2, nil
 	}
 
 	cfg, err := config.Load(filepath.Join(*deskRoot, "desk.json"))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	p, err := platform.Load(filepath.Join(*repo, "platforms", cfg.Platform, "platform.json"))
 	if err != nil {
-		return err
+		return 0, err
 	}
+
+	// The desk cannot run without Docker: a client error is fatal.
+	dc, err := docker.New()
+	if err != nil {
+		return 0, fmt.Errorf("docker client: %w", err)
+	}
+	selfID, err := docker.SelfID()
+	if err != nil {
+		return 0, fmt.Errorf("container id: %w", err)
+	}
+
+	// When 4CAT is enabled, find its containers now; a missing 4CAT is not
+	// fatal, the client looks the names up lazily per visit instead.
+	var fc *fourcat.Client
+	if cfg.FourcatEnabled {
+		backend, db, ferr := fourcat.FindContainers(context.Background(), dc)
+		if ferr != nil {
+			_, _ = fmt.Fprintln(stderr, "desk: 4CAT containers not found yet; provisioning will retry per visit")
+			backend, db = "", ""
+		}
+		fc = &fourcat.Client{Docker: dc, Backend: backend, DB: db, FrontendURL: "http://4cat-frontend:5000"}
+	}
+
+	platformDir := filepath.Join(*repo, "platforms", cfg.Platform)
+	if err := render.WritePlatformCopy(cfg, platformDir); err != nil {
+		return 0, err
+	}
+
+	reg := &registry.Registry{Path: filepath.Join(cfg.DeskRoot, "registry.tsv"), MaxSessions: cfg.MaxSessions}
+	lockSet := &locks.Set{}
+	prov := &provision.Provisioner{Cfg: cfg, Reg: reg, Fourcat: fc, Locks: lockSet}
+	dlog := &desklog.Log{Path: filepath.Join(cfg.DeskRoot, "state", "desk-log.ndjson"), DefaultKind: p.DefaultKind}
+	mgr := &session.Manager{
+		Cfg:    cfg,
+		Docker: dc,
+		Reg:    reg,
+		Locks:  lockSet,
+		SelfID: selfID,
+		Log:    log.New(stderr, "desk: ", log.LstdFlags),
+	}
+
+	// Adopt the pairs that survived a desk restart; errors are logged, not
+	// fatal.
+	if err := mgr.Reconcile(context.Background()); err != nil {
+		_, _ = fmt.Fprintf(stderr, "desk: reconcile: %v\n", err)
+	}
+
+	// The operator socket: status, render and stop run inside this process's
+	// locks.
+	sockPath := filepath.Join(cfg.DeskRoot, "state", "desk.sock")
+	ctlCtx, ctlCancel := context.WithCancel(context.Background())
+	ctlErr := make(chan error, 1)
+	go func() { ctlErr <- ctl.Serve(ctlCtx, sockPath, &ops{mgr: mgr, cfg: cfg, platformDir: platformDir}) }()
 
 	ac := access.Config{
 		CollectorRole: cfg.CollectorRole,
@@ -76,14 +166,19 @@ func serve(args []string) error {
 		GateSecret:    cfg.GateSecret,
 	}
 	logPath := filepath.Join(cfg.DeskRoot, "state", "access.ndjson")
-
-	gated := web.New(web.Deps{
-		Cfg:      cfg,
-		Access:   ac,
-		Platform: p,
-		LogPath:  logPath,
-		Log:      &desklog.Log{Path: filepath.Join(cfg.DeskRoot, "state", "desk-log.ndjson"), DefaultKind: p.DefaultKind},
-	})
+	deps := web.Deps{
+		Cfg:          cfg,
+		Access:       ac,
+		Platform:     p,
+		LogPath:      logPath,
+		Prov:         prov,
+		Sessions:     mgr,
+		Log:          dlog,
+		FourcatProxy: web.NewFourcatProxy(cfg.FQDN),
+		Relay:        web.NewRelay(mgr),
+	}
+	deps.Admin = web.NewAdmin(deps)
+	gated := web.New(deps)
 	gated.Addr = *listen
 	container := web.NewContainer()
 	container.Addr = *containerListen
@@ -91,23 +186,31 @@ func serve(args []string) error {
 	errCh := make(chan error, 2)
 	go func() { errCh <- gated.ListenAndServe() }()
 	go func() { errCh <- container.ListenAndServe() }()
-	fmt.Fprintf(os.Stderr, "desk: gated listener on %s\n", gated.Addr)
-	fmt.Fprintf(os.Stderr, "desk: container listener on %s\n", container.Addr)
+	_, _ = fmt.Fprintf(stderr, "desk: gated listener on %s\n", gated.Addr)
+	_, _ = fmt.Fprintf(stderr, "desk: container listener on %s\n", container.Addr)
+	_, _ = fmt.Fprintf(stderr, "desk: operator socket on %s\n", sockPath)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	select {
 	case sig := <-sigCh:
-		fmt.Fprintf(os.Stderr, "desk: %s received, shutting down\n", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = fmt.Fprintf(stderr, "desk: %s received, shutting down\n", sig)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = gated.Shutdown(ctx)
-		_ = container.Shutdown(ctx)
-		return nil
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
+		ctlCancel()
+		_ = gated.Shutdown(shutdownCtx)
+		_ = container.Shutdown(shutdownCtx)
+		select {
+		case <-ctlErr:
+		case <-shutdownCtx.Done():
 		}
-		return nil
+		return 0, nil
+	case err := <-errCh:
+		ctlCancel()
+		<-ctlErr
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return 0, err
+		}
+		return 0, nil
 	}
 }
