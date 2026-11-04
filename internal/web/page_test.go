@@ -107,6 +107,23 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 	}
 }
 
+func TestDeskPageNilNoteCodesRendersEmptyArray(t *testing.T) {
+	out := deskPage(pageParams{
+		User:          "alice",
+		PlatformLabel: "TestTube",
+		Noun:          "video",
+		Seconds:       60,
+		NoteCodes:     nil,
+		Body:          "",
+	})
+	if !strings.Contains(out, "NOTE_CODES=[]") {
+		t.Errorf("page lacks NOTE_CODES=[]:\n%s", out)
+	}
+	if strings.Contains(out, "NOTE_CODES=null") {
+		t.Errorf("page renders NOTE_CODES=null for a nil NoteCodes:\n%s", out)
+	}
+}
+
 func TestDeskPageAdminLinkAndNoFooter(t *testing.T) {
 	out := deskPage(pageParams{
 		User:          "boss",

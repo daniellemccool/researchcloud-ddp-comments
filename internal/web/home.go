@@ -50,6 +50,10 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 		case errText == provision.RegistryFull:
 			h.say(w, http.StatusOK, "The desk is full; ask "+contact+".", 0)
 		case errText == "error: "+fourcat.ErrSetupPending.Error():
+			// 4CAT's first-run setup is pending: kick provisioning again so
+			// the first visit after an admin completes the setup resumes it
+			// (ruling F73), and still answer the not-ready message.
+			h.kick(user, id.Admin)
 			h.say(w, http.StatusServiceUnavailable, notReady, 0)
 		case errText != "":
 			h.say(w, http.StatusOK, "Setup failed at "+st.Current()+"; ask "+contact+".", 0)
@@ -272,22 +276,6 @@ func (h *handler) poolRows() []pool.Row {
 func (h *handler) valid(kind, id string) bool {
 	re, ok := h.kinds.Kind(kind)
 	return ok && re.MatchString(id)
-}
-
-// claimedBy reports whether (kind, id) is among the user's claims.
-func (h *handler) claimedBy(user, kind, id string) bool {
-	evs, err := h.deskLog.Read()
-	if err != nil {
-		log.Printf("web: desk log: %v", err)
-		return false
-	}
-	k := desklog.Key{Kind: kind, ID: id}
-	for _, c := range h.deskLog.ViewOf(user, evs).Claims {
-		if c.Key == k {
-			return true
-		}
-	}
-	return false
 }
 
 func anyUntaken(rows []pool.Row, taken map[desklog.Key]bool) bool {

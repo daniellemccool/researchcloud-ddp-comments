@@ -14,6 +14,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
 )
 
@@ -89,10 +90,23 @@ func (h *handler) serveClaim(w http.ResponseWriter, r *http.Request) {
 
 // serveOpen is POST /desk/open (desk_stub.py do_POST): the item must be valid
 // and among this user's claims; OpenURL runs, the event is appended, 204 on
-// rc 0 else 500.
+// rc 0 else 500. A failed append is a 500: the Python raised and the client
+// never saw success.
 func (h *handler) serveOpen(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
-	kind, itemID, ok := h.claimedItem(r, id.User)
+	// Sessions is nil until a later task wires it; guard before anything else
+	// (ruling F60).
+	if h.sessions == nil {
+		plain(w, http.StatusServiceUnavailable, "desk not ready")
+		return
+	}
+	evs, err := h.deskLog.Read()
+	if err != nil {
+		log.Printf("web: desk log: %v", err)
+		plain(w, http.StatusInternalServerError, "could not read the desk log")
+		return
+	}
+	kind, itemID, ok := h.claimedItem(r, id.User, evs)
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -104,8 +118,10 @@ func (h *handler) serveOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	rc, stderr, err := h.sessions.OpenURL(r.Context(), id.User, url)
 	if err != nil {
+		// The transport error's message names the docker call; it carries no
+		// secret, so it is recorded as exec_err.
 		log.Printf("web: open %s %s: %v", id.User, url, err)
-		rc, stderr = -1, ""
+		rc, stderr = -1, err.Error()
 	}
 	ev := desklog.Event{
 		T:       time.Now().Unix(),
@@ -117,8 +133,11 @@ func (h *handler) serveOpen(w http.ResponseWriter, r *http.Request) {
 		ExecRC:  &rc,
 		ExecErr: stderr,
 	}
-	if err := h.deskLog.Append(ev); err != nil {
-		log.Printf("web: desk log: %v", err)
+	if aerr := h.deskLog.Append(ev); aerr != nil {
+		// The browser command has already run; log the rc too.
+		log.Printf("web: desk log (open %s %s rc=%d): %v", id.User, itemID, rc, aerr)
+		plain(w, http.StatusInternalServerError, "could not record")
+		return
 	}
 	if rc == 0 {
 		w.WriteHeader(http.StatusNoContent)
@@ -129,10 +148,17 @@ func (h *handler) serveOpen(w http.ResponseWriter, r *http.Request) {
 
 // serveProblem is POST /desk/problem (desk_stub.py do_POST): the code is
 // matched as given then upper-cased, the note is whitespace-collapsed and cut
-// to 300 runes; unknown codes and missing required notes are 400.
+// to 300 runes; unknown codes and missing required notes are 400. A failed
+// append is a 500, as in serveOpen.
 func (h *handler) serveProblem(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
-	kind, itemID, ok := h.claimedItem(r, id.User)
+	evs, err := h.deskLog.Read()
+	if err != nil {
+		log.Printf("web: desk log: %v", err)
+		plain(w, http.StatusInternalServerError, "could not read the desk log")
+		return
+	}
+	kind, itemID, ok := h.claimedItem(r, id.User, evs)
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -160,25 +186,39 @@ func (h *handler) serveProblem(w http.ResponseWriter, r *http.Request) {
 		Code:   code,
 		Note:   note,
 	}
-	if err := h.deskLog.Append(ev); err != nil {
-		log.Printf("web: desk log: %v", err)
+	if aerr := h.deskLog.Append(ev); aerr != nil {
+		log.Printf("web: desk log (problem %s %s %s): %v", id.User, itemID, code, aerr)
+		plain(w, http.StatusInternalServerError, "could not record")
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // claimedItem validates the kind/id query (kind defaults to the platform's
-// default kind) and reports whether the item is among the user's claims.
-func (h *handler) claimedItem(r *http.Request, user string) (kind, itemID string, ok bool) {
+// default kind) and reports whether the item is among the user's claims in
+// evs.
+func (h *handler) claimedItem(r *http.Request, user string, evs []desklog.Event) (kind, itemID string, ok bool) {
 	q := r.URL.Query()
 	kind = q.Get("kind")
 	if kind == "" {
 		kind = h.platform.DefaultKind
 	}
 	itemID = q.Get("id")
-	if !h.valid(kind, itemID) || !h.claimedBy(user, kind, itemID) {
+	if !h.valid(kind, itemID) || !claimedIn(h.deskLog.ViewOf(user, evs), kind, itemID) {
 		return "", "", false
 	}
 	return kind, itemID, true
+}
+
+// claimedIn reports whether (kind, id) is among the view's claims.
+func claimedIn(view desklog.View, kind, id string) bool {
+	k := desklog.Key{Kind: kind, ID: id}
+	for _, c := range view.Claims {
+		if c.Key == k {
+			return true
+		}
+	}
+	return false
 }
 
 // serveAdmin is GET /desk/admin/{$} and POST /desk/admin/pool: admins only;
@@ -262,6 +302,9 @@ type platformKinds struct {
 	cache map[string]*regexp.Regexp
 }
 
+// The adapter satisfies pool.Kinds.
+var _ pool.Kinds = (*platformKinds)(nil)
+
 func newPlatformKinds(p *platform.Platform) *platformKinds {
 	return &platformKinds{p: p, cache: make(map[string]*regexp.Regexp)}
 }
@@ -270,10 +313,11 @@ func newPlatformKinds(p *platform.Platform) *platformKinds {
 func (k *platformKinds) Default() string { return k.p.DefaultKind }
 
 // Kind returns the anchored id regexp of kind, compiled once per kind;
-// false for an unknown kind.
+// false for an unknown kind and for a kind whose ID regexp is nil (never
+// match-everything).
 func (k *platformKinds) Kind(kind string) (*regexp.Regexp, bool) {
 	ik, ok := k.p.ItemKinds[kind]
-	if !ok {
+	if !ok || ik.ID == nil {
 		return nil, false
 	}
 	k.mu.Lock()
@@ -281,11 +325,7 @@ func (k *platformKinds) Kind(kind string) (*regexp.Regexp, bool) {
 	if re, ok := k.cache[kind]; ok {
 		return re, true
 	}
-	pattern := ".*"
-	if ik.ID != nil {
-		pattern = ik.ID.String()
-	}
-	re, err := regexp.Compile(`^(?:` + pattern + `)$`)
+	re, err := regexp.Compile(`^(?:` + ik.ID.String() + `)$`)
 	if err != nil {
 		return nil, false
 	}

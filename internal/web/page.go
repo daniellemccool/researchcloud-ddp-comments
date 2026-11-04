@@ -203,11 +203,14 @@ func deskPage(p pageParams) string {
 	if p.FooterHint != nil {
 		footer = "<footer>Before you leave: click <b>Z</b> in the browser's toolbar, " + *p.FooterHint + ".</footer>\n"
 	}
-	codes, err := json.Marshal(p.NoteCodes)
-	if err != nil {
-		codes = []byte("[]")
+	noteCodes := "[]" // a nil NoteCodes renders as [], never null
+	if p.NoteCodes != nil {
+		codes, err := json.Marshal(p.NoteCodes)
+		if err != nil {
+			codes = []byte("[]")
+		}
+		noteCodes = strings.ReplaceAll(string(codes), "<", `\u003c`)
 	}
-	noteCodes := strings.ReplaceAll(string(codes), "<", `\u003c`)
 	user := html.EscapeString(p.User)
 	if p.Admin {
 		user += ` <a href="/desk/admin/">admin</a>`

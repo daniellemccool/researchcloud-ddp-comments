@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
@@ -293,6 +295,11 @@ func TestHomeFullMessage(t *testing.T) {
 	if b := rec.Body.String(); !strings.Contains(b, want) {
 		t.Errorf("body %q lacks %q", b, want)
 	}
+	// The registry-full branch does not kick provisioning.
+	time.Sleep(50 * time.Millisecond)
+	if n := e.prov.callCount(); n != 0 {
+		t.Errorf("Advance called %d times on the full branch, want 0", n)
+	}
 }
 
 func TestHomeSetupFailedMessage(t *testing.T) {
@@ -322,12 +329,47 @@ func TestHomeSetupPendingShowsNotReady(t *testing.T) {
 		"template":        "done",
 		"fourcat_account": "error: " + fourcat.ErrSetupPending.Error(),
 	})
+	e.prov.started = make(chan string, 1)
+	e.prov.block = make(chan struct{})
+	e.prov.finished = make(chan struct{}, 1)
+
 	rec := e.get(t, "alice", collectorRole, "/desk/")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 	if b := rec.Body.String(); !strings.Contains(b, notReadyText()) {
 		t.Errorf("body %q lacks %q", b, notReadyText())
+	}
+	// F73: the setup-pending branch kicks provisioning (one Advance) while
+	// still answering the not-ready message.
+	<-e.prov.started
+	close(e.prov.block)
+	<-e.prov.finished
+	if n := e.prov.callCount(); n != 1 {
+		t.Errorf("Advance called %d times on the setup-pending branch, want 1", n)
+	}
+}
+
+func TestHomeSetupFailedDoesNotKick(t *testing.T) {
+	e := newCollectorEnv(t, true)
+	makeTemplateDir(t, e)
+	writeProvisionState(t, e.root, "alice", map[string]string{
+		"registry": "done",
+		"dirs":     "done",
+		"template": "error: template missing",
+	})
+	rec := e.get(t, "alice", collectorRole, "/desk/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := "Setup failed at template; ask " + testContact + "."
+	if b := rec.Body.String(); !strings.Contains(b, want) {
+		t.Errorf("body %q lacks %q", b, want)
+	}
+	// The setup-failed branch does not kick provisioning.
+	time.Sleep(50 * time.Millisecond)
+	if n := e.prov.callCount(); n != 0 {
+		t.Errorf("Advance called %d times on the setup-failed branch, want 0", n)
 	}
 }
 
@@ -520,6 +562,54 @@ func TestHomePageEarlierBatchAndFinishHint(t *testing.T) {
 	}
 }
 
+func TestHomePageProblemMessageAndDisabledNext(t *testing.T) {
+	e := readyPageEnv(t, true)
+	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n222,video,b1,\n")
+	if err := e.log.Append(
+		desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""},
+		desklog.Event{T: 2, User: "alice", Action: "claim", Kind: "video", ID: "222", Batch: 1, Code: ""},
+		desklog.Event{T: 3, User: "alice", Action: "open", Kind: "video", ID: "111", Code: "", ExecRC: intPtr(0)},
+		desklog.Event{T: 4, User: "alice", Action: "problem", Kind: "video", ID: "222", Code: "OTHER", Note: "some <note>"},
+	); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	rec := e.get(t, "alice", collectorRole, "/desk/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	b := rec.Body.String()
+	for _, want := range []string{
+		`<div class="msg warn">— Other: some &lt;note&gt;</div>`, // the problem message, escaped
+		`data-state="problem"`,
+		`<button id="next" class="next" onclick="openNext()" disabled>Open next video</button>`, // all shown done
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+}
+
+func TestHomePageHelpOpenOnlyWhenNoClaims(t *testing.T) {
+	e := readyPageEnv(t, true)
+	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n")
+
+	rec := e.get(t, "alice", collectorRole, "/desk/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if b := rec.Body.String(); !strings.Contains(b, `<details open><summary>How to collect</summary>`) {
+		t.Errorf("page without claims lacks the open help details")
+	}
+
+	if err := e.log.Append(desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	rec2 := e.get(t, "alice", collectorRole, "/desk/")
+	if b := rec2.Body.String(); !strings.Contains(b, `<details><summary>How to collect</summary>`) {
+		t.Errorf("page with claims lacks the closed help details")
+	}
+}
+
 func TestAdminGetsCollectorPageWithAdminLink(t *testing.T) {
 	e := newCollectorEnv(t, true)
 	makeTemplateDir(t, e)
@@ -695,6 +785,94 @@ func TestOpenOnlyClaimed(t *testing.T) {
 	}
 }
 
+func TestOpenNilSessions503(t *testing.T) {
+	e := newCollectorEnv(t, true)
+	// Sessions left nil, as until the next task wires it (ruling F60).
+	srv := New(Deps{
+		Cfg:      e.cfg,
+		Access:   access.Config{CollectorRole: collectorRole, AdminRole: adminRole, GateSecret: testGate},
+		Platform: testPlatform(),
+		LogPath:  filepath.Join(e.root, "state", "access.ndjson"),
+		Prov:     e.prov,
+		Log:      e.log,
+	})
+	// An unclaimed id: the nil guard fires before the claimed check, so the
+	// answer is 503, not 404.
+	rec := doMethod(t, srv, http.MethodPost, "alice", collectorRole, "/desk/open?id=999")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if b := rec.Body.String(); b != "desk not ready" {
+		t.Errorf("body = %q, want %q", b, "desk not ready")
+	}
+}
+
+// makeLogUnwritable makes appends to the log fail while keeping the test
+// runnable as root: root ignores permission bits, so a directory goes in
+// place of the file (reads fail too); a non-root run just removes write
+// permission, which keeps reads working and exercises the append failure.
+func makeLogUnwritable(t *testing.T, logPath string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		if err := os.Remove(logPath); err != nil {
+			t.Fatalf("remove log: %v", err)
+		}
+		if err := os.Mkdir(logPath, 0o755); err != nil {
+			t.Fatalf("mkdir over log: %v", err)
+		}
+		return
+	}
+	if err := os.Chmod(logPath, 0o444); err != nil {
+		t.Fatalf("chmod log: %v", err)
+	}
+}
+
+func TestOpenAndProblemUnwritableLog500(t *testing.T) {
+	e := newCollectorEnv(t, true)
+	makeTemplateDir(t, e)
+	writeProvisionState(t, e.root, "alice", allDoneSteps())
+	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n")
+	if err := e.log.Append(desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	makeLogUnwritable(t, filepath.Join(e.root, "state", "desk-log.ndjson"))
+
+	if rec := e.post(t, "alice", collectorRole, "/desk/open?id=111"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("open: status = %d, want 500", rec.Code)
+	} else if b := rec.Body.String(); !strings.Contains(b, "could not") {
+		t.Errorf("open: body = %q, want a plain could-not message", b)
+	}
+	q := url.Values{"id": {"111"}, "code": {"OTHER"}, "note": {"x"}}
+	if rec := e.post(t, "alice", collectorRole, "/desk/problem?"+q.Encode()); rec.Code != http.StatusInternalServerError {
+		t.Errorf("problem: status = %d, want 500", rec.Code)
+	} else if b := rec.Body.String(); !strings.Contains(b, "could not") {
+		t.Errorf("problem: body = %q, want a plain could-not message", b)
+	}
+}
+
+func TestOpenTransportErrorRecordsErr(t *testing.T) {
+	e := newCollectorEnv(t, true)
+	makeTemplateDir(t, e)
+	writeProvisionState(t, e.root, "alice", allDoneSteps())
+	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n")
+	if err := e.log.Append(desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	e.sess.openErr = errors.New("docker exec failed: boom")
+	rec := e.post(t, "alice", collectorRole, "/desk/open?id=111")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	evs, err := e.log.Read()
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	last := evs[len(evs)-1]
+	if last.Action != "open" || last.ExecRC == nil || *last.ExecRC != -1 || last.ExecErr != "docker exec failed: boom" {
+		t.Errorf("last event = %+v, want open with exec_rc -1 and exec_err the transport error", last)
+	}
+}
+
 func TestProblemCodes(t *testing.T) {
 	e := newCollectorEnv(t, true)
 	makeTemplateDir(t, e)
@@ -813,6 +991,7 @@ func TestKindsAdapterAnchors(t *testing.T) {
 		DefaultKind: "video",
 		ItemKinds: map[string]platform.ItemKind{
 			"video": {URL: "https://example.org/{id}", ID: regexp.MustCompile(`[0-9]+`)},
+			"any":   {URL: "https://example.org/any/{id}"}, // nil ID regexp
 		},
 	}
 	k := newPlatformKinds(p)
@@ -831,5 +1010,8 @@ func TestKindsAdapterAnchors(t *testing.T) {
 	}
 	if _, ok := k.Kind("photo"); ok {
 		t.Errorf("Kind(photo) found, want not found")
+	}
+	if _, ok := k.Kind("any"); ok {
+		t.Errorf("Kind(any) with a nil ID regexp found, want unknown (false), never match-everything")
 	}
 }
