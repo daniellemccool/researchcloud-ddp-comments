@@ -85,14 +85,19 @@ overwrites below.
 | `docker_initialization_command` | `init.sh` |
 
 After the first launch, an admin-role user opens `/fourcat/` through the
-gate and completes 4CAT's setup form once; the desk does not create that
-account (Danielle, 2026-11-02).
+gate and completes 4CAT's setup form once, under a name that is not a SRAM
+username, such as the admin's email address (an admin is also a collector, and a
+collector's 4CAT account is created under their SRAM username, so a clash has no
+repair path yet); the desk does not create that account (Danielle, 2026-11-02;
+2026-11-03).
 
 ## Pre-launch checklist
 
-- The release's three images (`desk`, `deskproxy`, `4cat`) and the template
-  artifact named by its `platforms/<platform>/template.json` are published, and
-  the GHCR packages are public.
+- The release's four images (`desk`, `deskproxy`, `4cat`, `firefox`) and the
+  template artifact named by its `platforms/<platform>/template.json` are
+  published, and the GHCR packages are public. `firefox` is the Firefox mirror
+  (`jlesage/firefox` copied into GHCR by `release.yml`); a workspace never pulls
+  it from Docker Hub.
 - The two SRAM groups (collector and admin roles) exist and each has at least one
   member; the init script refuses otherwise.
 - The volume exists in the launching CO.

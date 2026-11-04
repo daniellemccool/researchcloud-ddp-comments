@@ -105,6 +105,12 @@ pins and refuses a release whose `template.json` differs from the
 workspace's `desk.json` (reattach the workspace on that release instead;
 installing a new template at update is a later plan's item).
 
+A workspace on `v0.1.0-alpha.3` or earlier is recreated on the new release, not
+updated with `init.sh update`: the layout changed (25 `desk.json` keys instead of
+24, a fourth image, the `desk-egress` network option), and `update` runs the
+installed copy's old script, which writes the old layout. `update` is for
+releases from the next tag on. The desk root on the volume survives a recreate.
+
 ## First release only
 
 GHCR packages start private. In the GitHub package settings, set `desk`,

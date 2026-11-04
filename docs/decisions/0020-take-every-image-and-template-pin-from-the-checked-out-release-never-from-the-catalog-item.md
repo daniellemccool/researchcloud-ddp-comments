@@ -15,7 +15,7 @@ priority: invariant
 
 ## Decision
 
-The init script resolves the three image references from the release's own `deploy/.env.example` (the desk tag is the release tag) and the Zeeschuimer version and artifact digest from the release's `platforms/<platform>/template.json`; the catalog component declares only study parameters and the three platform-sourced ones, and a parameter carrying a pin is refused.
+The init script resolves the four image references (desk, deskproxy, 4cat, firefox) from the release's own `deploy/.env.example` (the desk tag is the release tag) and the Zeeschuimer version and artifact digest from the release's `platforms/<platform>/template.json`; the catalog component declares only study parameters and the three platform-sourced ones, and a parameter carrying a pin is refused.
 
 ## Guidance
 
