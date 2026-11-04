@@ -39,6 +39,7 @@ type Fake struct {
 type fakeNetwork struct {
 	id, name, subnet string
 	labels           map[string]string
+	options          map[string]string
 	attached         map[string]bool // container names
 	nextHost         int             // next host index K in <prefix>.K, starts at 2
 }
@@ -110,6 +111,15 @@ func copyLabels(in map[string]string) map[string]string {
 	return out
 }
 
+// copyOptions copies driver options like copyLabels, but keeps nil nil (the
+// daemon reports no options as a nil map, not an empty one).
+func copyOptions(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	return copyLabels(in)
+}
+
 // matchLabels reports whether have carries every wanted label.
 func matchLabels(have, want map[string]string) bool {
 	for k, v := range want {
@@ -127,7 +137,7 @@ func subnetPrefix(subnet string) string {
 }
 
 func (f *Fake) networkView(n *fakeNetwork) Network {
-	return Network{ID: n.id, Name: n.name, Subnet: n.subnet, Labels: copyLabels(n.labels)}
+	return Network{ID: n.id, Name: n.name, Subnet: n.subnet, Labels: copyLabels(n.labels), Options: copyOptions(n.options)}
 }
 
 func (f *Fake) containerView(c *fakeContainer) Container {
@@ -168,7 +178,7 @@ func (f *Fake) assignIP(n *fakeNetwork, c *fakeContainer) {
 	n.nextHost++
 }
 
-func (f *Fake) NetworkCreate(ctx context.Context, name string, labels map[string]string) (Network, error) {
+func (f *Fake) NetworkCreate(ctx context.Context, name string, labels, opts map[string]string) (Network, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.record("NetworkCreate "+name, "NetworkCreate "+name); err != nil {
@@ -182,6 +192,7 @@ func (f *Fake) NetworkCreate(ctx context.Context, name string, labels map[string
 		name:     name,
 		subnet:   fmt.Sprintf("10.200.%d.0/24", f.nextSubnet),
 		labels:   copyLabels(labels),
+		options:  copyOptions(opts),
 		attached: map[string]bool{},
 		nextHost: 2,
 	}

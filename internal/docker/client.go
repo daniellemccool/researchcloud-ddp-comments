@@ -20,8 +20,11 @@ var (
 // Client is the narrow Docker surface the rest of the desk uses. The only
 // production implementation is the SDK client built by New; tests use Fake.
 type Client interface {
-	// NetworkCreate creates an internal bridge network with the given labels.
-	NetworkCreate(ctx context.Context, name string, labels map[string]string) (Network, error)
+	// NetworkCreate creates an internal bridge network with the given labels
+	// and bridge driver options. opts are the driver options of
+	// network.CreateOptions.Options, e.g. the isolated gateway mode of
+	// ADR-0007; nil means no options.
+	NetworkCreate(ctx context.Context, name string, labels, opts map[string]string) (Network, error)
 	NetworkInspect(ctx context.Context, name string) (Network, error)
 	// NetworkList returns every network carrying all the given labels.
 	NetworkList(ctx context.Context, labels map[string]string) ([]Network, error)
@@ -45,6 +48,7 @@ type Client interface {
 type Network struct {
 	ID, Name, Subnet string // Subnet: the first IPAM config's subnet, e.g. "172.20.0.0/16"
 	Labels           map[string]string
+	Options          map[string]string // the bridge driver options the network was created with, from inspect
 }
 
 // Container is a Docker container as the desk sees it.

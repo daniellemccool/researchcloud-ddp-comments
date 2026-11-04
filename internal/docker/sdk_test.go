@@ -65,7 +65,10 @@ func TestSDKAgainstDaemon(t *testing.T) {
 		_ = c.NetworkRemove(ctx, netName)
 	})
 
-	if _, err := c.NetworkCreate(ctx, netName, labels); err != nil {
+	// ADR-0007: the throwaway network is created with Docker's isolated
+	// gateway mode, and the inspected network must report the option.
+	opts := map[string]string{"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}
+	if _, err := c.NetworkCreate(ctx, netName, labels, opts); err != nil {
 		t.Fatalf("NetworkCreate: %v", err)
 	}
 
@@ -77,6 +80,9 @@ func TestSDKAgainstDaemon(t *testing.T) {
 	if !rawInsp.Internal {
 		t.Error("raw inspect: Internal = false, want true")
 	}
+	if got := rawInsp.Options["com.docker.network.bridge.gateway_mode_ipv4"]; got != "isolated" {
+		t.Errorf("raw inspect: Options[gateway_mode_ipv4] = %q, want %q (options %v)", got, "isolated", rawInsp.Options)
+	}
 
 	n, err := c.NetworkInspect(ctx, netName)
 	if err != nil {
@@ -84,6 +90,9 @@ func TestSDKAgainstDaemon(t *testing.T) {
 	}
 	if n.Subnet == "" {
 		t.Error("Subnet is empty, want the first IPAM config's subnet")
+	}
+	if got := n.Options["com.docker.network.bridge.gateway_mode_ipv4"]; got != "isolated" {
+		t.Errorf("NetworkInspect Options[gateway_mode_ipv4] = %q, want %q (options %v)", got, "isolated", n.Options)
 	}
 
 	list, err := c.NetworkList(ctx, labels)

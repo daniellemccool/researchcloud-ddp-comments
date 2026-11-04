@@ -75,6 +75,12 @@ func TestStartSequence(t *testing.T) {
 		}
 	}
 
+	// ADR-0007: the pair network is created with Docker's isolated gateway
+	// mode, so the bridge gateway is not reachable from the browser.
+	if got := net.Options[networkGatewayModeOption]; got != networkGatewayModeIsolated {
+		t.Errorf("network Options[%s] = %q, want %q (options %v)", networkGatewayModeOption, got, networkGatewayModeIsolated, net.Options)
+	}
+
 	// pair.json holds the runtime with that subnet.
 	_, rt, err := render.ReadPair(f.cfg, "alice")
 	if err != nil {
@@ -217,7 +223,7 @@ func TestStartRemovesExitedLeftover(t *testing.T) {
 	ctx := context.Background()
 	// An exited firefox and its network from an earlier session, with our labels.
 	shared := map[string]string{"desk.owner": "desk", "desk.user": "alice", "desk.generation": "tiktok-1.14.3"}
-	if _, err := f.fake.NetworkCreate(ctx, "net-alice", withRole(shared, "net")); err != nil {
+	if _, err := f.fake.NetworkCreate(ctx, "net-alice", withRole(shared, "net"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.fake.ContainerCreate(ctx, docker.ContainerSpec{
@@ -398,11 +404,11 @@ func TestStartRebuildsAfterProxyDied(t *testing.T) {
 // fresh one.
 type ctxClient struct{ docker.Client }
 
-func (c ctxClient) NetworkCreate(ctx context.Context, name string, labels map[string]string) (docker.Network, error) {
+func (c ctxClient) NetworkCreate(ctx context.Context, name string, labels, opts map[string]string) (docker.Network, error) {
 	if err := ctx.Err(); err != nil {
 		return docker.Network{}, err
 	}
-	return c.Client.NetworkCreate(ctx, name, labels)
+	return c.Client.NetworkCreate(ctx, name, labels, opts)
 }
 
 func (c ctxClient) NetworkInspect(ctx context.Context, name string) (docker.Network, error) {

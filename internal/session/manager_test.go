@@ -54,7 +54,7 @@ func newFixture(t *testing.T, maxRunning int, users ...string) *fixture {
 	// The shared egress bridge the rendered proxy joins at create time; the
 	// compose project owns it, so the fixture provides it (the Fake validates
 	// every endpoint's network on ContainerCreate).
-	if _, err := fake.NetworkCreate(ctx, "desk_desk-egress", nil); err != nil {
+	if _, err := fake.NetworkCreate(ctx, "desk_desk-egress", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The desk itself: a running container with no labels, so NetworkConnect
@@ -122,7 +122,7 @@ func (f *fixture) runningPair(t *testing.T, user, generation string) {
 	t.Helper()
 	ctx := context.Background()
 	shared := map[string]string{"desk.owner": "desk", "desk.user": user, "desk.generation": generation}
-	if _, err := f.fake.NetworkCreate(ctx, "net-"+user, withRole(shared, "net")); err != nil {
+	if _, err := f.fake.NetworkCreate(ctx, "net-"+user, withRole(shared, "net"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.fake.ContainerCreate(ctx, docker.ContainerSpec{

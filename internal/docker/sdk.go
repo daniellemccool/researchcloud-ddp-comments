@@ -72,19 +72,22 @@ func apiAtLeast(version string, major, minor int) bool {
 }
 
 func networkFromInspect(n network.Inspect) Network {
-	out := Network{ID: n.ID, Name: n.Name, Labels: n.Labels}
+	out := Network{ID: n.ID, Name: n.Name, Labels: n.Labels, Options: n.Options}
 	if len(n.IPAM.Config) > 0 {
 		out.Subnet = n.IPAM.Config[0].Subnet
 	}
 	return out
 }
 
-func (s *sdkClient) NetworkCreate(ctx context.Context, name string, labels map[string]string) (Network, error) {
-	// ADR-0007: collector networks are internal bridges with no gateway.
+func (s *sdkClient) NetworkCreate(ctx context.Context, name string, labels, opts map[string]string) (Network, error) {
+	// ADR-0007: collector networks are internal bridges with no gateway;
+	// opts carries the driver options (e.g. the isolated gateway mode) that
+	// keep the bridge gateway itself unreachable from the network.
 	resp, err := s.cli.NetworkCreate(ctx, name, network.CreateOptions{
 		Internal: true,
 		Driver:   "bridge",
 		Labels:   labels,
+		Options:  opts,
 	})
 	if err != nil {
 		return Network{}, wrapErr(err)

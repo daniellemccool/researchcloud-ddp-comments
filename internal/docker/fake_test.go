@@ -23,7 +23,7 @@ func TestFakeLifecycle(t *testing.T) {
 	ctx := context.Background()
 	f := NewFake()
 
-	net, err := f.NetworkCreate(ctx, "net-alice", map[string]string{"desk.user": "alice"})
+	net, err := f.NetworkCreate(ctx, "net-alice", map[string]string{"desk.user": "alice"}, nil)
 	if err != nil {
 		t.Fatalf("NetworkCreate: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestFakeLifecycle(t *testing.T) {
 func TestFakeInjectedFailure(t *testing.T) {
 	ctx := context.Background()
 	f := NewFake()
-	if _, err := f.NetworkCreate(ctx, "net-alice", nil); err != nil {
+	if _, err := f.NetworkCreate(ctx, "net-alice", nil, nil); err != nil {
 		t.Fatalf("NetworkCreate: %v", err)
 	}
 	spec := ContainerSpec{
@@ -291,7 +291,7 @@ func TestFakeExecValidation(t *testing.T) {
 func TestFakeHelpersFollowAddressRules(t *testing.T) {
 	ctx := context.Background()
 	f := NewFake()
-	if _, err := f.NetworkCreate(ctx, "net-alice", nil); err != nil {
+	if _, err := f.NetworkCreate(ctx, "net-alice", nil, nil); err != nil {
 		t.Fatalf("NetworkCreate: %v", err)
 	}
 	specA := ContainerSpec{Name: "a", Image: "img:1", Endpoints: []Endpoint{{Network: "net-alice"}}}
@@ -355,7 +355,7 @@ func TestFakeHelpersFollowAddressRules(t *testing.T) {
 func TestFakeNetworkConnectTwice(t *testing.T) {
 	ctx := context.Background()
 	f := NewFake()
-	if _, err := f.NetworkCreate(ctx, "net-alice", nil); err != nil {
+	if _, err := f.NetworkCreate(ctx, "net-alice", nil, nil); err != nil {
 		t.Fatalf("NetworkCreate: %v", err)
 	}
 	spec := ContainerSpec{Name: "c-alice", Image: "img:1"}
@@ -371,5 +371,42 @@ func TestFakeNetworkConnectTwice(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already exists in network") {
 		t.Errorf("err = %q, want it to contain %q", err.Error(), "already exists in network")
+	}
+}
+
+func TestFakeNetworkOptions(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	opts := map[string]string{"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}
+	created, err := f.NetworkCreate(ctx, "net-alice", nil, opts)
+	if err != nil {
+		t.Fatalf("NetworkCreate: %v", err)
+	}
+	if got := created.Options["com.docker.network.bridge.gateway_mode_ipv4"]; got != "isolated" {
+		t.Errorf("created Options[gateway_mode_ipv4] = %q, want %q (options %v)", got, "isolated", created.Options)
+	}
+	insp, err := f.NetworkInspect(ctx, "net-alice")
+	if err != nil {
+		t.Fatalf("NetworkInspect: %v", err)
+	}
+	if got := insp.Options["com.docker.network.bridge.gateway_mode_ipv4"]; got != "isolated" {
+		t.Errorf("inspect Options[gateway_mode_ipv4] = %q, want %q (options %v)", got, "isolated", insp.Options)
+	}
+	// Mutating the caller's map after create must not change the stored one.
+	opts["com.docker.network.bridge.gateway_mode_ipv4"] = "bogus"
+	if got := insp.Options["com.docker.network.bridge.gateway_mode_ipv4"]; got != "isolated" {
+		t.Errorf("stored option changed with the caller's map: %q", got)
+	}
+
+	// A network created without options reports nil, like the daemon.
+	if _, err := f.NetworkCreate(ctx, "net-bob", nil, nil); err != nil {
+		t.Fatalf("NetworkCreate net-bob: %v", err)
+	}
+	insp, err = f.NetworkInspect(ctx, "net-bob")
+	if err != nil {
+		t.Fatalf("NetworkInspect net-bob: %v", err)
+	}
+	if insp.Options != nil {
+		t.Errorf("Options of an option-less network = %v, want nil", insp.Options)
 	}
 }

@@ -20,6 +20,15 @@ const stopTimeout = 10 * time.Second
 // a fresh context.
 const cleanupTimeout = 30 * time.Second
 
+// ADR-0007: an internal bridge network still routes to its own gateway, so a
+// container on it can reach the host through that address. Docker's isolated
+// gateway mode removes the gateway route, leaving the proxy as the browser's
+// only path off the pair network.
+const (
+	networkGatewayModeOption   = "com.docker.network.bridge.gateway_mode_ipv4"
+	networkGatewayModeIsolated = "isolated"
+)
+
 // Start creates user's pair (net-<user>, desk-proxy-<user>,
 // desk-firefox-<user>) from the rendered spec. The running cap is reserved
 // atomically: under Locks.User(u) and Locks.Global together, the size of the
@@ -132,7 +141,9 @@ func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 		netLabels[k] = v
 	}
 	netLabels["desk.role"] = "net"
-	net, err = m.Docker.NetworkCreate(ctx, netName, netLabels)
+	net, err = m.Docker.NetworkCreate(ctx, netName, netLabels, map[string]string{
+		networkGatewayModeOption: networkGatewayModeIsolated,
+	})
 	if err != nil {
 		return m.failStart(ctx, user, err)
 	}
