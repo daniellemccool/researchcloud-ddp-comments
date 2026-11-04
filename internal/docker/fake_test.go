@@ -57,6 +57,15 @@ func TestFakeLifecycle(t *testing.T) {
 		t.Fatalf("ContainerCreate firefox: %v", err)
 	}
 
+	// Created-not-started containers are attached but have no address yet.
+	created, err := f.ContainerInspect(ctx, "desk-firefox-alice")
+	if err != nil {
+		t.Fatalf("ContainerInspect: %v", err)
+	}
+	if len(created.IPs) != 0 {
+		t.Errorf("IPs of a created-not-started container = %v, want empty", created.IPs)
+	}
+
 	list, err := f.ContainerList(ctx, map[string]string{"desk.user": "alice"})
 	if err != nil {
 		t.Fatalf("ContainerList: %v", err)
@@ -64,9 +73,29 @@ func TestFakeLifecycle(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("ContainerList len = %d, want 2", len(list))
 	}
-	ips := map[string]string{}
 	for _, c := range list {
-		ips[c.Name] = c.IPs["net-alice"]
+		if c.ExitCode != 0 {
+			t.Errorf("ContainerList ExitCode = %d, want 0 (the list API cannot report it)", c.ExitCode)
+		}
+	}
+
+	// The daemon assigns addresses when the containers start.
+	if err := f.ContainerStart(ctx, "desk-proxy-alice"); err != nil {
+		t.Fatalf("ContainerStart proxy: %v", err)
+	}
+	if err := f.ContainerStart(ctx, "desk-firefox-alice"); err != nil {
+		t.Fatalf("ContainerStart firefox: %v", err)
+	}
+	ips := map[string]string{}
+	for _, name := range []string{"desk-proxy-alice", "desk-firefox-alice"} {
+		c, err := f.ContainerInspect(ctx, name)
+		if err != nil {
+			t.Fatalf("ContainerInspect %s: %v", name, err)
+		}
+		if !c.Running {
+			t.Errorf("%s not running after start", name)
+		}
+		ips[name] = c.IPs["net-alice"]
 	}
 	if ips["desk-proxy-alice"] != "10.200.1.2" {
 		t.Errorf("proxy IP = %q, want 10.200.1.2", ips["desk-proxy-alice"])
@@ -75,25 +104,45 @@ func TestFakeLifecycle(t *testing.T) {
 		t.Errorf("firefox IP = %q, want 10.200.1.3", ips["desk-firefox-alice"])
 	}
 
-	if err := f.ContainerStart(ctx, "desk-proxy-alice"); err != nil {
-		t.Fatalf("ContainerStart: %v", err)
+	// A third container connected while running gets the next address.
+	extraSpec := ContainerSpec{Name: "desk-extra-alice", Image: "extra:1"}
+	if _, err := f.ContainerCreate(ctx, extraSpec); err != nil {
+		t.Fatalf("ContainerCreate extra: %v", err)
+	}
+	if err := f.ContainerStart(ctx, "desk-extra-alice"); err != nil {
+		t.Fatalf("ContainerStart extra: %v", err)
+	}
+	if err := f.NetworkConnect(ctx, "net-alice", "desk-extra-alice"); err != nil {
+		t.Fatalf("NetworkConnect extra: %v", err)
+	}
+	extra, err := f.ContainerInspect(ctx, "desk-extra-alice")
+	if err != nil {
+		t.Fatalf("ContainerInspect extra: %v", err)
+	}
+	if extra.IPs["net-alice"] != "10.200.1.4" {
+		t.Errorf("extra IP = %q, want 10.200.1.4", extra.IPs["net-alice"])
+	}
+
+	// The created specs are recorded for later assertions.
+	if len(f.Created) != 3 {
+		t.Errorf("len(Created) = %d, want 3", len(f.Created))
+	}
+	if got := f.Specs["desk-proxy-alice"]; got.Image != "proxy:1" || len(got.Endpoints) != 1 || got.Endpoints[0].Network != "net-alice" {
+		t.Errorf("Specs[desk-proxy-alice] = %+v, want the proxy spec", got)
+	}
+
+	if err := f.ContainerStop(ctx, "desk-proxy-alice", 5*time.Second); err != nil {
+		t.Fatalf("ContainerStop: %v", err)
 	}
 	c, err := f.ContainerInspect(ctx, "desk-proxy-alice")
 	if err != nil {
 		t.Fatalf("ContainerInspect: %v", err)
 	}
-	if !c.Running {
-		t.Error("container not running after start")
-	}
-	if err := f.ContainerStop(ctx, "desk-proxy-alice", 5*time.Second); err != nil {
-		t.Fatalf("ContainerStop: %v", err)
-	}
-	c, err = f.ContainerInspect(ctx, "desk-proxy-alice")
-	if err != nil {
-		t.Fatalf("ContainerInspect: %v", err)
-	}
 	if c.Running {
 		t.Error("container still running after stop")
+	}
+	if len(c.IPs) != 0 {
+		t.Errorf("IPs after stop = %v, want empty (address released)", c.IPs)
 	}
 	if err := f.ContainerRemove(ctx, "desk-proxy-alice"); err != nil {
 		t.Fatalf("ContainerRemove: %v", err)
@@ -106,6 +155,9 @@ func TestFakeLifecycle(t *testing.T) {
 	if !callsContain(f.Calls, want) {
 		t.Errorf("Calls = %v, want subsequence %v", f.Calls, want)
 	}
+	if _, ok := f.Specs["desk-proxy-alice"]; ok {
+		t.Error("Specs still holds the removed container")
+	}
 
 	if _, err := f.ContainerCreate(ctx, firefoxSpec); !errors.Is(err, ErrConflict) {
 		t.Errorf("duplicate ContainerCreate err = %v, want ErrConflict", err)
@@ -117,8 +169,10 @@ func TestFakeLifecycle(t *testing.T) {
 	if err := f.NetworkRemove(ctx, "net-alice"); !errors.Is(err, ErrConflict) {
 		t.Errorf("NetworkRemove with attached container err = %v, want ErrConflict", err)
 	}
-	if err := f.ContainerRemove(ctx, "desk-firefox-alice"); err != nil {
-		t.Fatalf("ContainerRemove firefox: %v", err)
+	for _, name := range []string{"desk-firefox-alice", "desk-extra-alice"} {
+		if err := f.ContainerRemove(ctx, name); err != nil {
+			t.Fatalf("ContainerRemove %s: %v", name, err)
+		}
 	}
 	if err := f.NetworkRemove(ctx, "net-alice"); err != nil {
 		t.Fatalf("NetworkRemove after detach: %v", err)
@@ -173,6 +227,9 @@ func TestFakeExecResults(t *testing.T) {
 	if _, err := f.ContainerCreate(ctx, spec); err != nil {
 		t.Fatalf("ContainerCreate: %v", err)
 	}
+	if err := f.ContainerStart(ctx, "desk-proxy-alice"); err != nil {
+		t.Fatalf("ContainerStart: %v", err)
+	}
 
 	f.ExecResults["run-partner create"] = Exec{ExitCode: 3, Stdout: "out", Stderr: "err"}
 	ex, err := f.Exec(ctx, "desk-proxy-alice", []string{"run-partner", "create", "acct"}, []string{"A=B"}, []byte("stdin"))
@@ -209,6 +266,25 @@ func TestFakeExecResults(t *testing.T) {
 		len(first.Env) != 1 || first.Env[0] != "A=B" ||
 		string(first.Stdin) != "stdin" {
 		t.Errorf("Execs[0] = %+v, want full argv/env/stdin recorded", first)
+	}
+}
+
+func TestFakeExecValidation(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+
+	if _, err := f.Exec(ctx, "ghost", []string{"a", "b"}, nil, nil); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Exec on a missing container err = %v, want ErrNotFound", err)
+	}
+	spec := ContainerSpec{Name: "c-alice", Image: "img:1"}
+	if _, err := f.ContainerCreate(ctx, spec); err != nil {
+		t.Fatalf("ContainerCreate: %v", err)
+	}
+	if _, err := f.Exec(ctx, "c-alice", []string{"a", "b"}, nil, nil); !errors.Is(err, ErrConflict) {
+		t.Errorf("Exec on a not-running container err = %v, want ErrConflict", err)
+	}
+	if len(f.Execs) != 2 {
+		t.Errorf("Execs len = %d, want both calls recorded", len(f.Execs))
 	}
 }
 

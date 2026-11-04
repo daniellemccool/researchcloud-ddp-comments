@@ -21,10 +21,12 @@ type ExecCall struct {
 // calls through Fail, and hands out canned Exec results through ExecResults.
 // All state is guarded by a mutex, so tests may drive it from goroutines.
 type Fake struct {
-	Calls       []string         // one entry per method call, carrying names not ids
-	Fail        map[string]error // key "<Method> <name>"; when present the method returns it and does nothing
-	ExecResults map[string]Exec  // key cmd[0]+" "+cmd[1]; missing key -> Exec{ExitCode: 0}
-	Execs       []ExecCall       // every Exec call in order, with its full argv
+	Calls       []string                 // one entry per method call, carrying names not ids
+	Fail        map[string]error         // key "<Method> <name>"; when present the method returns it and does nothing
+	ExecResults map[string]Exec          // key cmd[0]+" "+cmd[1]; missing key -> Exec{ExitCode: 0}
+	Execs       []ExecCall               // every Exec call in order, with its full argv
+	Created     []ContainerSpec          // every created spec, in creation order
+	Specs       map[string]ContainerSpec // created specs by name, removed on ContainerRemove
 
 	mu         sync.Mutex
 	networks   map[string]*fakeNetwork
@@ -55,6 +57,7 @@ func NewFake() *Fake {
 	return &Fake{
 		Fail:        map[string]error{},
 		ExecResults: map[string]Exec{},
+		Specs:       map[string]ContainerSpec{},
 		networks:    map[string]*fakeNetwork{},
 		containers:  map[string]*fakeContainer{},
 		nextSubnet:  1,
@@ -131,15 +134,28 @@ func (f *Fake) containerView(c *fakeContainer) Container {
 	}
 	for netName, ip := range c.networks {
 		out.Networks = append(out.Networks, netName)
-		out.IPs[netName] = ip
+		if ip != "" {
+			out.IPs[netName] = ip
+		}
 	}
 	sort.Strings(out.Networks)
 	return out
 }
 
-// attach adds the container to the network and assigns it the next IP.
+// attach adds the container to the network without an address, matching the
+// daemon: the address is assigned when the container starts (or when a running
+// container is connected) and cleared on stop/remove.
 func (f *Fake) attach(n *fakeNetwork, c *fakeContainer) {
 	n.attached[c.name] = true
+	c.networks[n.name] = ""
+}
+
+// assignIP gives the container the next address on the network. K starts at 2
+// and is never reused within a fake.
+func (f *Fake) assignIP(n *fakeNetwork, c *fakeContainer) {
+	if c.networks[n.name] != "" {
+		return
+	}
 	c.networks[n.name] = fmt.Sprintf("%s.%d", subnetPrefix(n.subnet), n.nextHost)
 	n.nextHost++
 }
@@ -238,6 +254,9 @@ func (f *Fake) NetworkConnect(ctx context.Context, networkName, containerName st
 		return fmt.Errorf("%w: container %s already exists in network %s", ErrConflict, containerName, networkName)
 	}
 	f.attach(n, c)
+	if c.running {
+		f.assignIP(n, c)
+	}
 	return nil
 }
 
@@ -274,6 +293,13 @@ func (f *Fake) ContainerCreate(ctx context.Context, spec ContainerSpec) (string,
 	if _, ok := f.containers[spec.Name]; ok {
 		return "", fmt.Errorf("%w: container %s already exists", ErrConflict, spec.Name)
 	}
+	// Validate every endpoint's network before attaching any: an unknown
+	// network fails with nothing attached and no counter touched.
+	for _, ep := range spec.Endpoints {
+		if _, ok := f.networks[ep.Network]; !ok {
+			return "", fmt.Errorf("%w: network %s", ErrNotFound, ep.Network)
+		}
+	}
 	c := &fakeContainer{
 		id:       fmt.Sprintf("fake-ctr-%s", spec.Name),
 		name:     spec.Name,
@@ -282,10 +308,7 @@ func (f *Fake) ContainerCreate(ctx context.Context, spec ContainerSpec) (string,
 		networks: map[string]string{},
 	}
 	for _, ep := range spec.Endpoints {
-		n, ok := f.networks[ep.Network]
-		if !ok {
-			return "", fmt.Errorf("%w: network %s", ErrNotFound, ep.Network)
-		}
+		n := f.networks[ep.Network]
 		if n.attached[c.name] {
 			return "", fmt.Errorf("%w: container %s already exists in network %s", ErrConflict, c.name, ep.Network)
 		}
@@ -293,6 +316,8 @@ func (f *Fake) ContainerCreate(ctx context.Context, spec ContainerSpec) (string,
 	}
 	f.containers[spec.Name] = c
 	f.ctrOrder = append(f.ctrOrder, spec.Name)
+	f.Created = append(f.Created, spec)
+	f.Specs[spec.Name] = spec
 	return c.id, nil
 }
 
@@ -309,6 +334,11 @@ func (f *Fake) ContainerStart(ctx context.Context, name string) error {
 	c.running = true
 	c.exitCode = 0
 	c.exitSet = false
+	// The daemon assigns the container's address on each attached network
+	// when it starts.
+	for netName := range c.networks {
+		f.assignIP(f.networks[netName], c)
+	}
 	return nil
 }
 
@@ -325,6 +355,10 @@ func (f *Fake) ContainerStop(ctx context.Context, name string, timeout time.Dura
 	c.running = false
 	if !c.exitSet {
 		c.exitCode = 0
+	}
+	// The daemon releases the container's addresses on stop.
+	for netName := range c.networks {
+		c.networks[netName] = ""
 	}
 	return nil
 }
@@ -345,6 +379,7 @@ func (f *Fake) ContainerRemove(ctx context.Context, name string) error {
 		}
 	}
 	delete(f.containers, name)
+	delete(f.Specs, name)
 	for i, got := range f.ctrOrder {
 		if got == name {
 			f.ctrOrder = append(f.ctrOrder[:i], f.ctrOrder[i+1:]...)
@@ -377,7 +412,9 @@ func (f *Fake) ContainerList(ctx context.Context, labels map[string]string) ([]C
 	for _, name := range f.ctrOrder {
 		c := f.containers[name]
 		if matchLabels(c.labels, labels) {
-			out = append(out, f.containerView(c))
+			v := f.containerView(c)
+			v.ExitCode = 0 // the list API cannot report an exit code
+			out = append(out, v)
 		}
 	}
 	return out, nil
@@ -391,15 +428,24 @@ func (f *Fake) Exec(ctx context.Context, containerName string, cmd []string, env
 		words = words[:2]
 	}
 	call := "Exec " + containerName + " " + strings.Join(words, " ")
-	if err := f.record(call, "Exec "+containerName); err != nil {
-		return Exec{}, err
-	}
+	f.Calls = append(f.Calls, call)
+	// Record the call in Execs first, as the other methods record in Calls.
 	f.Execs = append(f.Execs, ExecCall{
 		Container: containerName,
 		Cmd:       append([]string(nil), cmd...),
 		Env:       append([]string(nil), env...),
 		Stdin:     append([]byte(nil), stdin...),
 	})
+	if err, ok := f.Fail["Exec "+containerName]; ok {
+		return Exec{}, err
+	}
+	c, ok := f.containers[containerName]
+	if !ok {
+		return Exec{}, fmt.Errorf("%w: container %s", ErrNotFound, containerName)
+	}
+	if !c.running {
+		return Exec{}, fmt.Errorf("%w: container %s is not running", ErrConflict, containerName)
+	}
 	if ex, ok := f.ExecResults[strings.Join(words, " ")]; ok {
 		return ex, nil
 	}

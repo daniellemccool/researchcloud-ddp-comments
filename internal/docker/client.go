@@ -35,7 +35,8 @@ type Client interface {
 	// ContainerRemove removes the container with force and anonymous volumes.
 	ContainerRemove(ctx context.Context, name string) error
 	ContainerInspect(ctx context.Context, name string) (Container, error)
-	// ContainerList returns containers in all states carrying all the given labels.
+	// ContainerList returns containers in all states carrying all the given
+	// labels. ExitCode is always 0: the list API cannot report it.
 	ContainerList(ctx context.Context, labels map[string]string) ([]Container, error)
 	Exec(ctx context.Context, container string, cmd []string, env []string, stdin []byte) (Exec, error)
 }

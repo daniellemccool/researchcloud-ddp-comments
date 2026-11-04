@@ -22,16 +22,29 @@ type sdkClient struct {
 	cli *client.Client
 }
 
-// wrapErr maps the daemon's 404 to ErrNotFound and 409 to ErrConflict, keeping
-// the daemon's message in the wrap; errors.Is works on the result.
+// wrapErr classifies a daemon error by class AND message, keeping the daemon's
+// error chain in the wrap (two %w verbs, so errors.Is matches both the sentinel
+// and the daemon error). The daemon reports some conditions the desk cares
+// about as 403/500 with a telling message rather than 404/409: a second
+// NetworkConnect of a running container ("already exists in network"), a
+// NetworkRemove with attached endpoints ("has active endpoints"), and a
+// NetworkDisconnect of a container that is not attached ("is not connected to").
 func wrapErr(err error) error {
 	switch {
 	case err == nil:
 		return nil
 	case cerrdefs.IsNotFound(err):
-		return fmt.Errorf("%w: %v", ErrNotFound, err)
+		return fmt.Errorf("%w: %w", ErrNotFound, err)
 	case cerrdefs.IsConflict(err):
-		return fmt.Errorf("%w: %v", ErrConflict, err)
+		return fmt.Errorf("%w: %w", ErrConflict, err)
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "already exists in network"),
+		strings.Contains(msg, "has active endpoints"):
+		return fmt.Errorf("%w: %w", ErrConflict, err)
+	case strings.Contains(msg, "is not connected to"):
+		return fmt.Errorf("%w: %w", ErrNotFound, err)
 	default:
 		return err
 	}
@@ -144,22 +157,27 @@ func (s *sdkClient) ContainerCreate(ctx context.Context, spec ContainerSpec) (st
 	// Attaching to several networks at create time needs API 1.44 or newer.
 	// When the negotiated version is older, create with the first endpoint
 	// only and NetworkConnect the remaining networks before returning.
-	if len(spec.Endpoints) > 1 && !apiAtLeast(s.cli.ClientVersion(), 1, 44) {
-		first := spec.Endpoints[0]
-		nc.EndpointsConfig = map[string]*network.EndpointSettings{
-			first.Network: {Aliases: first.Aliases},
-		}
-		resp, err := s.cli.ContainerCreate(ctx, cfg, hc, nc, nil, spec.Name)
-		if err != nil {
-			return "", wrapErr(err)
-		}
-		for _, ep := range spec.Endpoints[1:] {
-			settings := &network.EndpointSettings{Aliases: ep.Aliases}
-			if err := s.cli.NetworkConnect(ctx, ep.Network, resp.ID, settings); err != nil {
+	if len(spec.Endpoints) > 1 {
+		s.cli.NegotiateAPIVersion(ctx)
+		if !apiAtLeast(s.cli.ClientVersion(), 1, 44) {
+			first := spec.Endpoints[0]
+			nc.EndpointsConfig = map[string]*network.EndpointSettings{
+				first.Network: {Aliases: first.Aliases},
+			}
+			resp, err := s.cli.ContainerCreate(ctx, cfg, hc, nc, nil, spec.Name)
+			if err != nil {
 				return "", wrapErr(err)
 			}
+			for _, ep := range spec.Endpoints[1:] {
+				settings := &network.EndpointSettings{Aliases: ep.Aliases}
+				if err := s.cli.NetworkConnect(ctx, ep.Network, resp.ID, settings); err != nil {
+					// Leave no half-attached container behind.
+					_ = s.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true, RemoveVolumes: true})
+					return "", wrapErr(err)
+				}
+			}
+			return resp.ID, nil
 		}
-		return resp.ID, nil
 	}
 	resp, err := s.cli.ContainerCreate(ctx, cfg, hc, nc, nil, spec.Name)
 	if err != nil {
@@ -173,7 +191,12 @@ func (s *sdkClient) ContainerStart(ctx context.Context, name string) error {
 }
 
 func (s *sdkClient) ContainerStop(ctx context.Context, name string, timeout time.Duration) error {
+	// The daemon's timeout is whole seconds; round a sub-second timeout up
+	// to 1, never down to 0 (0 would mean SIGKILL immediately).
 	secs := int(timeout.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
 	return wrapErr(s.cli.ContainerStop(ctx, name, container.StopOptions{Timeout: &secs}))
 }
 
@@ -255,17 +278,31 @@ func (s *sdkClient) Exec(ctx context.Context, containerName string, cmd []string
 
 	var stdout, stderr bytes.Buffer
 	if len(stdin) > 0 {
-		if _, err := resp.Conn.Write(stdin); err != nil {
+		// Write stdin in its own goroutine (then close the write side for
+		// EOF) so a large stdin and a large output cannot deadlock. The
+		// goroutine exits on its own once the connection is closed.
+		go func() {
+			_, _ = resp.Conn.Write(stdin)
+			if cw, ok := resp.Conn.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
+			}
+		}()
+	}
+	// After the hijack the connection is no longer bound to ctx, so run the
+	// demultiplexing copy in a goroutine and abandon it when ctx is done.
+	copyDone := make(chan error, 1)
+	go func() {
+		_, cerr := stdcopy.StdCopy(&stdout, &stderr, resp.Reader)
+		copyDone <- cerr
+	}()
+	select {
+	case <-ctx.Done():
+		resp.Close()
+		return Exec{}, ctx.Err()
+	case err := <-copyDone:
+		if err != nil {
 			return Exec{}, err
 		}
-		// Signal EOF on the write side so the command can finish reading.
-		if cw, ok := resp.Conn.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-	}
-	// Demultiplex the raw stream into stdout and stderr.
-	if _, err := stdcopy.StdCopy(&stdout, &stderr, resp.Reader); err != nil {
-		return Exec{}, err
 	}
 	insp, err := s.cli.ContainerExecInspect(ctx, created.ID)
 	if err != nil {
