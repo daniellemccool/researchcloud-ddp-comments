@@ -1,7 +1,9 @@
 package render
 
 import (
+	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,14 +51,75 @@ func TestExactlyOneTokenMountOfTheOwner(t *testing.T) {
 	}
 }
 
+// checkFirefoxMountSources enforces ADR-0013/ADR-0009 on a Firefox's mounts:
+// the source set is EXACTLY the three expected paths, the CA is the single
+// read-only file ca.pem at /proxy-ca/ca.pem, no source is an ancestor of the
+// CA key or of the secrets tree, and nothing under state/proxy/ is mounted
+// except that exact file.
+func checkFirefoxMountSources(h, user string, mounts []docker.Mount) error {
+	want := []string{
+		filepath.Join(h, "state", "firefox", user),
+		filepath.Join(h, "state", "proxy", user, "ca.pem"),
+		filepath.Join(h, "firefox", user),
+	}
+	got := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		got = append(got, m.Source)
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("firefox mount sources = %v, want exactly %v", got, want)
+	}
+
+	caFile := filepath.Join(h, "state", "proxy", user, "ca.pem")
+	for _, m := range mounts {
+		if m.Source == caFile && (!m.ReadOnly || m.Target != "/proxy-ca/ca.pem") {
+			return fmt.Errorf("CA mount = %v, want read-only target /proxy-ca/ca.pem", m)
+		}
+	}
+
+	// No source may be an ancestor of the CA key or of the secrets tree
+	// (H itself would expose secrets/).
+	for _, protected := range []string{
+		filepath.Join(h, "state", "proxy", user, "ca-key.pem"),
+		filepath.Join(h, "secrets"),
+	} {
+		for p := protected; ; p = filepath.Dir(p) {
+			for _, m := range mounts {
+				if m.Source == p {
+					return fmt.Errorf("firefox mount source %q is an ancestor of %q", m.Source, protected)
+				}
+			}
+			if p == filepath.Dir(p) {
+				break
+			}
+		}
+	}
+
+	// Nothing under state/proxy/ except the exact ca.pem file.
+	proxyDir := filepath.Join(h, "state", "proxy") + string(filepath.Separator)
+	for _, m := range mounts {
+		if strings.HasPrefix(m.Source, proxyDir) && m.Source != caFile {
+			return fmt.Errorf("firefox mount source under state/proxy/ other than ca.pem: %q", m.Source)
+		}
+	}
+	return nil
+}
+
 func TestFirefoxCannotMountSecrets(t *testing.T) {
 	cfg := testConfig(t)
 	h := cfg.HostDeskRoot
 	u := "alice"
 
 	mounts := FirefoxMounts(cfg, u)
+	if err := checkFirefoxMountSources(h, u, mounts); err != nil {
+		t.Fatal(err)
+	}
+
+	// Explicit guards kept from the original test.
 	for _, m := range mounts {
-		if strings.Contains(m.Source, filepath.Join(h, "secrets")) || strings.HasPrefix(m.Source, filepath.Join(h, "secrets")) {
+		if strings.HasPrefix(m.Source, filepath.Join(h, "secrets")) {
 			t.Errorf("Firefox mount source under secrets: %v", m)
 		}
 		if m.Source == filepath.Join(h, "state", "proxy", u) {
@@ -66,8 +129,6 @@ func TestFirefoxCannotMountSecrets(t *testing.T) {
 			t.Errorf("Firefox has a /platform mount: %v", m)
 		}
 	}
-
-	// The CA is a single read-only file mount.
 	var ca *docker.Mount
 	for i, m := range mounts {
 		if m.Target == "/proxy-ca/ca.pem" {
@@ -82,5 +143,21 @@ func TestFirefoxCannotMountSecrets(t *testing.T) {
 	}
 	if !ca.ReadOnly {
 		t.Errorf("CA mount is not read-only: %v", *ca)
+	}
+
+	// The check must bite: each bogus mount has to be rejected.
+	bogus := map[string]docker.Mount{
+		"ca-key.pem":   {Source: filepath.Join(h, "state", "proxy", u, "ca-key.pem"), Target: "/key"},
+		"proxy CA dir": {Source: filepath.Join(h, "state", "proxy", u), Target: "/ca"},
+		"state dir":    {Source: filepath.Join(h, "state"), Target: "/state"},
+		"desk root":    {Source: h, Target: "/host"},
+	}
+	for name, b := range bogus {
+		t.Run("rejects "+name, func(t *testing.T) {
+			m := append(slices.Clone(mounts), b)
+			if err := checkFirefoxMountSources(h, u, m); err == nil {
+				t.Errorf("checkFirefoxMountSources accepted a %s mount: %v", name, m)
+			}
+		})
 	}
 }

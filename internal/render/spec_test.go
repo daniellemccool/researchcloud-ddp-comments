@@ -2,6 +2,7 @@ package render
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
@@ -103,13 +104,19 @@ func TestBuildProxyCmdAndListenCidr(t *testing.T) {
 		t.Errorf("Proxy.Cmd = %v, want %v", s.Proxy.Cmd, want)
 	}
 
-	before := len(s.Proxy.Cmd)
+	before := slices.Clone(s.Proxy.Cmd)
 	cmd := ProxyCmd(s, "10.200.1.0/24")
-	if len(cmd) != before+2 || cmd[before] != "--listen-cidr" || cmd[before+1] != "10.200.1.0/24" {
-		t.Errorf("ProxyCmd tail = %v, want [--listen-cidr 10.200.1.0/24]", cmd[before:])
+	if len(cmd) != len(before)+2 || cmd[len(before)] != "--listen-cidr" || cmd[len(before)+1] != "10.200.1.0/24" {
+		t.Errorf("ProxyCmd tail = %v, want [--listen-cidr 10.200.1.0/24]", cmd[len(before):])
 	}
-	if len(s.Proxy.Cmd) != before {
-		t.Error("ProxyCmd modified s.Proxy.Cmd")
+	if !slices.Equal(s.Proxy.Cmd, before) {
+		t.Errorf("ProxyCmd modified s.Proxy.Cmd: %v, want %v", s.Proxy.Cmd, before)
+	}
+	// The returned slice must not alias s.Proxy.Cmd: appending to it leaves
+	// the original untouched.
+	_ = append(cmd, "extra")
+	if !slices.Equal(s.Proxy.Cmd, before) {
+		t.Errorf("ProxyCmd result aliases s.Proxy.Cmd: after append, s.Proxy.Cmd = %v, want %v", s.Proxy.Cmd, before)
 	}
 }
 
