@@ -75,7 +75,7 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "usage: desk serve --desk-root /desk [--repo /repo] [--listen :8110] [--container-listen :8111]")
 	_, _ = fmt.Fprintln(w, "       desk status [--desk-root /desk]")
 	_, _ = fmt.Fprintln(w, "       desk render [--desk-root /desk]")
-	_, _ = fmt.Fprintln(w, "       desk stop <user> [--desk-root /desk]")
+	_, _ = fmt.Fprintln(w, "       desk stop [--desk-root /desk] <user>")
 	_, _ = fmt.Fprintln(w, "       desk template release --profile DIR --platform NAME --platforms-dir DIR --zeeschuimer VERSION --out DIR")
 	_, _ = fmt.Fprintln(w, "       desk help")
 }
@@ -85,11 +85,16 @@ func usage(w io.Writer) {
 func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {}
 	deskRoot := fs.String("desk-root", "", "the desk's directory, holding desk.json (required)")
 	repo := fs.String("repo", "/repo", "read-only repository copy holding platforms/ (the compose mount)")
 	listen := fs.String("listen", ":8110", "gated listener address")
 	containerListen := fs.String("container-listen", ":8111", "container listener address")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage(stdout)
+			return 0, nil
+		}
 		usage(stderr)
 		return 2, nil
 	}
@@ -123,7 +128,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if cfg.FourcatEnabled {
 		backend, db, ferr := fourcat.FindContainers(context.Background(), dc)
 		if ferr != nil {
-			_, _ = fmt.Fprintln(stderr, "desk: 4CAT containers not found yet; provisioning will retry per visit")
+			_, _ = fmt.Fprintf(stderr, "desk: 4CAT containers not found yet (%v); provisioning will retry per visit\n", ferr)
 			backend, db = "", ""
 		}
 		fc = &fourcat.Client{Docker: dc, Backend: backend, DB: db, FrontendURL: "http://4cat-frontend:5000"}
@@ -148,17 +153,30 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 
 	// Adopt the pairs that survived a desk restart; errors are logged, not
-	// fatal.
-	if err := mgr.Reconcile(context.Background()); err != nil {
+	// fatal. The reconcile gets a 2-minute budget.
+	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	if err := mgr.Reconcile(rctx); err != nil {
 		_, _ = fmt.Fprintf(stderr, "desk: reconcile: %v\n", err)
 	}
+	rcancel()
 
 	// The operator socket: status, render and stop run inside this process's
-	// locks.
-	sockPath := filepath.Join(cfg.DeskRoot, "state", "desk.sock")
+	// locks. A socket failure is fatal — the desk must not serve HTTP with no
+	// operator socket.
+	socketPath := filepath.Join(cfg.DeskRoot, "state", "desk.sock")
 	ctlCtx, ctlCancel := context.WithCancel(context.Background())
 	ctlErr := make(chan error, 1)
-	go func() { ctlErr <- ctl.Serve(ctlCtx, sockPath, &ops{mgr: mgr, cfg: cfg, platformDir: platformDir}) }()
+	ctlReady := make(chan struct{}, 1)
+	go func() {
+		ctlErr <- ctl.ServeReady(ctlCtx, socketPath, &ops{mgr: mgr, cfg: cfg, platformDir: platformDir}, ctlReady)
+	}()
+	select {
+	case <-ctlReady:
+		_, _ = fmt.Fprintf(stderr, "desk: operator socket on %s\n", socketPath)
+	case err := <-ctlErr:
+		ctlCancel()
+		return 0, fmt.Errorf("operator socket: %w", err)
+	}
 
 	ac := access.Config{
 		CollectorRole: cfg.CollectorRole,
@@ -188,7 +206,6 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	go func() { errCh <- container.ListenAndServe() }()
 	_, _ = fmt.Fprintf(stderr, "desk: gated listener on %s\n", gated.Addr)
 	_, _ = fmt.Fprintf(stderr, "desk: container listener on %s\n", container.Addr)
-	_, _ = fmt.Fprintf(stderr, "desk: operator socket on %s\n", sockPath)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -205,9 +222,22 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		case <-shutdownCtx.Done():
 		}
 		return 0, nil
+	case err := <-ctlErr:
+		// The operator socket died while serving: fatal, same path as a
+		// listener error.
+		_, _ = fmt.Fprintf(stderr, "desk: operator socket: %v\n", err)
+		ctlCancel()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = gated.Shutdown(shutdownCtx)
+		_ = container.Shutdown(shutdownCtx)
+		return 0, err
 	case err := <-errCh:
 		ctlCancel()
-		<-ctlErr
+		select {
+		case <-ctlErr:
+		case <-time.After(10 * time.Second):
+		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return 0, err
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,7 +29,7 @@ func sockPath(deskRoot string) string {
 // call sends one request to the running desk and maps the outcome to the
 // command's exit code: a transport failure or OK false is the error text on
 // stderr with exit 1.
-func call(deskRoot string, req ctl.Request, stdout, stderr io.Writer) (ctl.Response, int) {
+func call(deskRoot string, req ctl.Request, stderr io.Writer) (ctl.Response, int) {
 	resp, err := ctl.Call(sockPath(deskRoot), req)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "desk: %v\n", err)
@@ -53,26 +54,42 @@ func printText(w io.Writer, text string) {
 }
 
 // deskRootFlagSet returns a flag set with the shared --desk-root flag
-// (default /desk), its output pointed at stderr.
+// (default /desk), its output pointed at stderr and its own usage dump
+// suppressed (the commands print the shared usage themselves).
 func deskRootFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *string) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {}
 	deskRoot := fs.String("desk-root", "/desk", "the desk's directory holding state/desk.sock")
 	return fs, deskRoot
+}
+
+// parseFlags parses args with fs: -h/--help prints the usage on stdout and
+// exits 0, any other parse error prints it on stderr with exit 2.
+func parseFlags(fs *flag.FlagSet, args []string, stdout, stderr io.Writer) int {
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage(stdout)
+			return 0
+		}
+		usage(stderr)
+		return 2
+	}
+	return -1 // parsed fine
 }
 
 // statusCmd implements "desk status [--desk-root /desk]": it asks the running
 // desk for its status text and prints it.
 func statusCmd(args []string, stdout, stderr io.Writer) int {
 	fs, deskRoot := deskRootFlagSet("status", stderr)
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code := parseFlags(fs, args, stdout, stderr); code >= 0 {
+		return code
 	}
 	if fs.NArg() != 0 {
 		usage(stderr)
 		return 2
 	}
-	resp, code := call(*deskRoot, ctl.Request{Op: "status"}, stdout, stderr)
+	resp, code := call(*deskRoot, ctl.Request{Op: "status"}, stderr)
 	if code != 0 {
 		return code
 	}
@@ -84,37 +101,59 @@ func statusCmd(args []string, stdout, stderr io.Writer) int {
 // desk to regenerate its files.
 func renderCmd(args []string, stdout, stderr io.Writer) int {
 	fs, deskRoot := deskRootFlagSet("render", stderr)
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code := parseFlags(fs, args, stdout, stderr); code >= 0 {
+		return code
 	}
 	if fs.NArg() != 0 {
 		usage(stderr)
 		return 2
 	}
-	if _, code := call(*deskRoot, ctl.Request{Op: "render"}, stdout, stderr); code != 0 {
+	if _, code := call(*deskRoot, ctl.Request{Op: "render"}, stderr); code != 0 {
 		return code
 	}
 	_, _ = fmt.Fprintln(stdout, "rendered")
 	return 0
 }
 
-// stopCmd implements "desk stop <user> [--desk-root /desk]": the user is
+// stopCmd implements "desk stop [--desk-root /desk] <user>". The --desk-root
+// flag is scanned out of args before anything else, so both
+// "desk stop <user> --desk-root /x" and "desk stop --desk-root /x <user>"
+// work (the flag package stops at the first positional). The user is
 // validated against the username grammar before anything is sent.
 func stopCmd(args []string, stdout, stderr io.Writer) int {
-	fs, deskRoot := deskRootFlagSet("stop", stderr)
-	if err := fs.Parse(args); err != nil {
-		return 2
+	deskRoot := "/desk"
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-h" || a == "--help":
+			usage(stdout)
+			return 0
+		case a == "--desk-root" || a == "-desk-root":
+			if i+1 >= len(args) {
+				usage(stderr)
+				return 2
+			}
+			i++
+			deskRoot = args[i]
+		case strings.HasPrefix(a, "--desk-root="):
+			deskRoot = strings.TrimPrefix(a, "--desk-root=")
+		case strings.HasPrefix(a, "-desk-root="):
+			deskRoot = strings.TrimPrefix(a, "-desk-root=")
+		default:
+			positional = append(positional, a)
+		}
 	}
-	if fs.NArg() != 1 {
+	if len(positional) != 1 {
 		usage(stderr)
 		return 2
 	}
-	user := fs.Arg(0)
+	user := positional[0]
 	if !userRe.MatchString(user) {
 		_, _ = fmt.Fprintf(stderr, "desk: invalid username: %q\n", user)
 		return 1
 	}
-	if _, code := call(*deskRoot, ctl.Request{Op: "stop", User: user}, stdout, stderr); code != 0 {
+	if _, code := call(deskRoot, ctl.Request{Op: "stop", User: user}, stderr); code != 0 {
 		return code
 	}
 	_, _ = fmt.Fprintf(stdout, "stopped %s\n", user)

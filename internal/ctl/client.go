@@ -1,7 +1,6 @@
 package ctl
 
 import (
-	"bufio"
 	"encoding/json"
 	"net"
 	"time"
@@ -25,7 +24,7 @@ func Call(path string, req Request) (Response, error) {
 	if _, err := conn.Write(append(data, '\n')); err != nil {
 		return Response{}, err
 	}
-	line, err := bufio.NewReaderSize(conn, maxLine+1).ReadBytes('\n')
+	line, err := readLine(conn)
 	if err != nil {
 		return Response{}, err
 	}
