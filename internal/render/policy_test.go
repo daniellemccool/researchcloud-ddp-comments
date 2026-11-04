@@ -74,3 +74,27 @@ func TestPolicyValues(t *testing.T) {
 		t.Error("DisableAppUpdate = false, want true")
 	}
 }
+
+// TestPolicyLocksOfflineStatusOff pins ADR-0022: the pair network has no
+// default route, so Firefox must not derive navigator.onLine from link state.
+func TestPolicyLocksOfflineStatusOff(t *testing.T) {
+	raw, err := Policy(testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p struct {
+		Policies struct {
+			Preferences map[string]map[string]any `json:"Preferences"`
+		} `json:"policies"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("rendered policy is not valid JSON: %v", err)
+	}
+	got, ok := p.Policies.Preferences["network.manage-offline-status"]
+	if !ok {
+		t.Fatal("Preferences has no network.manage-offline-status")
+	}
+	if len(got) != 2 || got["Value"] != false || got["Status"] != "locked" {
+		t.Errorf("network.manage-offline-status = %v, want {Value:false Status:locked}", got)
+	}
+}
