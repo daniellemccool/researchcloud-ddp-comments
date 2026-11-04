@@ -62,35 +62,39 @@ type Row struct {
 // proxy and firefox (controller ruling F71: "running" means both) — keyed by
 // the desk.user label of the containers.
 func (m *Manager) Running(ctx context.Context) (map[string]bool, error) {
+	both, _, err := m.runningSets(ctx)
+	return both, err
+}
+
+// runningSets lists the desk's containers once and returns two sets keyed by
+// desk.user: both holds the users whose proxy and firefox both run (F71);
+// firefox holds the users with a running desk.role=firefox container, which
+// is what the running cap counts (ADR-0015, controller ruling F88).
+func (m *Manager) runningSets(ctx context.Context) (both, firefox map[string]bool, err error) {
 	containers, err := m.Docker.ContainerList(ctx, map[string]string{"desk.owner": render.Owner})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	type pairState struct{ proxy, firefox bool }
-	byUser := make(map[string]*pairState, len(containers))
+	proxy := make(map[string]bool, len(containers))
+	firefox = make(map[string]bool, len(containers))
 	for _, c := range containers {
 		if !c.Running {
 			continue
 		}
-		s, ok := byUser[c.Labels["desk.user"]]
-		if !ok {
-			s = &pairState{}
-			byUser[c.Labels["desk.user"]] = s
-		}
 		switch c.Labels["desk.role"] {
 		case "proxy":
-			s.proxy = true
+			proxy[c.Labels["desk.user"]] = true
 		case "firefox":
-			s.firefox = true
+			firefox[c.Labels["desk.user"]] = true
 		}
 	}
-	out := make(map[string]bool, len(byUser))
-	for user, s := range byUser {
-		if s.proxy && s.firefox {
-			out[user] = true
+	both = make(map[string]bool, len(firefox))
+	for user := range firefox {
+		if proxy[user] {
+			both[user] = true
 		}
 	}
-	return out, nil
+	return both, firefox, nil
 }
 
 // IsRunning reports whether both of user's pair containers are running.

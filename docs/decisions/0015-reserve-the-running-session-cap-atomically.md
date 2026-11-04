@@ -3,8 +3,9 @@ status: accepted
 date: "2026-10-30"
 category: Provisioning
 applies_to:
-    - internal/provision/cap.go
-    - internal/provision/cap_test.go
+    - internal/session/start.go
+    - internal/session/manager.go
+    - internal/session/start_test.go
 priority: default
 ---
 # Reserve the running-session cap atomically
@@ -15,7 +16,7 @@ A pair is started only after its slot under `desk_max_running` was reserved unde
 
 ## Guidance
 
-- `internal/provision/cap.go` reserves, then starts, then releases on failure, all under the global lock against the count below (the registry records seats, not running state); `internal/provision/cap_test.go` is the rule's enforcement.
+- `Manager.Start` in `internal/session/start.go` reserves, then starts, then releases on failure, all under the global lock against the count below (the registry records seats, not running state); `internal/session/start_test.go` is the rule's enforcement.
 - The count is the running Firefox containers Docker reports by label (`desk.role=firefox`, state running) plus the in-memory set of starts in flight, both read and changed under the global lock, immediately before the start; the per-user lock is held around it.
 - "Busy" (runtime cap) and "full" (registry cap) are distinct pages with distinct messages.
 - The reaper's idle stop releases the slot; a crashed container is detected and released by reconcile, not left reserved forever.

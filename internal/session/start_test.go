@@ -123,6 +123,41 @@ func TestStartBusyAtCap(t *testing.T) {
 	}
 }
 
+// The cap counts users with a running Firefox (ADR-0015), not only fully
+// running pairs: a Firefox beside an exited proxy still holds its seat
+// (controller ruling F88).
+func TestStartBusyWhenFirefoxRunsBesideExitedProxy(t *testing.T) {
+	f := newFixture(t, 1, "alice", "bob")
+	ctx := context.Background()
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	f.fake.SetExited("desk-proxy-alice", 1)
+	before := len(f.fake.Calls)
+	res, err := f.m.Start(ctx, "bob")
+	if err != nil || res != Busy {
+		t.Fatalf("Start(bob) = %v, %v; want Busy, nil", res, err)
+	}
+	for _, c := range f.fake.Calls[before:] {
+		if strings.HasPrefix(c, "NetworkCreate") || strings.HasPrefix(c, "ContainerCreate") {
+			t.Errorf("busy start made a create call: %v", f.fake.Calls[before:])
+			break
+		}
+	}
+}
+
+// A user's own half pair holds the user's own seat: rebuilding it at the cap
+// is not Busy.
+func TestStartRebuildsOwnHalfPairAtCap(t *testing.T) {
+	f := newFixture(t, 1, "alice")
+	ctx := context.Background()
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	f.fake.SetExited("desk-proxy-alice", 1)
+	res, err := f.m.Start(ctx, "alice")
+	if res != Started || err != nil {
+		t.Fatalf("Start(alice) = %v, %v; want Started, nil", res, err)
+	}
+	assertRebuilt(t, f, "alice")
+}
+
 func TestStartGoneWithoutLiveRowOrReady(t *testing.T) {
 	f := newFixture(t, 4, "alice")
 	ctx := context.Background()

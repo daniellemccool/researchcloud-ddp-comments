@@ -116,3 +116,36 @@ func TestReconcileStopsStaleGeneration(t *testing.T) {
 		t.Errorf("log = %q, want it to contain %q", f.logBuf.String(), "generation changed")
 	}
 }
+
+// An owner-labelled object without a desk.user label is not a candidate: no
+// pair named "net-" or "desk-proxy-" is inspected; the object is logged and
+// left (review M11).
+func TestReconcileSkipsEmptyUser(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	ctx := context.Background()
+	if _, err := f.fake.NetworkCreate(ctx, "stray-net", map[string]string{"desk.owner": "desk", "desk.role": "net"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.startBare(t, "stray-ctr", "proxy", "")
+	if err := f.m.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.fake.Calls {
+		if c == "NetworkInspect net-" || c == "ContainerInspect desk-proxy-" || c == "ContainerInspect desk-firefox-" {
+			t.Errorf("reconcile inspected an empty user's pair: %v", f.fake.Calls)
+			break
+		}
+	}
+	log := f.logBuf.String()
+	for _, want := range []string{"stray-net", "stray-ctr", "no desk.user"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log = %q, want it to contain %q", log, want)
+		}
+	}
+	if _, err := f.fake.ContainerInspect(ctx, "stray-ctr"); err != nil {
+		t.Errorf("stray container touched: %v", err)
+	}
+	if _, err := f.fake.NetworkInspect(ctx, "stray-net"); err != nil {
+		t.Errorf("stray network touched: %v", err)
+	}
+}

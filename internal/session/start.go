@@ -32,10 +32,12 @@ const (
 // Start creates user's pair (net-<user>, desk-proxy-<user>,
 // desk-firefox-<user>) from the rendered spec. The running cap is reserved
 // atomically: under Locks.User(u) and Locks.Global together, the size of the
-// union of the running users and the starts in flight must be below
-// Cfg.MaxRunning (ADR-0015). "Running" means both containers of the pair run
-// (controller ruling F71). Any failure after the network exists runs the stop
-// sequence, so no half pair is left behind.
+// union of the users with a running Firefox container and the starts in
+// flight must be below Cfg.MaxRunning (ADR-0015, controller ruling F88). The
+// Started shortcut alone uses "running" as both containers of the pair
+// (controller ruling F71); a user's own half pair is rebuilt in the user's
+// own seat. Any failure after the network exists runs the stop sequence, so
+// no half pair is left behind.
 func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 	userLock := m.Locks.User(user)
 	userLock.Lock()
@@ -52,7 +54,7 @@ func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 		m.Locks.Global.Unlock()
 		return Gone, nil
 	}
-	running, err := m.Running(ctx)
+	running, firefoxRunning, err := m.runningSets(ctx)
 	if err != nil {
 		m.Locks.Global.Unlock()
 		return StartFailed, fmt.Errorf("running count: %w", err)
@@ -64,16 +66,19 @@ func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 		m.Locks.Global.Unlock()
 		return Started, nil
 	}
-	// The cap counts the union of running users and starts in flight, so a
-	// user in both for a moment is not double counted.
+	// The cap counts the union of the users with a running Firefox and the
+	// starts in flight, so a user in both for a moment is not double counted.
+	// The user's own half pair (a Firefox beside a dead proxy) is about to be
+	// rebuilt in place, so it is not counted against the user.
 	m.mu.Lock()
-	reserved := make(map[string]bool, len(m.starting)+len(running))
+	reserved := make(map[string]bool, len(m.starting)+len(firefoxRunning))
 	for u := range m.starting {
 		reserved[u] = true
 	}
-	for u := range running {
+	for u := range firefoxRunning {
 		reserved[u] = true
 	}
+	delete(reserved, user)
 	if len(reserved) >= m.Cfg.MaxRunning {
 		m.mu.Unlock()
 		m.Locks.Global.Unlock()

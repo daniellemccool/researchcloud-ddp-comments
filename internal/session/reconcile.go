@@ -44,12 +44,23 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 
 	// The lists above are only the candidate set; every decision below
 	// re-inspects under the user lock.
+	// An owner-labelled object without a desk.user label belongs to no
+	// pair: it is logged and left, never turned into a candidate named
+	// "net-" or "desk-proxy-".
 	candidates := map[string]bool{}
 	for _, c := range containers {
-		candidates[c.Labels["desk.user"]] = true
+		if u := c.Labels["desk.user"]; u != "" {
+			candidates[u] = true
+		} else {
+			m.logf("orphan: %s (no desk.user label)", c.Name)
+		}
 	}
 	for _, n := range networks {
-		candidates[n.Labels["desk.user"]] = true
+		if u := n.Labels["desk.user"]; u != "" {
+			candidates[u] = true
+		} else {
+			m.logf("orphan: %s (no desk.user label)", n.Name)
+		}
 	}
 
 	generation := render.Generation(m.Cfg)
