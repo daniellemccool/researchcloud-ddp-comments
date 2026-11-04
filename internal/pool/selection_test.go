@@ -54,7 +54,7 @@ func TestParseSemicolon(t *testing.T) {
 }
 
 func TestParseHeaderAliases(t *testing.T) {
-	for _, header := range []string{"Video-ID", "videoid", "ID"} {
+	for _, header := range []string{"Video-ID", "videoid", "ID", "Video\u00A0ID"} {
 		rows, rejects, err := ParseSelection(header+"\n11\n", fakeKinds{})
 		if err != nil {
 			t.Fatalf("ParseSelection(%q): %v", header, err)
@@ -109,8 +109,11 @@ func TestParseFileLevelErrors(t *testing.T) {
 		wantLine int
 	}{
 		{"header without id column", "foo,bar\n1,2\n", "line 1: header has no id column", 1},
-		{"unbalanced quote", "id,note\n1,ok\n2,\"unfinished\n3,valid\n", "line 3: a quoted field", 3},
-		{"bare quote", "id,note\n1,ok\n2,ab\"c\n", "line 3: unreadable:", 3},
+		{"unbalanced quote spanning lines", "id,note\n1,ok\n2,\"unfinished\n3,valid\n", "line 3: a quoted field runs over several lines (unbalanced quote?)", 3},
+		{"unbalanced quote on the last row", "id,note\n1,ok\n2,\"unfinished\n", "line 3: a quoted field runs over several lines (unbalanced quote?)", 3},
+		{"junk after a closing quote", "id,note\n1,ok\n2,\"ab\"c\n", "line 3: unreadable: extraneous or missing \" in quoted-field", 3},
+		{"bare quote", "id,note\n1,ok\n2,ab\"c\n", "line 3: unreadable: bare \" in non-quoted-field", 3},
+		{"field larger than the limit", "id,note\n1,ok\n2," + strings.Repeat("x", 200000) + "\n", "line 3: unreadable: field larger than field limit (131072)", 3},
 		{"blank file", "\n \n", "line 1: file is empty (no header)", 1},
 	}
 	for _, tt := range tests {
@@ -123,8 +126,8 @@ func TestParseFileLevelErrors(t *testing.T) {
 			if !errors.As(err, &selErr) {
 				t.Fatalf("err = %T (%v), want *SelectionError", err, err)
 			}
-			if !strings.HasPrefix(err.Error(), tt.wantErr) {
-				t.Fatalf("err = %q, want prefix %q", err.Error(), tt.wantErr)
+			if err.Error() != tt.wantErr {
+				t.Fatalf("err = %q, want exactly %q", err.Error(), tt.wantErr)
 			}
 			if selErr.Line != tt.wantLine {
 				t.Fatalf("SelectionError.Line = %d, want %d", selErr.Line, tt.wantLine)

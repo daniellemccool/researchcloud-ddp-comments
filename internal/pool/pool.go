@@ -56,6 +56,10 @@ func Read(path string, defaultKind string) ([]Row, error) {
 	text := strings.TrimPrefix(string(data), "\uFEFF")
 	r := csv.NewReader(strings.NewReader(text))
 	r.FieldsPerRecord = -1
+	// pool.csv is our own file or a hand-edited one: tolerate a stray quote in
+	// a note instead of failing every Read and Add (uploads keep LazyQuotes
+	// off in ParseSelection).
+	r.LazyQuotes = true
 	records, err := r.ReadAll()
 	if err != nil {
 		return nil, err
@@ -156,9 +160,13 @@ func Add(path string, rows []Row, kinds Kinds) (added, total int, err error) {
 	return len(fresh), len(existing) + len(fresh), nil
 }
 
-// fullMatch reports whether s matches the whole of re (Python's fullmatch).
+// fullMatch reports whether s matches the kind's id pattern, used as given.
+// A nil pattern (kind known, no pattern) matches everything.
 func fullMatch(re *regexp.Regexp, s string) bool {
-	return regexp.MustCompile(`^(?:` + re.String() + `)$`).MatchString(s)
+	if re == nil {
+		return true
+	}
+	return re.MatchString(s)
 }
 
 // writeAll replaces the whole pool file atomically: temp file in the same

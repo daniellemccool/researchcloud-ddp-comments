@@ -110,6 +110,9 @@ func TestRegistryFull(t *testing.T) {
 	if !errors.Is(err, ErrFull) {
 		t.Fatalf("err = %v, want ErrFull", err)
 	}
+	if !strings.Contains(err.Error(), "all 2 sessions are in use") {
+		t.Fatalf("err = %q, want it to contain %q", err, "all 2 sessions are in use")
+	}
 	if got := readFile(t, r.Path); got != before {
 		t.Fatalf("file changed on ErrFull: before %q after %q", before, got)
 	}
@@ -205,5 +208,25 @@ func TestRetireNoLiveRowIsNoop(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Status != "retired" {
 		t.Fatalf("rows = %+v, want one retired row", rows)
+	}
+}
+
+func TestRowsBadIndex(t *testing.T) {
+	r := newRegistry(t, 99)
+	writeFile(t, r.Path, "alice\tone\n")
+	if _, err := r.Rows(); err == nil {
+		t.Fatal("Rows = nil error, want an error for a non-integer index")
+	}
+}
+
+func TestRowsSkipsShortRows(t *testing.T) {
+	r := newRegistry(t, 99)
+	writeFile(t, r.Path, "\nalice\n\t5\nbob\t2\n")
+	rows, err := r.Rows()
+	if err != nil {
+		t.Fatalf("Rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0] != (Row{User: "bob", Index: 2, Status: "live"}) {
+		t.Fatalf("rows = %+v, want only bob/2/live (short and empty-user rows skipped)", rows)
 	}
 }

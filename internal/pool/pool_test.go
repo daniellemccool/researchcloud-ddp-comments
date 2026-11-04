@@ -110,6 +110,18 @@ func TestReadStripsBOM(t *testing.T) {
 	}
 }
 
+func TestReadLazyQuotes(t *testing.T) {
+	path := poolPath(t)
+	writePool(t, path, "id,kind,note\n1,video,ab\"c\n")
+	rows, err := Read(path, "video")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Note != `ab"c` {
+		t.Fatalf("rows = %+v, want one row whose note keeps the stray quote", rows)
+	}
+}
+
 func TestAddDedupesWithinBatchAndFile(t *testing.T) {
 	path := poolPath(t)
 	writePool(t, path, "id,kind,bucket,note\n1,video,x,\n")
@@ -186,5 +198,32 @@ func TestAddAtomicMode0644(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Fatalf("dir holds %v, want only pool.csv (no temp file left)", names)
+	}
+}
+
+func TestAddNothingFreshLeavesFileUntouched(t *testing.T) {
+	path := poolPath(t)
+	writePool(t, path, "id,kind,bucket,note\n1,video,x,\n")
+	before := readPoolFile(t, path)
+	fiBefore, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	added, total, err := Add(path, []Row{{ID: "1", Kind: "video"}, {ID: "junk", Kind: "video"}}, fakeKinds{})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if added != 0 || total != 1 {
+		t.Fatalf("Add = %d, %d; want 0, 1", added, total)
+	}
+	if got := readPoolFile(t, path); got != before {
+		t.Fatalf("file changed with nothing fresh: before %q after %q", before, got)
+	}
+	fiAfter, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !fiAfter.ModTime().Equal(fiBefore.ModTime()) {
+		t.Fatalf("mtime changed with nothing fresh: %v -> %v", fiBefore.ModTime(), fiAfter.ModTime())
 	}
 }

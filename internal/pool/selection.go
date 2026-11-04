@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
+	"unicode"
 )
 
 // Reject is a single bad row of an uploaded selection: the physical 1-based
@@ -28,18 +28,46 @@ func (e *SelectionError) Error() string {
 	return fmt.Sprintf("line %d: %s", e.Line, e.Reason)
 }
 
-const quotedFieldReason = "a quoted field runs over several lines (unbalanced quote?)"
+const (
+	quotedFieldReason = "a quoted field runs over several lines (unbalanced quote?)"
+	// fieldLimit mirrors Python's csv module, which refuses a longer field.
+	fieldLimit       = 131072
+	fieldLimitReason = "unreadable: field larger than field limit (131072)"
+)
 
 // idNames are the header names (after normalisation) that mean the id column.
 var idNames = map[string]bool{"id": true, "videoid": true, "video_id": true}
 
-// headerSep matches the runs of whitespace and dashes a header name may carry.
-var headerSep = regexp.MustCompile(`[\s\-]+`)
-
-// normHeader normalises a header name: lower-cased, trimmed, runs of
-// whitespace and '-' replaced with '_' ("Video ID" == "video_id" == "id").
+// normHeader normalises a header name: lower-cased, trimmed, runs of unicode
+// whitespace (U+00A0 included, as Excel emits it) and '-' replaced with a
+// single '_' ("Video ID" == "video_id" == "id").
 func normHeader(name string) string {
-	return headerSep.ReplaceAllString(strings.ToLower(strings.TrimSpace(name)), "_")
+	var b strings.Builder
+	pending := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		if r == '-' || unicode.IsSpace(r) {
+			pending = true
+			continue
+		}
+		if pending {
+			b.WriteByte('_')
+			pending = false
+		}
+		b.WriteRune(r)
+	}
+	if pending {
+		b.WriteByte('_')
+	}
+	return b.String()
+}
+
+// oddQuotes reports whether physical line n of the upload holds an odd number
+// of '"' characters, i.e. the reader was still inside a quote at its end.
+func oddQuotes(lines []string, n int) bool {
+	if n < 1 || n > len(lines) {
+		return false
+	}
+	return strings.Count(lines[n-1], `"`)%2 == 1
 }
 
 // sniffDelimiter picks the delimiter: ';' when the first 4096 bytes hold more
@@ -64,6 +92,7 @@ func sniffDelimiter(text string) rune {
 // the upload, 1-based.
 func ParseSelection(text string, kinds Kinds) (rows []Row, rejects []Reject, err error) {
 	text = strings.TrimLeft(text, "\uFEFF")
+	lines := strings.Split(text, "\n")
 	r := csv.NewReader(strings.NewReader(text))
 	r.FieldsPerRecord = -1
 	r.LazyQuotes = false
@@ -77,11 +106,15 @@ func ParseSelection(text string, kinds Kinds) (rows []Row, rejects []Reject, err
 			}
 			var parseErr *csv.ParseError
 			if errors.As(readErr, &parseErr) {
-				// A quoted field left open at EOF surfaces as ErrQuote on a
-				// later line than the record started on; Python's reader
-				// returns the record with the embedded newline instead, so
-				// report it as the multi-line quoted field it is.
-				if errors.Is(parseErr.Err, csv.ErrQuote) && parseErr.Line > parseErr.StartLine {
+				// A quoted field left open surfaces as ErrQuote. When it ran
+				// over several lines (Line > StartLine) Python's reader
+				// returns the record with the embedded newline; when it ends
+				// on the record's own line, an odd number of '"' on that
+				// physical line means the reader was still inside the quote
+				// at its end. Both are the multi-line quoted field. An even
+				// number means junk after a closing quote ("ab"c) → unreadable.
+				if errors.Is(parseErr.Err, csv.ErrQuote) &&
+					(parseErr.Line > parseErr.StartLine || oddQuotes(lines, parseErr.StartLine)) {
 					return nil, nil, &SelectionError{Line: parseErr.StartLine, Reason: quotedFieldReason}
 				}
 				return nil, nil, &SelectionError{Line: parseErr.Line, Reason: "unreadable: " + parseErr.Err.Error()}
@@ -89,6 +122,16 @@ func ParseSelection(text string, kinds Kinds) (rows []Row, rejects []Reject, err
 			return nil, nil, readErr
 		}
 		line, _ := r.FieldPos(0)
+		tooLong := false
+		for _, cell := range rec {
+			if len(cell) > fieldLimit {
+				tooLong = true
+				break
+			}
+		}
+		if tooLong {
+			return nil, nil, &SelectionError{Line: line, Reason: fieldLimitReason}
+		}
 		multiLine := false
 		for _, cell := range rec {
 			if strings.ContainsAny(cell, "\n\r") {
