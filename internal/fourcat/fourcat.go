@@ -132,7 +132,10 @@ func (c *Client) psql(ctx context.Context, sql string) (string, error) {
 }
 
 // SetupPending reports whether the 4CAT frontend still shows its first-run
-// setup page (a body containing "Complete 4CAT Setup").
+// setup page (a body containing "Complete 4CAT Setup"). A 2xx or 3xx answer
+// is a page to inspect — the client never follows redirects, so a completed
+// 4CAT answers GET / with a redirect stub whose body has no title, meaning
+// not pending; only a 4xx or 5xx is an error.
 func (c *Client) SetupPending(ctx context.Context) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.FrontendURL, "/")+"/", nil)
 	if err != nil {
@@ -143,7 +146,7 @@ func (c *Client) SetupPending(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("4CAT unreachable: %T", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
 		return false, fmt.Errorf("unexpected setup page status %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

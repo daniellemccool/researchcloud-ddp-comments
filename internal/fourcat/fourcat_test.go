@@ -132,6 +132,19 @@ func TestSetupUnreachable(t *testing.T) {
 	}
 }
 
+func TestSetupPendingRedirectMeansDone(t *testing.T) {
+	// A completed 4CAT answers GET / with a redirect to its login page; the
+	// client never follows it, and the stub body has no setup title.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/login/")
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	if ok, err := (&Client{FrontendURL: srv.URL}).SetupPending(context.Background()); err != nil || ok {
+		t.Errorf("SetupPending(302) = %v, %v; want false, nil", ok, err)
+	}
+}
+
 func TestSetupPendingBadStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
