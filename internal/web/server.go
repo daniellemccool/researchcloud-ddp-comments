@@ -89,9 +89,12 @@ func New(d Deps) *http.Server {
 	mux.HandleFunc("POST /desk/problem", h.serveProblem)  // mark a problem on a claimed item
 	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)   // nil Admin handler → 404
 	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin) // nil Admin handler → 404
-	mux.HandleFunc("/desk/admin/", h.serveAdminTree)      // admins only, else 404
-	mux.HandleFunc("/desk/vnc/", h.serveVNC)              // nil Relay → 404
-	mux.HandleFunc("/fourcat/", h.serveFourcat)           // admins only, nil proxy → 404
+	mux.HandleFunc("GET /desk/admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/desk/admin/", http.StatusMovedPermanently) // no-slash → 301
+	})
+	mux.HandleFunc("/desk/admin/", h.serveAdminTree) // admins only, else 404
+	mux.HandleFunc("/desk/vnc/", h.serveVNC)         // nil Relay → 404
+	mux.HandleFunc("/fourcat/", h.serveFourcat)      // admins only, nil proxy → 404
 	h.routes = mux
 	return &http.Server{Addr: defaultGatedAddr, Handler: h}
 }
