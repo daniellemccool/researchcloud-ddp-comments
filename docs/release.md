@@ -111,6 +111,26 @@ updated with `init.sh update`: the layout changed (25 `desk.json` keys instead o
 installed copy's old script, which writes the old layout. `update` is for
 releases from the next tag on. The desk root on the volume survives a recreate.
 
+## Running desk: seats and the Docker floor
+
+Plan 2a has no idle stop. A collector's pair (Firefox and proxy) runs until an
+operator stops it, whatever `desk_idle_seconds` says; that parameter takes
+effect from plan 2b, which adds the reaper. Once `desk_max_running` collectors
+have a running pair, every other collector who opens `/desk/` sees "The desk is
+busy, try again in a few minutes" until a seat is freed. Check the pairs with
+`sudo docker exec desk-desk-1 desk status` (one line per registry row: user,
+index, `running` or `stopped`, and `ready` or the provisioning step it is at),
+and free a seat with `sudo docker exec desk-desk-1 desk stop <user>`. The
+collector's next visit starts a fresh pair; the profile, captures and 4CAT
+account stay on the volume.
+
+The desk needs Docker Engine 28 or newer (API 1.48). It creates each pair
+network with Docker's isolated gateway mode
+(`com.docker.network.bridge.gateway_mode_ipv4=isolated`, ADR-0007), and
+`desk serve` refuses to start on an older daemon, with an error naming the
+requirement. A launch installs current docker-ce; check an existing host with
+`docker version --format '{{.Server.Version}} {{.Server.APIVersion}}'`.
+
 ## First release only
 
 GHCR packages start private. In the GitHub package settings, set `desk`,
