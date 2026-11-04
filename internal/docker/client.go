@@ -54,7 +54,7 @@ type Container struct {
 	ExitCode        int
 	Labels          map[string]string
 	Networks        []string          // names of the networks the container is attached to
-	IPs             map[string]string // network name -> IPv4 address on that network ("" when none)
+	IPs             map[string]string // network name -> IPv4 address on that network; a network without an address has no key
 }
 
 // Mount is a bind mount.

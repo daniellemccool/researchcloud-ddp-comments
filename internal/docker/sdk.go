@@ -223,7 +223,9 @@ func (s *sdkClient) ContainerInspect(ctx context.Context, name string) (Containe
 	if resp.NetworkSettings != nil {
 		for netName, ep := range resp.NetworkSettings.Networks {
 			out.Networks = append(out.Networks, netName)
-			out.IPs[netName] = ep.IPAddress
+			if ep.IPAddress != "" {
+				out.IPs[netName] = ep.IPAddress
+			}
 		}
 	}
 	sort.Strings(out.Networks)
@@ -250,7 +252,9 @@ func (s *sdkClient) ContainerList(ctx context.Context, labels map[string]string)
 		if sum.NetworkSettings != nil {
 			for netName, ep := range sum.NetworkSettings.Networks {
 				c.Networks = append(c.Networks, netName)
-				c.IPs[netName] = ep.IPAddress
+				if ep.IPAddress != "" {
+					c.IPs[netName] = ep.IPAddress
+				}
 			}
 		}
 		sort.Strings(c.Networks)
@@ -301,6 +305,11 @@ func (s *sdkClient) Exec(ctx context.Context, containerName string, cmd []string
 		return Exec{}, ctx.Err()
 	case err := <-copyDone:
 		if err != nil {
+			// A cancellation that races the copy failure is reported as the
+			// cancellation.
+			if ctx.Err() != nil {
+				return Exec{}, ctx.Err()
+			}
 			return Exec{}, err
 		}
 	}

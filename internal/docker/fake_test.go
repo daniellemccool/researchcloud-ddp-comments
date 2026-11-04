@@ -288,6 +288,70 @@ func TestFakeExecValidation(t *testing.T) {
 	}
 }
 
+func TestFakeHelpersFollowAddressRules(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	if _, err := f.NetworkCreate(ctx, "net-alice", nil); err != nil {
+		t.Fatalf("NetworkCreate: %v", err)
+	}
+	specA := ContainerSpec{Name: "a", Image: "img:1", Endpoints: []Endpoint{{Network: "net-alice"}}}
+	if _, err := f.ContainerCreate(ctx, specA); err != nil {
+		t.Fatalf("ContainerCreate a: %v", err)
+	}
+	if err := f.ContainerStart(ctx, "a"); err != nil {
+		t.Fatalf("ContainerStart a: %v", err)
+	}
+	c, err := f.ContainerInspect(ctx, "a")
+	if err != nil {
+		t.Fatalf("ContainerInspect a: %v", err)
+	}
+	if c.IPs["net-alice"] != "10.200.1.2" {
+		t.Fatalf("a IP = %q, want 10.200.1.2", c.IPs["net-alice"])
+	}
+
+	// Exiting releases the address.
+	f.SetExited("a", 7)
+	c, err = f.ContainerInspect(ctx, "a")
+	if err != nil {
+		t.Fatalf("ContainerInspect a: %v", err)
+	}
+	if c.Running || c.ExitCode != 7 {
+		t.Errorf("after SetExited: running=%v exit=%d, want false/7", c.Running, c.ExitCode)
+	}
+	if _, ok := c.IPs["net-alice"]; ok {
+		t.Errorf("IPs after SetExited = %v, want no address for net-alice", c.IPs)
+	}
+
+	// Starting again gets a NEW number, never the old one.
+	if err := f.ContainerStart(ctx, "a"); err != nil {
+		t.Fatalf("ContainerStart a again: %v", err)
+	}
+	c, err = f.ContainerInspect(ctx, "a")
+	if err != nil {
+		t.Fatalf("ContainerInspect a: %v", err)
+	}
+	if c.IPs["net-alice"] != "10.200.1.3" {
+		t.Errorf("a IP after restart = %q, want 10.200.1.3", c.IPs["net-alice"])
+	}
+
+	// MarkRunning assigns the next number on every attached network.
+	specB := ContainerSpec{Name: "b", Image: "img:1", Endpoints: []Endpoint{{Network: "net-alice"}}}
+	if _, err := f.ContainerCreate(ctx, specB); err != nil {
+		t.Fatalf("ContainerCreate b: %v", err)
+	}
+	f.MarkRunning("b")
+	c, err = f.ContainerInspect(ctx, "b")
+	if err != nil {
+		t.Fatalf("ContainerInspect b: %v", err)
+	}
+	if !c.Running {
+		t.Error("b not running after MarkRunning")
+	}
+	if c.IPs["net-alice"] != "10.200.1.4" {
+		t.Errorf("b IP = %q, want 10.200.1.4", c.IPs["net-alice"])
+	}
+}
+
 func TestFakeNetworkConnectTwice(t *testing.T) {
 	ctx := context.Background()
 	f := NewFake()

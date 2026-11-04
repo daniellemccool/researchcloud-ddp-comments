@@ -74,7 +74,8 @@ func (f *Fake) record(call, failKey string) error {
 	return nil
 }
 
-// SetExited marks a container not running with the given exit code.
+// SetExited marks a container not running with the given exit code. Like the
+// daemon, it releases the container's address on every attached network.
 func (f *Fake) SetExited(name string, code int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -82,15 +83,22 @@ func (f *Fake) SetExited(name string, code int) {
 		c.running = false
 		c.exitCode = code
 		c.exitSet = true
+		for netName := range c.networks {
+			c.networks[netName] = ""
+		}
 	}
 }
 
-// MarkRunning marks a container running, as if started.
+// MarkRunning marks a container running, as if started: it assigns the next
+// address on every attached network, exactly as ContainerStart does.
 func (f *Fake) MarkRunning(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c, ok := f.containers[name]; ok {
 		c.running = true
+		for netName := range c.networks {
+			f.assignIP(f.networks[netName], c)
+		}
 	}
 }
 
@@ -310,7 +318,9 @@ func (f *Fake) ContainerCreate(ctx context.Context, spec ContainerSpec) (string,
 	for _, ep := range spec.Endpoints {
 		n := f.networks[ep.Network]
 		if n.attached[c.name] {
-			return "", fmt.Errorf("%w: container %s already exists in network %s", ErrConflict, c.name, ep.Network)
+			// Duplicate endpoints on the same network fold into one, like
+			// the SDK's EndpointsConfig map.
+			continue
 		}
 		f.attach(n, c)
 	}
