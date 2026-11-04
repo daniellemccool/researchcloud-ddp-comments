@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"io"
@@ -125,6 +126,9 @@ func main() {
 // N bytes and the browser gets those N bytes and then the error; "-" means
 // the length is unknown (unmatched chunked response). " write-error" is
 // appended when the record could not be written, so it still is one line.
+// goproxy's own WARN: lines (its logger, independent of Verbose) can appear in
+// addition, for instance when a browser aborts an h2 stream; they are not
+// response lines.
 func newProxy(p *platform.Platform, meta Meta, out *recordWriter, b *boundary) *goproxy.ProxyHttpServer {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
@@ -138,10 +142,16 @@ func newProxy(p *platform.Platform, meta Meta, out *recordWriter, b *boundary) *
 	proxy.Tr.DisableCompression = true
 	b.install(proxy)
 
-	// The browser speaks HTTP/1.1 to the proxy: HTTP/2 to the browser is
-	// disabled (the TLS-next-proto list is left empty, so no h2 ALPN is
-	// offered). Re-enabling it is a plan 2 item.
-	proxy.AllowHTTP2 = false
+	// HTTP/2 on both legs. TikTok tarpits one request per page load for an
+	// HTTP/1.1 client on the box's address (sandbox, 2026-11-04), so the
+	// browser gets h2 from the MITM (goproxy's embedded http2.Server runs the
+	// same filters per stream) and the upstream transport attempts h2 as well.
+	proxy.AllowHTTP2 = true
+	proxy.Tr.ForceAttemptHTTP2 = true
+	// goproxy's default upstream TLS config is an empty tls.Config (its name
+	// suggests otherwise); this makes verification against the system roots
+	// explicit and sets a TLS 1.2 floor.
+	proxy.Tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"log"
 	"net"
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/elazarl/goproxy"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 )
@@ -165,6 +169,204 @@ func TestLiveProxyOverHTTP(t *testing.T) {
 	}
 	if !strings.Contains(recs[1], `"item":{"id":1,"t":"a<b"}`) || !strings.Contains(recs[1], `"cursor":5`) {
 		t.Errorf("record 1: %s", recs[1])
+	}
+}
+
+// testPlatform is the platform both live-proxy tests capture against.
+func testPlatform() *platform.Platform {
+	return &platform.Platform{
+		Name:        "test",
+		DefaultKind: "video",
+		Hosts:       []string{"capture.example"},
+		Captures: []platform.CaptureRule{{
+			Name:         "c",
+			Path:         regexpMust(`^/api/`),
+			Items:        "comments",
+			ResponseKeep: []string{"cursor"},
+			MaxBodyBytes: 60,
+		}},
+	}
+}
+
+// useTestCA generates a CA in a temp dir and makes goproxy's MITM sign with
+// it, so the test client can verify the proxy's per-host certificate. The
+// previous GoproxyCa is restored on cleanup.
+func useTestCA(t *testing.T) *x509.CertPool {
+	t.Helper()
+	dir := t.TempDir()
+	ca, err := ensureCA(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := goproxy.GoproxyCa
+	goproxy.GoproxyCa = *ca
+	t.Cleanup(func() { goproxy.GoproxyCa = old })
+	caCert, err := x509.ParseCertificate(ca.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	return pool
+}
+
+// TestLiveProxyHTTP2BothLegs drives the real goproxy handler through an h2
+// MITM tunnel to an h2 upstream: both legs must be HTTP/2 and the capture
+// hook must still fire once per stream.
+func TestLiveProxyHTTP2BothLegs(t *testing.T) {
+	small := `{"cursor":5,"comments":[{"id":1,"t":"a<b"}]}`
+	var mu sync.Mutex
+	var upstreamProto string
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		upstreamProto = r.Proto
+		mu.Unlock()
+		_, _ = io.WriteString(w, small)
+	}))
+	upstream.EnableHTTP2 = true
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	capPath := filepath.Join(t.TempDir(), "captures.ndjson")
+	out, err := openRecordWriter(capPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxy(testPlatform(), Meta{User: "u", Session: "s", Platform: "test", Kind: "video"}, out, newBoundary("", newTokenFile(filepath.Join(t.TempDir(), "token")), mustURL("http://4cat-frontend:5000"), nil))
+	caPool := useTestCA(t)
+
+	upAddr := upstream.Listener.Addr().String()
+	proxy.Tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, upAddr)
+	}
+	// The httptest certificate is issued for example.com/127.0.0.1 while the
+	// request host is capture.example; this replaces only the test's trust
+	// anchor and server name, not production's (newProxy verifies upstreams
+	// against the system roots).
+	upPool := x509.NewCertPool()
+	upPool.AddCert(upstream.Certificate())
+	proxy.Tr.TLSClientConfig = &tls.Config{RootCAs: upPool, ServerName: "example.com", MinVersion: tls.VersionTLS12}
+
+	proxySrv := httptest.NewServer(proxy)
+	defer proxySrv.Close()
+
+	logs := &lockedBuf{}
+	log.SetOutput(logs)
+	defer log.SetOutput(os.Stderr)
+
+	pu, _ := url.Parse(proxySrv.URL)
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:             http.ProxyURL(pu),
+		TLSClientConfig:   &tls.Config{RootCAs: caPool},
+		ForceAttemptHTTP2: true,
+	}}
+	before := strings.Count(logs.String(), "\n")
+	req, _ := http.NewRequest("GET", "https://capture.example/api/small", nil)
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Proto != "HTTP/2.0" {
+		t.Errorf("browser leg proto = %q, want HTTP/2.0", resp.Proto)
+	}
+	mu.Lock()
+	up := upstreamProto
+	mu.Unlock()
+	if up != "HTTP/2.0" {
+		t.Errorf("upstream leg proto = %q, want HTTP/2.0", up)
+	}
+	if string(b) != small {
+		t.Errorf("body altered: %q", b)
+	}
+	if n := strings.Count(logs.String(), "\n") - before; n != 1 {
+		t.Errorf("request logged %d lines, want 1:\n%s", n, logs.String())
+	}
+
+	data, err := os.ReadFile(capPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(recs) != 1 {
+		t.Fatalf("want 1 record, got %d: %s", len(recs), data)
+	}
+	if !strings.Contains(recs[0], `"item":{"id":1,"t":"a<b"}`) || !strings.Contains(recs[0], `"cursor":5`) {
+		t.Errorf("record: %s", recs[0])
+	}
+}
+
+// TestUpstreamCertificateIsVerified drives the proxy against a TLS upstream
+// whose certificate is not in the system roots. With newProxy's production
+// TLSClientConfig the request must not yield a 200, the upstream handler must
+// never run, and nothing may be captured.
+func TestUpstreamCertificateIsVerified(t *testing.T) {
+	small := `{"cursor":5,"comments":[{"id":1,"t":"a<b"}]}`
+	var mu sync.Mutex
+	reached := false
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reached = true
+		mu.Unlock()
+		_, _ = io.WriteString(w, small)
+	}))
+	defer upstream.Close()
+
+	capPath := filepath.Join(t.TempDir(), "captures.ndjson")
+	out, err := openRecordWriter(capPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxy(testPlatform(), Meta{User: "u", Session: "s", Platform: "test", Kind: "video"}, out, newBoundary("", newTokenFile(filepath.Join(t.TempDir(), "token")), mustURL("http://4cat-frontend:5000"), nil))
+	caPool := useTestCA(t)
+
+	upAddr := upstream.Listener.Addr().String()
+	proxy.Tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, upAddr)
+	}
+	// proxy.Tr.TLSClientConfig is deliberately left exactly as newProxy sets
+	// it: verification against the system roots, which do not hold the
+	// httptest certificate.
+
+	proxySrv := httptest.NewServer(proxy)
+	defer proxySrv.Close()
+
+	logs := &lockedBuf{}
+	log.SetOutput(logs)
+	defer log.SetOutput(os.Stderr)
+
+	pu, _ := url.Parse(proxySrv.URL)
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:             http.ProxyURL(pu),
+		TLSClientConfig:   &tls.Config{RootCAs: caPool},
+		ForceAttemptHTTP2: true,
+	}}
+	req, _ := http.NewRequest("GET", "https://capture.example/api/small", nil)
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode < 500 || resp.StatusCode > 599 {
+			t.Errorf("request yielded status %d, want a transport error or a 5xx", resp.StatusCode)
+		}
+	}
+	mu.Lock()
+	hit := reached
+	mu.Unlock()
+	if hit {
+		t.Error("upstream handler was reached despite the unverified certificate")
+	}
+	data, err := os.ReadFile(capPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != "" {
+		t.Errorf("records written despite the failed request: %s", data)
 	}
 }
 
