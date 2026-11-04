@@ -96,3 +96,40 @@ func TestWriteUserFilesKeepsRuntime(t *testing.T) {
 		t.Errorf("runtime after re-render = %+v, want %+v", gotRT, rt)
 	}
 }
+
+// state/users/<user> is created 0700, the mode provision gives it, and an
+// existing directory's mode is never changed (review M10): rendering must not
+// flip it to 0755 on every serve and render.
+func TestWriteUserFilesPairDirMode(t *testing.T) {
+	cfg := testConfig(t)
+	if err := WriteUserFiles(cfg, Build(cfg, "alice", 1)); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(cfg.DeskRoot, "state", "users", "alice")
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Errorf("new state/users/alice mode = %o, want 700", fi.Mode().Perm())
+	}
+
+	// An existing directory keeps whatever mode it has.
+	bobDir := filepath.Join(cfg.DeskRoot, "state", "users", "bob")
+	if err := os.MkdirAll(bobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bobDir, 0o710); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteUserFiles(cfg, Build(cfg, "bob", 2)); err != nil {
+		t.Fatal(err)
+	}
+	fi, err = os.Stat(bobDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o710 {
+		t.Errorf("existing state/users/bob mode = %o, want 710 (unchanged)", fi.Mode().Perm())
+	}
+}

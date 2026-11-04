@@ -32,8 +32,9 @@ type pairFile struct {
 
 // WriteUserFiles writes the per-user files on the volume: the rendered policy
 // at firefox/<user>/policies.json (0644, uid 1000, in a 0755 uid-1000
-// directory — ADR-0013) and state/users/<user>/pair.json (0600, root's) holding
-// the spec plus the existing runtime, or null when none is recorded yet.
+// directory — ADR-0013) and state/users/<user>/pair.json (0600, root's, in a
+// directory created 0700 and never chmodded once it exists) holding the spec
+// plus the existing runtime, or null when none is recorded yet.
 func WriteUserFiles(cfg *config.Config, s Spec) error {
 	policy, err := Policy(cfg)
 	if err != nil {
@@ -52,7 +53,7 @@ func WriteUserFiles(cfg *config.Config, s Spec) error {
 	}
 
 	pairDir := filepath.Join(cfg.DeskRoot, "state", "users", s.User)
-	if err := ensureDir(pairDir, 0o755, 0, 0); err != nil {
+	if err := createDir(pairDir, 0o700, 0, 0); err != nil {
 		return err
 	}
 	pf, err := readPairFile(cfg, s.User)
@@ -181,6 +182,38 @@ func ensureDir(dir string, mode fs.FileMode, uid, gid int) error {
 		return err
 	}
 	if err := os.Chmod(dir, mode); err != nil {
+		return err
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Chown(dir, uid, gid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createDir creates dir with mode (and, when running as root, owner uid:gid)
+// if it does not exist yet; an existing directory is left exactly as it is,
+// mode and owner included. Missing parents are created 0755. Provisioning
+// owns state/users/<user> (0700), so rendering never loosens it.
+func createDir(dir string, mode fs.FileMode, uid, gid int) error {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return err
+	}
+	if err := os.Mkdir(dir, mode); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			fi, serr := os.Stat(dir)
+			if serr != nil {
+				return serr
+			}
+			if !fi.IsDir() {
+				return fmt.Errorf("%s exists and is not a directory", dir)
+			}
+			return nil
+		}
+		return err
+	}
+	if err := os.Chmod(dir, mode); err != nil { // the umask may have narrowed it
 		return err
 	}
 	if os.Geteuid() == 0 {
