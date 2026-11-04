@@ -29,6 +29,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0011 — Build every collector profile from a verified release template](./0011-build-every-collector-profile-from-a-verified-release-template.md)
 - [0012 — Allowlist-sanitise a template and verify it holds no data](./0012-allowlist-sanitise-a-template-and-verify-it-holds-no-data.md)
 - [0013 — Give Firefox 0644 copies on the volume, never the repo copy](./0013-give-firefox-0644-copies-on-the-volume-never-the-repo-copy.md)
+- [0022 — Lock network.manage-offline-status off in the collector policy](./0022-lock-network-manage-offline-status-off-in-the-collector-policy.md)
 
 ### Provisioning
 
