@@ -13,9 +13,17 @@ import (
 // at <firefoxDir>/.template.tmp/profile and renamed to <firefoxDir>/profile,
 // so the presence of profile/ means "templated". A stale .template.tmp is
 // removed first; when profile/ already exists the copy is skipped entirely.
-// A missing release directory or profile/ is a StepError "template missing".
-// The copied tree is chowned to uid 1000 when running as root.
+// A missing release directory or profile/ is a StepError naming the artifact
+// ("template missing: <artifact>"). The copied tree is chowned to uid 1000
+// when running as root.
 func CopyProfile(releaseDir, firefoxDir string) error {
+	return copyProfile(releaseDir, firefoxDir, releaseDir)
+}
+
+// copyProfile is CopyProfile with artifact named in the "template missing"
+// error text; stepTemplate passes the release-relative artifact path
+// (templates/release/<generation>).
+func copyProfile(releaseDir, firefoxDir, artifact string) error {
 	staging := filepath.Join(firefoxDir, ".template.tmp")
 	_ = os.RemoveAll(staging) // left by a crashed run, even after the rename
 	profile := filepath.Join(firefoxDir, "profile")
@@ -26,7 +34,7 @@ func CopyProfile(releaseDir, firefoxDir string) error {
 	}
 	src := filepath.Join(releaseDir, "profile")
 	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
-		return &StepError{Msg: "template missing"}
+		return &StepError{Msg: "template missing: " + artifact}
 	}
 	if err := copyTree(src, filepath.Join(staging, "profile")); err != nil {
 		_ = os.RemoveAll(staging)

@@ -2,13 +2,19 @@ package provision
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/fourcat"
 )
+
+// staleTempMaxAge is how old a leftover .pw-* temp file must be before the
+// sweep removes it (the Python's _sweep).
+const staleTempMaxAge = time.Hour
 
 // PasswordPath returns <DeskRoot>/secrets/4cat-passwords/<user>, the
 // collector's 4CAT password (root's, 0600).
@@ -36,7 +42,7 @@ func EnsurePassword(cfg *config.Config, user string) (pw string, createdNow bool
 		}
 		pw = fourcat.NewPassword()
 		if err := writeExclusive(path, []byte(pw), 0o600); err != nil {
-			if errors.Is(err, os.ErrExist) {
+			if errors.Is(err, fs.ErrExist) {
 				continue // lost a race: read the winner's file
 			}
 			return "", false, err
@@ -46,16 +52,24 @@ func EnsurePassword(cfg *config.Config, user string) (pw string, createdNow bool
 	return "", false, &StepError{Msg: "4CAT password file unreadable"}
 }
 
-// writeExclusive creates path with O_EXCL (failing with os.ErrExist when
-// someone else won the race) and sets the mode explicitly.
+// writeExclusive publishes data at path the way the Python's
+// _write(exclusive=True) does: a complete 0600 temp file in the same
+// directory, fsynced and closed, is hard-linked over path, so the final file
+// never exists empty — a failed write or a crash leaves only the temp file.
+// A lost race (fs.ErrExist from the link) means another writer won; the temp
+// is removed either way.
 func writeExclusive(path string, data []byte, mode os.FileMode) error {
-	if err := ensureDir(filepath.Dir(path), 0o700, 0, 0); err != nil {
+	dir := filepath.Dir(path)
+	if err := ensureDir(dir, 0o700, 0, 0); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	sweepTemp(dir)
+	f, err := os.CreateTemp(dir, ".pw-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }() // no-op once the link succeeded
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return err
@@ -64,7 +78,36 @@ func writeExclusive(path string, data []byte, mode os.FileMode) error {
 		_ = f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Link(tmp, path)
+}
+
+// sweepTemp removes leftover .pw-* temp files older than staleTempMaxAge in
+// dir (left by a crashed run). Best effort.
+func sweepTemp(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleTempMaxAge)
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".pw-") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // readPassword reads the stored 4CAT password for the token step.

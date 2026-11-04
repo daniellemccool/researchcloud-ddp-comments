@@ -117,9 +117,11 @@ func (p *Provisioner) save(user string, st *State) error {
 }
 
 // describe turns a step's error into the text recorded in the step file: the
-// message of a known error verbatim, "registry full" for registry.ErrFull,
-// and the Go type name only for anything else (its message might carry a
-// secret).
+// message of a known error verbatim (*fourcat.LoginError, the fourcat
+// sentinels, errors from fourcat.Client calls — those carry no secret by
+// contract — *StepError, *fs.PathError), "registry full" for
+// registry.ErrFull, and the Go type name only for anything else (its message
+// might carry a secret).
 func describe(err error) string {
 	var loginErr *fourcat.LoginError
 	if errors.As(err, &loginErr) {
@@ -127,6 +129,10 @@ func describe(err error) string {
 	}
 	if errors.Is(err, fourcat.ErrNeedsAdopt) || errors.Is(err, fourcat.ErrSetupPending) {
 		return err.Error()
+	}
+	var fcErr *fourcatError
+	if errors.As(err, &fcErr) {
+		return fcErr.Error()
 	}
 	var stepErr *StepError
 	if errors.As(err, &stepErr) {

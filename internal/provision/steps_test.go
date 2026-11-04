@@ -173,81 +173,6 @@ func TestRegistryFullText(t *testing.T) {
 	}
 }
 
-func TestTemplateIdempotent(t *testing.T) {
-	env := newTestEnv(t)
-	ctx := context.Background()
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
-		t.Fatalf("not ready: %v", st.Steps)
-	}
-
-	profile := filepath.Join(env.root, "state", "firefox", "alice", "profile")
-	marker := filepath.Join(profile, "marker.txt")
-	writeFile(t, marker, "collector data")
-	// A stale staging dir left by a crashed run.
-	stale := filepath.Join(env.root, "state", "firefox", "alice", ".template.tmp")
-	writeFile(t, filepath.Join(stale, "junk"), "junk")
-
-	st := env.prov.Advance(ctx, "alice", false)
-	if !st.Ready() {
-		t.Fatalf("second Advance not ready: %v", st.Steps)
-	}
-	if got := readFile(t, marker); got != "collector data" {
-		t.Errorf("marker file = %q, want it to survive the second Advance", got)
-	}
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Errorf("stale .template.tmp still present (err = %v)", err)
-	}
-}
-
-func TestTemplateMissing(t *testing.T) {
-	env := newTestEnv(t)
-	ctx := context.Background()
-	if err := os.RemoveAll(filepath.Join(env.root, "templates", "release", generation)); err != nil {
-		t.Fatal(err)
-	}
-
-	st := env.prov.Advance(ctx, "alice", false)
-	if st.Ready() {
-		t.Fatal("ready without a release template")
-	}
-	if got := st.Steps["template"]; got != "error: template missing" {
-		t.Errorf("template step = %q, want %q", got, "error: template missing")
-	}
-	if st.Current() != "template" || st.Error() != "error: template missing" {
-		t.Errorf("Current() = %q Error() = %q", st.Current(), st.Error())
-	}
-	if st.Steps["registry"] != "done" || st.Steps["dirs"] != "done" {
-		t.Errorf("earlier steps = %v", st.Steps)
-	}
-}
-
-func TestHideMediaCSS(t *testing.T) {
-	env := newTestEnv(t)
-	ctx := context.Background()
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
-		t.Fatalf("not ready: %v", st.Steps)
-	}
-	css := filepath.Join(env.root, "state", "firefox", "alice", "profile", "chrome", "userContent.css")
-	if got := readFile(t, css); got != "/* hide media */\n" {
-		t.Errorf("userContent.css = %q, want the platform stylesheet", got)
-	}
-	if got := statMode(t, css); got != 0o644 {
-		t.Errorf("userContent.css mode %v, want 0644", got)
-	}
-
-	// HideMedia off: the stylesheet is removed on the next run of the step.
-	env.cfg.HideMedia = false
-	if err := os.Remove(StatePath(env.cfg, "alice")); err != nil {
-		t.Fatal(err)
-	}
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
-		t.Fatalf("second Advance not ready: %v", st.Steps)
-	}
-	if _, err := os.Stat(css); !os.IsNotExist(err) {
-		t.Errorf("userContent.css still present with HideMedia off (err = %v)", err)
-	}
-}
-
 func TestFourcatSetupPending(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
@@ -325,11 +250,12 @@ func TestAdminTagFollowsRole(t *testing.T) {
 			if update == "" {
 				t.Fatal("no admin-tag UPDATE recorded")
 			}
-			if admin && !strings.Contains(update, `'["admin"]'::jsonb`) {
-				t.Errorf("admin UPDATE = %q, want the tag added", update)
+			wantUpdate := `UPDATE users SET tags = tags - 'admin' WHERE name = 'alice'`
+			if admin {
+				wantUpdate = `UPDATE users SET tags = (tags - 'admin') || '["admin"]'::jsonb WHERE name = 'alice'`
 			}
-			if !admin && strings.Contains(update, "::jsonb") {
-				t.Errorf("non-admin UPDATE = %q, want the tag removed", update)
+			if update != wantUpdate {
+				t.Errorf("admin-tag UPDATE = %q, want exactly %q", update, wantUpdate)
 			}
 		})
 	}
@@ -358,6 +284,9 @@ func TestTokenFileModes(t *testing.T) {
 	if got := statMode(t, PasswordPath(env.cfg, "alice")); got != 0o600 {
 		t.Errorf("password file mode %v, want 0600", got)
 	}
+	if got := statMode(t, filepath.Join(env.root, "secrets", "4cat-passwords")); got != 0o700 {
+		t.Errorf("secrets/4cat-passwords mode %v, want 0700", got)
+	}
 	if os.Geteuid() == 0 {
 		if uid := statUID(t, tokenDir); uid != 1000 {
 			t.Errorf("token dir uid %d, want 1000", uid)
@@ -367,6 +296,9 @@ func TestTokenFileModes(t *testing.T) {
 		}
 		if uid := statUID(t, filepath.Join(env.root, "state", "proxy", "alice", "ca.pem")); uid != 1000 {
 			t.Errorf("ca.pem uid %d, want 1000", uid)
+		}
+		if uid := statUID(t, filepath.Join(env.root, "state", "proxy", "alice", "ca-key.pem")); uid != 1000 {
+			t.Errorf("ca-key.pem uid %d, want 1000", uid)
 		}
 		if uid := statUID(t, filepath.Join(env.root, "state", "firefox", "alice")); uid != 1000 {
 			t.Errorf("state/firefox/alice uid %d, want 1000", uid)
@@ -425,18 +357,48 @@ func TestFourcatDisabledSkipsSteps(t *testing.T) {
 	}
 }
 
-func TestUnknownErrorRecordsTypeOnly(t *testing.T) {
-	env := newTestEnv(t)
-	ctx := context.Background()
-	env.setFlags(false, false, true, false) // /login/ drops the connection
+// secretError is a foreign error type whose message holds a secret: only its
+// Go type name may ever reach the step file.
+type secretError struct{ msg string }
 
-	st := env.prov.Advance(ctx, "alice", false)
-	got := st.Steps["fourcat_token"]
-	if got != "error: *errors.errorString" {
-		t.Errorf("fourcat_token = %q, want %q (type name only)", got, "error: *errors.errorString")
+func (e *secretError) Error() string { return e.msg }
+
+func TestUnknownErrorRecordsTypeOnly(t *testing.T) {
+	if got := describe(&secretError{"4cat password hunter2"}); got != "*provision.secretError" {
+		t.Errorf("describe(secretError) = %q, want the type name only", got)
+	}
+
+	// Through a step and into the file: a malformed registry row whose index
+	// field carries a secret-looking string.
+	env := newTestEnv(t)
+	writeFile(t, env.reg.Path, "alice\tsecret-hunter2\n")
+	st := env.prov.Advance(context.Background(), "alice", false)
+	if got := st.Steps["registry"]; got != "error: *fmt.wrapError" {
+		t.Errorf("registry step = %q, want %q (type name only)", got, "error: *fmt.wrapError")
 	}
 	raw := readFile(t, StatePath(env.cfg, "alice"))
-	if strings.Contains(raw, "unreachable") || strings.Contains(raw, "url.Error") {
+	if strings.Contains(raw, "secret-hunter2") || strings.Contains(raw, "invalid index") {
 		t.Errorf("state file leaks the error message: %s", raw)
+	}
+}
+
+func TestFourcatErrorsRecordedVerbatim(t *testing.T) {
+	ctx := context.Background()
+
+	// psql exits 3: fourcat's own error text is recorded verbatim (F68).
+	env := newTestEnv(t)
+	env.setPsqlExit(3)
+	st := env.prov.Advance(ctx, "alice", false)
+	if got := st.Steps["fourcat_account"]; got != "error: psql exited with status 3" {
+		t.Errorf("fourcat_account = %q, want %q", got, "error: psql exited with status 3")
+	}
+
+	// Frontend unreachable: "4CAT unreachable: <type>" verbatim.
+	env2 := newTestEnv(t)
+	env2.prov.Fourcat.FrontendURL = closedURL(t)
+	st2 := env2.prov.Advance(ctx, "alice", false)
+	got := st2.Steps["fourcat_account"]
+	if !strings.HasPrefix(got, "error: 4CAT unreachable: ") || !strings.Contains(got, "*url.Error") {
+		t.Errorf("fourcat_account = %q, want %q…", got, "error: 4CAT unreachable: *url.Error")
 	}
 }

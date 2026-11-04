@@ -16,6 +16,14 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/render"
 )
 
+// fourcatError wraps an error returned by a fourcat.Client call. Those
+// messages carry no secret by contract (type names, statuses, the validated
+// username), so describe records them verbatim.
+type fourcatError struct{ err error }
+
+func (e *fourcatError) Error() string { return e.err.Error() }
+func (e *fourcatError) Unwrap() error { return e.err }
+
 // Provisioner advances one collector toward ready. Fourcat is nil when 4CAT
 // is disabled, which skips both fourcat steps. Now is the clock for the
 // step file's "updated" field; nil means time.Now.
@@ -147,18 +155,21 @@ func (p *Provisioner) stepDirs(user string) error {
 // user's firefox dir (via CopyProfile) and applies the hide-media stylesheet.
 func (p *Provisioner) stepTemplate(user string) error {
 	firefoxDir := filepath.Join(p.Cfg.DeskRoot, "state", "firefox", user)
-	releaseDir := filepath.Join(p.Cfg.DeskRoot, "templates", "release", render.Generation(p.Cfg))
-	if err := CopyProfile(releaseDir, firefoxDir); err != nil {
+	artifact := filepath.Join("templates", "release", render.Generation(p.Cfg))
+	releaseDir := filepath.Join(p.Cfg.DeskRoot, artifact)
+	if err := copyProfile(releaseDir, firefoxDir, artifact); err != nil {
 		return err
 	}
 	cssDst := filepath.Join(firefoxDir, "profile", "chrome", "userContent.css")
 	if p.Cfg.HideMedia {
 		src := filepath.Join(p.Cfg.DeskRoot, "platform", "userContent.css")
-		if _, err := os.Stat(src); err == nil {
-			if err := copyUserContentCSS(src, cssDst); err != nil {
-				return err
+		if _, err := os.Stat(src); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return &StepError{Msg: "hide-media stylesheet missing: platform/userContent.css"}
 			}
-		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := copyUserContentCSS(src, cssDst); err != nil {
 			return err
 		}
 	} else if err := os.Remove(cssDst); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -176,7 +187,7 @@ func (p *Provisioner) stepFourcatAccount(ctx context.Context, user string, admin
 	}
 	pending, err := p.Fourcat.SetupPending(ctx)
 	if err != nil {
-		return err
+		return &fourcatError{err}
 	}
 	if pending {
 		return fourcat.ErrSetupPending
@@ -191,7 +202,7 @@ func (p *Provisioner) stepFourcatAccount(ctx context.Context, user string, admin
 			// A retry must not mistake someone else's account for ours.
 			_ = os.Remove(PasswordPath(p.Cfg, user))
 		}
-		return err
+		return &fourcatError{err}
 	}
 	if exists && createdNow {
 		_ = os.Remove(PasswordPath(p.Cfg, user))
@@ -199,10 +210,13 @@ func (p *Provisioner) stepFourcatAccount(ctx context.Context, user string, admin
 	}
 	if !exists {
 		if err := p.Fourcat.CreateAccount(ctx, user, pw, admin); err != nil {
-			return err
+			return &fourcatError{err}
 		}
 	}
-	return p.Fourcat.SetAdmin(ctx, user, admin)
+	if err := p.Fourcat.SetAdmin(ctx, user, admin); err != nil {
+		return &fourcatError{err}
+	}
+	return nil
 }
 
 // stepFourcatToken logs in with the stored password and writes the login
@@ -217,7 +231,7 @@ func (p *Provisioner) stepFourcatToken(ctx context.Context, user string) error {
 	}
 	token, err := p.Fourcat.LoginToken(ctx, user, pw)
 	if err != nil {
-		return err
+		return &fourcatError{err}
 	}
 	return WriteToken(p.Cfg, user, token)
 }

@@ -40,6 +40,7 @@ type testEnv struct {
 	refuse        bool // /login/ answers 401
 	hijackLogin   bool // /login/ drops the connection (transport failure)
 	accountExists bool // the users table already has the account
+	psqlExit      int  // when non-zero, psql exits with this status
 	logins        int  // /login/ calls seen
 	sqls          []string
 }
@@ -57,7 +58,11 @@ func (d *fourcatDocker) Exec(ctx context.Context, container string, cmd []string
 		d.env.mu.Lock()
 		d.env.sqls = append(d.env.sqls, sql)
 		exists := d.env.accountExists
+		exit := d.env.psqlExit
 		d.env.mu.Unlock()
+		if exit != 0 {
+			return docker.Exec{ExitCode: exit, Stderr: "ERROR: simulated failure"}, nil
+		}
 		switch {
 		case strings.HasPrefix(sql, "SELECT 1 FROM users"):
 			if exists {
@@ -218,6 +223,21 @@ func (e *testEnv) setFlags(pending, refuse, hijack, exists bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.pending, e.refuse, e.hijackLogin, e.accountExists = pending, refuse, hijack, exists
+}
+
+func (e *testEnv) setPsqlExit(code int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.psqlExit = code
+}
+
+// closedURL returns the URL of a server that is already shut down.
+func closedURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	return url
 }
 
 func statMode(t *testing.T, path string) os.FileMode {
