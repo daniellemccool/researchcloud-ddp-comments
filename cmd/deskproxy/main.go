@@ -123,12 +123,18 @@ func main() {
 // is handed back: "method host path status bytes". bytes is the body length
 // delivered to the browser; "N+" means N bytes were buffered and more were
 // streamed through (over-cap body); "N!" means the upstream read failed after
-// N bytes and the browser gets those N bytes and then the error; "-" means
+// N bytes and the browser gets those N bytes and then the error; under HTTP/2
+// the browser receives the N bytes as a cleanly ended stream (goproxy drops
+// Content-Length once the body was replaced and only warns on the read error),
+// so a truncated body looks complete to the page; the log marker and the error
+// record are the signal (aborting the stream is a plan 2b item). "-" means
 // the length is unknown (unmatched chunked response). " write-error" is
 // appended when the record could not be written, so it still is one line.
-// goproxy's own WARN: lines (its logger, independent of Verbose) can appear in
-// addition, for instance when a browser aborts an h2 stream; they are not
-// response lines.
+// A failed upstream round trip (dial, TLS, reset) writes no response line on
+// either protocol; the browser gets goproxy's 502 and goproxy's own WARN line
+// appears instead. goproxy's own WARN: lines (its logger, independent of
+// Verbose) can appear in addition, for instance when a browser aborts an h2
+// stream; they are not response lines.
 func newProxy(p *platform.Platform, meta Meta, out *recordWriter, b *boundary) *goproxy.ProxyHttpServer {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false

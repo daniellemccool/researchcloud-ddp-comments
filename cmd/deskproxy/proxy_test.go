@@ -255,11 +255,13 @@ func TestLiveProxyHTTP2BothLegs(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 
 	pu, _ := url.Parse(proxySrv.URL)
-	client := &http.Client{Transport: &http.Transport{
+	tr := &http.Transport{
 		Proxy:             http.ProxyURL(pu),
 		TLSClientConfig:   &tls.Config{RootCAs: caPool},
 		ForceAttemptHTTP2: true,
-	}}
+	}
+	t.Cleanup(tr.CloseIdleConnections)
+	client := &http.Client{Transport: tr}
 	before := strings.Count(logs.String(), "\n")
 	req, _ := http.NewRequest("GET", "https://capture.example/api/small", nil)
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
@@ -302,9 +304,11 @@ func TestLiveProxyHTTP2BothLegs(t *testing.T) {
 }
 
 // TestUpstreamCertificateIsVerified drives the proxy against a TLS upstream
-// whose certificate is not in the system roots. With newProxy's production
-// TLSClientConfig the request must not yield a 200, the upstream handler must
-// never run, and nothing may be captured.
+// whose certificate is not in the system roots. The request host is
+// example.com, which the httptest certificate covers, so the failure is the
+// trust check, not the name check. With newProxy's production TLSClientConfig
+// the request must yield goproxy's 502 naming the x509 trust failure, the
+// upstream handler must never run, and nothing may be captured.
 func TestUpstreamCertificateIsVerified(t *testing.T) {
 	small := `{"cursor":5,"comments":[{"id":1,"t":"a<b"}]}`
 	var mu sync.Mutex
@@ -317,12 +321,16 @@ func TestUpstreamCertificateIsVerified(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	// The platform lists example.com so the capture rule would match if the
+	// request ever succeeded; "no record written" then means something.
+	p := testPlatform()
+	p.Hosts = []string{"example.com"}
 	capPath := filepath.Join(t.TempDir(), "captures.ndjson")
 	out, err := openRecordWriter(capPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy := newProxy(testPlatform(), Meta{User: "u", Session: "s", Platform: "test", Kind: "video"}, out, newBoundary("", newTokenFile(filepath.Join(t.TempDir(), "token")), mustURL("http://4cat-frontend:5000"), nil))
+	proxy := newProxy(p, Meta{User: "u", Session: "s", Platform: "test", Kind: "video"}, out, newBoundary("", newTokenFile(filepath.Join(t.TempDir(), "token")), mustURL("http://4cat-frontend:5000"), nil))
 	caPool := useTestCA(t)
 
 	upAddr := upstream.Listener.Addr().String()
@@ -341,18 +349,30 @@ func TestUpstreamCertificateIsVerified(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 
 	pu, _ := url.Parse(proxySrv.URL)
-	client := &http.Client{Transport: &http.Transport{
+	tr := &http.Transport{
 		Proxy:             http.ProxyURL(pu),
 		TLSClientConfig:   &tls.Config{RootCAs: caPool},
 		ForceAttemptHTTP2: true,
-	}}
-	req, _ := http.NewRequest("GET", "https://capture.example/api/small", nil)
+	}
+	t.Cleanup(tr.CloseIdleConnections)
+	client := &http.Client{Transport: tr}
+	req, _ := http.NewRequest("GET", "https://example.com/api/small", nil)
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	const x509Phrase = "x509: certificate signed by unknown authority"
 	resp, err := client.Do(req)
-	if err == nil {
-		_ = resp.Body.Close()
-		if resp.StatusCode < 500 || resp.StatusCode > 599 {
-			t.Errorf("request yielded status %d, want a transport error or a 5xx", resp.StatusCode)
+	if err != nil {
+		// Under h2 a failed round trip can also surface as a transport error.
+		if !strings.Contains(err.Error(), x509Phrase) {
+			t.Errorf("transport error does not name the trust failure: %v", err)
+		}
+	} else {
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("status = %d, want 502", resp.StatusCode)
+		}
+		if !strings.Contains(string(body), x509Phrase) {
+			t.Errorf("502 body does not name the trust failure: %q", body)
 		}
 	}
 	mu.Lock()
