@@ -15,6 +15,7 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -40,6 +41,7 @@ func main() {
 		caDir        = flag.String("ca", "/ca", "directory holding ca.pem and ca-key.pem")
 		listen       = flag.String("listen", ":8080", "proxy listen address")
 		health       = flag.String("health", ":8081", "health listen address")
+		listenCIDR   = flag.String("listen-cidr", "", "bind the listeners to this network's address only")
 		tokenPath    = flag.String("token-file", "/token", "this collector's 4CAT token file")
 		upstream     = flag.String("fourcat-upstream", "http://4cat-frontend:5000", "where fourcat.desk is forwarded")
 		fqdn         = flag.String("fqdn", "", "the workspace's own host name, allowed through")
@@ -77,16 +79,41 @@ func main() {
 
 	proxy := newProxy(p, meta, out, newBoundary(*fqdn, newTokenFile(*tokenPath), up, nil))
 
+	// ADR-0007: with --listen-cidr both listeners bind to this container's
+	// address on that network only, so the shared bridges carry no listener.
+	// Resolved before the first ListenAndServe; no address inside the CIDR is
+	// fatal before anything is served.
+	listenAddr, healthAddr := *listen, *health
+	if *listenCIDR != "" {
+		var addrs []net.Addr
+		addrs, err = localAddrs()
+		if err != nil {
+			log.Fatalf("list interface addresses: %v", err)
+		}
+		listenAddr, err = bindAddr(*listenCIDR, *listen, addrs)
+		if err != nil {
+			log.Fatal(err)
+		}
+		healthAddr, err = bindAddr(*listenCIDR, *health, addrs)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	go func() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = io.WriteString(w, "ok\n")
 		})
-		log.Fatal(http.ListenAndServe(*health, mux))
+		log.Fatal(http.ListenAndServe(healthAddr, mux))
 	}()
 
-	log.Printf("deskproxy platform=%s user=%s session=%s listening on %s", p.Name, *user, *session, *listen)
-	log.Fatal(http.ListenAndServe(*listen, proxy))
+	cidrField := ""
+	if *listenCIDR != "" {
+		cidrField = " cidr=" + *listenCIDR
+	}
+	log.Printf("deskproxy platform=%s user=%s session=%s listening on %s%s", p.Name, *user, *session, listenAddr, cidrField)
+	log.Fatal(http.ListenAndServe(listenAddr, proxy))
 }
 
 // newProxy builds the capture proxy handler.
