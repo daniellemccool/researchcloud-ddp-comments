@@ -250,9 +250,9 @@ func TestAdminTagFollowsRole(t *testing.T) {
 			if update == "" {
 				t.Fatal("no admin-tag UPDATE recorded")
 			}
-			wantUpdate := `UPDATE users SET tags = tags - 'admin' WHERE name = 'alice'`
+			wantUpdate := `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) WHERE name = 'alice'`
 			if admin {
-				wantUpdate = `UPDATE users SET tags = (tags - 'admin') || '["admin"]'::jsonb WHERE name = 'alice'`
+				wantUpdate = `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) || '["admin"]'::jsonb WHERE name = 'alice'`
 			}
 			if update != wantUpdate {
 				t.Errorf("admin-tag UPDATE = %q, want exactly %q", update, wantUpdate)

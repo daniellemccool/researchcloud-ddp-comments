@@ -132,6 +132,19 @@ func TestSetupUnreachable(t *testing.T) {
 	}
 }
 
+func TestSetupPendingFirstRunRedirect(t *testing.T) {
+	// While 4CAT's first run is pending it redirects to /first-run/, where
+	// the "Complete 4CAT Setup" page lives; the redirect itself means pending.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/first-run/")
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	if ok, err := (&Client{FrontendURL: srv.URL}).SetupPending(context.Background()); err != nil || !ok {
+		t.Errorf("SetupPending(302 /first-run/) = %v, %v; want true, nil", ok, err)
+	}
+}
+
 func TestSetupPendingRedirectMeansDone(t *testing.T) {
 	// A completed 4CAT answers GET / with a redirect to its login page; the
 	// client never follows it, and the stub body has no setup title.
@@ -247,8 +260,11 @@ func TestSetAdminSQL(t *testing.T) {
 	if len(f.Execs) != 2 {
 		t.Fatalf("len(Execs) = %d; want 2", len(f.Execs))
 	}
-	wantTrue := `UPDATE users SET tags = (tags - 'admin') || '["admin"]'::jsonb WHERE name = 'alice'`
-	wantFalse := `UPDATE users SET tags = tags - 'admin' WHERE name = 'alice'`
+	// v1.57's create_user.py -a stores tags as the jsonb string "[\"admin\"]"
+	// (a scalar), so the CASE normalises a non-array to '[]' before the
+	// delete/|| (F81).
+	wantTrue := `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) || '["admin"]'::jsonb WHERE name = 'alice'`
+	wantFalse := `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) WHERE name = 'alice'`
 	for i, want := range []string{wantTrue, wantFalse} {
 		call := f.Execs[i]
 		if call.Container != dbName {
