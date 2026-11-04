@@ -52,6 +52,20 @@ func TestReconcileStopsExitedPair(t *testing.T) {
 	}
 }
 
+func TestReconcileStopsPairWithDeadProxy(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	// A Firefox running beside an exited proxy is not "running" (F71).
+	f.fake.SetExited("desk-proxy-alice", 1)
+	if err := f.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.gone(t, "alice")
+	if !strings.Contains(f.logBuf.String(), "stopped alice: proxy not running") {
+		t.Errorf("log = %q, want it to contain %q", f.logBuf.String(), "stopped alice: proxy not running")
+	}
+}
+
 func TestReconcileLogsOrphanUntouched(t *testing.T) {
 	f := newFixture(t, 4, "alice") // mallory has no registry row
 	f.runningPair(t, "mallory", "tiktok-1.14.3")

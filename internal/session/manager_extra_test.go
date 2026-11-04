@@ -22,9 +22,15 @@ func TestReadyNeedsRunningAndProbe(t *testing.T) {
 	if f.m.Ready(ctx, "alice") {
 		t.Error("Ready = true with nothing running, want false")
 	}
+	// Only the firefox running is NOT "running" (F71: both containers must run).
 	f.startFirefox(t, "alice")
+	if f.m.Ready(ctx, "alice") {
+		t.Error("Ready = true with only the firefox running, want false")
+	}
+	// Both containers running + healthy probe.
+	f.startBare(t, "desk-proxy-alice", "proxy", "alice")
 	if !f.m.Ready(ctx, "alice") {
-		t.Error("Ready = false with a running firefox and a healthy probe, want true")
+		t.Error("Ready = false with both containers running and a healthy probe, want true")
 	}
 	if len(urls) == 0 || urls[len(urls)-1] != "http://desk-firefox-alice:5800/" {
 		t.Errorf("probe urls = %v, want the last to be http://desk-firefox-alice:5800/", urls)
@@ -83,7 +89,8 @@ func TestStatusRows(t *testing.T) {
 	if err := os.WriteFile(f.reg.Path, []byte("alice\t1\tlive\nbob\t2\tretired\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f.startFirefox(t, "alice")
+	// alice's pair is fully running (both containers, F71).
+	f.runningPair(t, "alice", "tiktok-1.14.3")
 	rows, err := f.m.Status(context.Background())
 	if err != nil {
 		t.Fatal(err)

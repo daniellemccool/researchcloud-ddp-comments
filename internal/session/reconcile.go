@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 
@@ -18,13 +19,15 @@ type pair struct {
 }
 
 // Reconcile brings Docker in line with the registry after a desk restart. It
-// lists every object carrying desk.owner=desk, groups them by desk.user and,
-// under that user's lock: adopts a running pair of the current generation
-// (re-joining its network so the screen relay works again), stops a pair with
-// an exited or missing container or network, stops a running pair whose
-// generation changed, and logs owner-labelled objects without a live registry
-// row as orphans without touching them. It then regenerates the per-user
-// files for every live row. Reconcile never starts anything.
+// lists every object carrying desk.owner=desk to build the candidate set of
+// users, then re-inspects each user's three objects under that user's lock
+// before deciding: a running pair of the current generation (BOTH containers
+// running, controller ruling F71) is adopted — the desk re-joins its network
+// so the screen relay works again; a pair with an exited or missing container
+// or network is stopped; a running pair whose generation changed is stopped;
+// owner-labelled objects without a live registry row are logged as orphans
+// and left untouched. It then regenerates the per-user files for every live
+// row. Reconcile never starts anything and never removes an orphan.
 func (m *Manager) Reconcile(ctx context.Context) error {
 	containers, err := m.Docker.ContainerList(ctx, map[string]string{"desk.owner": render.Owner})
 	if err != nil {
@@ -39,40 +42,28 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		return err
 	}
 
-	byUser := map[string]*pair{}
-	group := func(user string) *pair {
-		p, ok := byUser[user]
-		if !ok {
-			p = &pair{}
-			byUser[user] = p
-		}
-		return p
+	// The lists above are only the candidate set; every decision below
+	// re-inspects under the user lock.
+	candidates := map[string]bool{}
+	for _, c := range containers {
+		candidates[c.Labels["desk.user"]] = true
 	}
-	for i := range containers {
-		c := &containers[i]
-		p := group(c.Labels["desk.user"])
-		switch c.Labels["desk.role"] {
-		case "proxy":
-			p.proxy = c
-		case "firefox":
-			p.firefox = c
-		}
-	}
-	for i := range networks {
-		n := &networks[i]
-		if n.Labels["desk.role"] == "net" {
-			group(n.Labels["desk.user"]).net = n
-		}
+	for _, n := range networks {
+		candidates[n.Labels["desk.user"]] = true
 	}
 
 	generation := render.Generation(m.Cfg)
-	for user, p := range byUser {
+	for user := range candidates {
 		userLock := m.Locks.User(user)
 		userLock.Lock()
+		p, perr := m.inspectPair(ctx, user)
 		_, isLive := live[user]
 		switch {
+		case perr != nil:
+			// A foreign object or a failed inspect: touch nothing.
+			m.logf("reconcile %s: %v", user, perr)
 		case !isLive:
-			m.logf("orphan: %s", strings.Join(p.names(user), ", "))
+			m.logf("orphan: %s", strings.Join(p.names(), ", "))
 		case p.complete() && p.firefox.Labels["desk.generation"] == generation:
 			if err := m.connectSelf(ctx, "net-"+user); err != nil {
 				m.logf("adopt %s: %v", user, err)
@@ -82,7 +73,7 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		case p.complete():
 			m.stopAndLog(ctx, user, "generation changed")
 		default:
-			m.stopAndLog(ctx, user, p.missingWhy(user))
+			m.stopAndLog(ctx, user, p.missingWhy())
 		}
 		userLock.Unlock()
 	}
@@ -100,6 +91,39 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	return nil
 }
 
+// inspectPair re-inspects user's three objects; the caller must hold
+// Locks.User(user). The returned error is non-nil when a present object is
+// foreign (the pair is then partial and must not be touched) or an inspect
+// failed with something other than not-found.
+func (m *Manager) inspectPair(ctx context.Context, user string) (*pair, error) {
+	p := &pair{}
+	if n, err := m.Docker.NetworkInspect(ctx, "net-"+user); err == nil {
+		if err := checkOwnership(n.Labels, user, n.Name); err != nil {
+			return p, err
+		}
+		p.net = &n
+	} else if !errors.Is(err, docker.ErrNotFound) {
+		return p, err
+	}
+	if c, err := m.Docker.ContainerInspect(ctx, "desk-proxy-"+user); err == nil {
+		if err := checkOwnership(c.Labels, user, c.Name); err != nil {
+			return p, err
+		}
+		p.proxy = &c
+	} else if !errors.Is(err, docker.ErrNotFound) {
+		return p, err
+	}
+	if c, err := m.Docker.ContainerInspect(ctx, "desk-firefox-"+user); err == nil {
+		if err := checkOwnership(c.Labels, user, c.Name); err != nil {
+			return p, err
+		}
+		p.firefox = &c
+	} else if !errors.Is(err, docker.ErrNotFound) {
+		return p, err
+	}
+	return p, nil
+}
+
 // stopAndLog stops user's pair under the caller's user lock and logs why.
 func (m *Manager) stopAndLog(ctx context.Context, user, why string) {
 	if err := m.stop(ctx, user); err != nil {
@@ -110,42 +134,38 @@ func (m *Manager) stopAndLog(ctx context.Context, user, why string) {
 }
 
 // complete reports whether both containers are present and running and the
-// network exists.
+// network exists — "running" means both containers (F71).
 func (p *pair) complete() bool {
 	return p.proxy != nil && p.firefox != nil && p.net != nil &&
 		p.proxy.Running && p.firefox.Running
 }
 
 // missingWhy describes why an incomplete pair is stopped.
-func (p *pair) missingWhy(user string) string {
+func (p *pair) missingWhy() string {
 	var why []string
 	if p.net == nil {
-		why = append(why, "network net-"+user+" missing")
+		why = append(why, "network missing")
 	}
-	if p.proxy == nil {
-		why = append(why, "container desk-proxy-"+user+" missing")
-	} else if !p.proxy.Running {
-		why = append(why, "container desk-proxy-"+user+" exited")
+	if p.proxy == nil || !p.proxy.Running {
+		why = append(why, "proxy not running")
 	}
-	if p.firefox == nil {
-		why = append(why, "container desk-firefox-"+user+" missing")
-	} else if !p.firefox.Running {
-		why = append(why, "container desk-firefox-"+user+" exited")
+	if p.firefox == nil || !p.firefox.Running {
+		why = append(why, "firefox not running")
 	}
 	return strings.Join(why, "; ")
 }
 
-// names lists the pair's object names that exist, for the orphan log.
-func (p *pair) names(user string) []string {
-	names := make([]string, 0, 3)
+// names lists the pair's existing object names, for the orphan log.
+func (p *pair) names() []string {
+	var names []string
 	if p.net != nil {
-		names = append(names, "net-"+user)
+		names = append(names, p.net.Name)
 	}
 	if p.proxy != nil {
-		names = append(names, "desk-proxy-"+user)
+		names = append(names, p.proxy.Name)
 	}
 	if p.firefox != nil {
-		names = append(names, "desk-firefox-"+user)
+		names = append(names, p.firefox.Name)
 	}
 	sort.Strings(names)
 	return names

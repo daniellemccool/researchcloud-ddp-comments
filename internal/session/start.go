@@ -16,12 +16,17 @@ import (
 // stopTimeout is how long ContainerStop waits before killing a container.
 const stopTimeout = 10 * time.Second
 
+// cleanupTimeout bounds the best-effort stop sequence a failed Start runs on
+// a fresh context.
+const cleanupTimeout = 30 * time.Second
+
 // Start creates user's pair (net-<user>, desk-proxy-<user>,
 // desk-firefox-<user>) from the rendered spec. The running cap is reserved
-// atomically: under Locks.User(u) and Locks.Global together, the count of
-// running firefox containers plus the starts in flight must be below
-// Cfg.MaxRunning (ADR-0015). Any failure after the network exists runs the
-// stop sequence, so no half pair is left behind.
+// atomically: under Locks.User(u) and Locks.Global together, the size of the
+// union of the running users and the starts in flight must be below
+// Cfg.MaxRunning (ADR-0015). "Running" means both containers of the pair run
+// (controller ruling F71). Any failure after the network exists runs the stop
+// sequence, so no half pair is left behind.
 func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 	userLock := m.Locks.User(user)
 	userLock.Lock()
@@ -50,12 +55,17 @@ func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 		m.Locks.Global.Unlock()
 		return Started, nil
 	}
+	// The cap counts the union of running users and starts in flight, so a
+	// user in both for a moment is not double counted.
 	m.mu.Lock()
-	inFlight := len(m.starting)
-	if m.starting[user] {
-		inFlight--
+	reserved := make(map[string]bool, len(m.starting)+len(running))
+	for u := range m.starting {
+		reserved[u] = true
 	}
-	if len(running)+inFlight >= m.Cfg.MaxRunning {
+	for u := range running {
+		reserved[u] = true
+	}
+	if len(reserved) >= m.Cfg.MaxRunning {
 		m.mu.Unlock()
 		m.Locks.Global.Unlock()
 		return Busy, nil
@@ -80,9 +90,12 @@ func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 	proxyName := spec.Proxy.Name
 	firefoxName := spec.Firefox.Name
 
-	// Leftovers of an earlier session: inspect all three first, refuse
-	// foreign objects before removing anything, then remove ours
-	// (containers first so the network is empty).
+	// Leftovers of an earlier session: inspect all three first and refuse
+	// foreign objects (an error naming the object, nothing removed) before
+	// anything is touched. Objects of ours go through the stop sequence,
+	// because the desk may still be attached to the network when the
+	// Firefox died and a bare NetworkRemove would fail with the
+	// active-endpoints conflict.
 	net, netErr := m.Docker.NetworkInspect(ctx, netName)
 	proxy, proxyErr := m.Docker.ContainerInspect(ctx, proxyName)
 	firefox, firefoxErr := m.Docker.ContainerInspect(ctx, firefoxName)
@@ -107,29 +120,9 @@ func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 	} else if !errors.Is(firefoxErr, docker.ErrNotFound) {
 		return StartFailed, firefoxErr
 	}
-	for _, c := range []struct {
-		name    string
-		found   bool
-		running bool
-	}{
-		{proxyName, proxyErr == nil, proxy.Running},
-		{firefoxName, firefoxErr == nil, firefox.Running},
-	} {
-		if !c.found {
-			continue
-		}
-		if c.running {
-			if err := m.Docker.ContainerStop(ctx, c.name, stopTimeout); err != nil && !errors.Is(err, docker.ErrNotFound) {
-				return StartFailed, err
-			}
-		}
-		if err := m.Docker.ContainerRemove(ctx, c.name); err != nil && !errors.Is(err, docker.ErrNotFound) {
-			return StartFailed, err
-		}
-	}
-	if netErr == nil {
-		if err := m.Docker.NetworkRemove(ctx, netName); err != nil && !errors.Is(err, docker.ErrNotFound) {
-			return StartFailed, err
+	if netErr == nil || proxyErr == nil || firefoxErr == nil {
+		if err := m.stop(ctx, user); err != nil {
+			return m.failStart(ctx, user, err)
 		}
 	}
 
@@ -188,10 +181,14 @@ func (m *Manager) Start(ctx context.Context, user string) (StartResult, error) {
 	return Started, nil
 }
 
-// failStart runs the stop sequence (best effort, errors logged), clears the
+// failStart runs the stop sequence on a fresh context — the caller's ctx may
+// be the very reason the start failed (cancelled or timed out while the
+// collector closed the tab), and cleanup must still happen — clears the
 // recorded runtime and reports StartFailed with the cause.
 func (m *Manager) failStart(ctx context.Context, user string, cause error) (StartResult, error) {
-	if err := m.stop(ctx, user); err != nil {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+	if err := m.stop(cleanupCtx, user); err != nil {
 		m.logf("start %s failed (%v); cleanup: %v", user, cause, err)
 	}
 	if err := render.WriteRuntime(m.Cfg, user, nil); err != nil && !errors.Is(err, os.ErrNotExist) {

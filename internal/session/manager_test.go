@@ -157,22 +157,24 @@ func withRole(labels map[string]string, role string) map[string]string {
 	return out
 }
 
-// firefoxLabels returns the labels of a firefox container for user.
-func firefoxLabels(user, generation string) map[string]string {
-	return withRole(map[string]string{"desk.owner": "desk", "desk.user": user, "desk.generation": generation}, "firefox")
-}
-
-// startFirefox creates and starts a bare firefox container for user (used to
-// make Running() report the user without a full pair).
-func (f *fixture) startFirefox(t *testing.T, user string) {
+// startBare creates and starts a bare container with the given role labels
+// (no endpoints), used to make Running() report a (partial) pair.
+func (f *fixture) startBare(t *testing.T, name, role, user string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := f.fake.ContainerCreate(ctx, docker.ContainerSpec{Name: "desk-firefox-" + user, Labels: firefoxLabels(user, "tiktok-1.14.3")}); err != nil {
+	labels := withRole(map[string]string{"desk.owner": "desk", "desk.user": user, "desk.generation": "tiktok-1.14.3"}, role)
+	if _, err := f.fake.ContainerCreate(ctx, docker.ContainerSpec{Name: name, Labels: labels}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.fake.ContainerStart(ctx, "desk-firefox-"+user); err != nil {
+	if err := f.fake.ContainerStart(ctx, name); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// startFirefox creates and starts a bare firefox container for user.
+func (f *fixture) startFirefox(t *testing.T, user string) {
+	t.Helper()
+	f.startBare(t, "desk-firefox-"+user, "firefox", user)
 }
 
 // gone asserts every object of user's pair is absent from the Fake.

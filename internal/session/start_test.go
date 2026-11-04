@@ -102,13 +102,8 @@ func TestStartSequence(t *testing.T) {
 func TestStartBusyAtCap(t *testing.T) {
 	f := newFixture(t, 1, "alice", "bob")
 	ctx := context.Background()
-	// bob's firefox is already running.
-	if _, err := f.fake.ContainerCreate(ctx, docker.ContainerSpec{Name: "desk-firefox-bob", Labels: firefoxLabels("bob", "tiktok-1.14.3")}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.fake.ContainerStart(ctx, "desk-firefox-bob"); err != nil {
-		t.Fatal(err)
-	}
+	// bob's pair is fully running (both containers, F71).
+	f.runningPair(t, "bob", "tiktok-1.14.3")
 	before := len(f.fake.Calls)
 	res, err := f.m.Start(ctx, "alice")
 	if err != nil || res != Busy {
@@ -313,4 +308,212 @@ func TestStartHealthTimeout(t *testing.T) {
 		t.Fatalf("Start = %v, %v; want StartFailed with an error", res, err)
 	}
 	f.gone(t, "alice")
+}
+
+// assertRebuilt checks that exactly one network and two running containers of
+// user exist and the desk is connected to the network exactly once.
+func assertRebuilt(t *testing.T, f *fixture, user string) {
+	t.Helper()
+	ctx := context.Background()
+	nets, err := f.fake.NetworkList(ctx, map[string]string{"desk.user": user})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nets) != 1 {
+		t.Errorf("networks for %s = %d, want exactly 1", user, len(nets))
+	}
+	ctrs, err := f.fake.ContainerList(ctx, map[string]string{"desk.user": user})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrs) != 2 {
+		t.Errorf("containers for %s = %d, want exactly 2", user, len(ctrs))
+	}
+	for _, c := range ctrs {
+		if !c.Running {
+			t.Errorf("container %s is not running after the rebuild", c.Name)
+		}
+	}
+	self, err := f.fake.ContainerInspect(ctx, "deskself")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, n := range self.Networks {
+		if n == "net-"+user {
+			found = true
+		}
+	}
+	if !found || self.IPs["net-"+user] == "" {
+		t.Errorf("deskself not connected once to net-%s: networks = %v, ips = %v", user, self.Networks, self.IPs)
+	}
+}
+
+func TestStartRebuildsAfterFirefoxDied(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	ctx := context.Background()
+	if res, err := f.m.Start(ctx, "alice"); res != Started || err != nil {
+		t.Fatalf("first Start = %v, %v; want Started, nil", res, err)
+	}
+	f.fake.SetExited("desk-firefox-alice", 1)
+	// The desk is still attached to net-alice; the leftover path must run
+	// the stop sequence (disconnect included) before rebuilding.
+	res, err := f.m.Start(ctx, "alice")
+	if res != Started || err != nil {
+		t.Fatalf("second Start = %v, %v; want Started, nil", res, err)
+	}
+	assertRebuilt(t, f, "alice")
+	connects, disconnects := 0, 0
+	for _, c := range f.fake.Calls {
+		if c == "NetworkConnect net-alice deskself" {
+			connects++
+		}
+		if c == "NetworkDisconnect net-alice deskself" {
+			disconnects++
+		}
+	}
+	if connects != 2 || disconnects != 1 {
+		t.Errorf("connects = %d, disconnects = %d; want 2 and 1 (leftover path disconnected before removing)", connects, disconnects)
+	}
+}
+
+func TestStartRebuildsAfterProxyDied(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	ctx := context.Background()
+	if res, err := f.m.Start(ctx, "alice"); res != Started || err != nil {
+		t.Fatalf("first Start = %v, %v; want Started, nil", res, err)
+	}
+	f.fake.SetExited("desk-proxy-alice", 1)
+	// A Firefox running beside an exited proxy is a leftover: the pair is
+	// rebuilt whole (F71).
+	res, err := f.m.Start(ctx, "alice")
+	if res != Started || err != nil {
+		t.Fatalf("second Start = %v, %v; want Started, nil", res, err)
+	}
+	assertRebuilt(t, f, "alice")
+}
+
+// ctxClient wraps the Fake and fails every call whose context is done, so the
+// test can observe whether cleanup ran on the caller's (cancelled) ctx or on a
+// fresh one.
+type ctxClient struct{ docker.Client }
+
+func (c ctxClient) NetworkCreate(ctx context.Context, name string, labels map[string]string) (docker.Network, error) {
+	if err := ctx.Err(); err != nil {
+		return docker.Network{}, err
+	}
+	return c.Client.NetworkCreate(ctx, name, labels)
+}
+
+func (c ctxClient) NetworkInspect(ctx context.Context, name string) (docker.Network, error) {
+	if err := ctx.Err(); err != nil {
+		return docker.Network{}, err
+	}
+	return c.Client.NetworkInspect(ctx, name)
+}
+
+func (c ctxClient) NetworkList(ctx context.Context, labels map[string]string) ([]docker.Network, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.Client.NetworkList(ctx, labels)
+}
+
+func (c ctxClient) NetworkRemove(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Client.NetworkRemove(ctx, name)
+}
+
+func (c ctxClient) NetworkConnect(ctx context.Context, network, container string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Client.NetworkConnect(ctx, network, container)
+}
+
+func (c ctxClient) NetworkDisconnect(ctx context.Context, network, container string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Client.NetworkDisconnect(ctx, network, container)
+}
+
+func (c ctxClient) ContainerCreate(ctx context.Context, spec docker.ContainerSpec) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return c.Client.ContainerCreate(ctx, spec)
+}
+
+func (c ctxClient) ContainerStart(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Client.ContainerStart(ctx, name)
+}
+
+func (c ctxClient) ContainerStop(ctx context.Context, name string, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Client.ContainerStop(ctx, name, timeout)
+}
+
+func (c ctxClient) ContainerRemove(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Client.ContainerRemove(ctx, name)
+}
+
+func (c ctxClient) ContainerInspect(ctx context.Context, name string) (docker.Container, error) {
+	if err := ctx.Err(); err != nil {
+		return docker.Container{}, err
+	}
+	return c.Client.ContainerInspect(ctx, name)
+}
+
+func (c ctxClient) ContainerList(ctx context.Context, labels map[string]string) ([]docker.Container, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.Client.ContainerList(ctx, labels)
+}
+
+func (c ctxClient) Exec(ctx context.Context, container string, cmd []string, env []string, stdin []byte) (docker.Exec, error) {
+	if err := ctx.Err(); err != nil {
+		return docker.Exec{}, err
+	}
+	return c.Client.Exec(ctx, container, cmd, env, stdin)
+}
+
+func TestStartCancelledCtxStillCleansUp(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.m.Docker = ctxClient{f.fake}
+	ctx, cancel := context.WithCancel(context.Background())
+	// The probe blocks until the caller's ctx is done, so the start fails
+	// BECAUSE the ctx was cancelled.
+	f.m.Probe = func(pctx context.Context, _ string) bool {
+		<-pctx.Done()
+		return false
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	res, err := f.m.Start(ctx, "alice")
+	if res != StartFailed || err == nil {
+		t.Fatalf("Start = %v, %v; want StartFailed with an error", res, err)
+	}
+	// Cleanup ran on a fresh context: nothing is left behind.
+	f.gone(t, "alice")
+	_, rt, rerr := render.ReadPair(f.cfg, "alice")
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rt != nil {
+		t.Errorf("runtime after cancelled start = %+v, want nil", rt)
+	}
 }

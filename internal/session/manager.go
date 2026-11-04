@@ -58,26 +58,42 @@ type Row struct {
 	State   provision.State
 }
 
-// Running counts the running firefox containers by label, keyed by their
-// desk.user label.
+// Running reports the users whose pair is fully running — BOTH containers,
+// proxy and firefox (controller ruling F71: "running" means both) — keyed by
+// the desk.user label of the containers.
 func (m *Manager) Running(ctx context.Context) (map[string]bool, error) {
-	containers, err := m.Docker.ContainerList(ctx, map[string]string{
-		"desk.owner": render.Owner,
-		"desk.role":  "firefox",
-	})
+	containers, err := m.Docker.ContainerList(ctx, map[string]string{"desk.owner": render.Owner})
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]bool, len(containers))
+	type pairState struct{ proxy, firefox bool }
+	byUser := make(map[string]*pairState, len(containers))
 	for _, c := range containers {
-		if c.Running {
-			out[c.Labels["desk.user"]] = true
+		if !c.Running {
+			continue
+		}
+		s, ok := byUser[c.Labels["desk.user"]]
+		if !ok {
+			s = &pairState{}
+			byUser[c.Labels["desk.user"]] = s
+		}
+		switch c.Labels["desk.role"] {
+		case "proxy":
+			s.proxy = true
+		case "firefox":
+			s.firefox = true
+		}
+	}
+	out := make(map[string]bool, len(byUser))
+	for user, s := range byUser {
+		if s.proxy && s.firefox {
+			out[user] = true
 		}
 	}
 	return out, nil
 }
 
-// IsRunning reports whether user's firefox container is running.
+// IsRunning reports whether both of user's pair containers are running.
 func (m *Manager) IsRunning(ctx context.Context, user string) bool {
 	running, err := m.Running(ctx)
 	if err != nil {
@@ -86,8 +102,8 @@ func (m *Manager) IsRunning(ctx context.Context, user string) bool {
 	return running[user]
 }
 
-// Ready reports whether user's pair is running and the Firefox's noVNC port
-// answers.
+// Ready reports whether user's pair is fully running (both containers) and
+// the Firefox's noVNC port answers.
 func (m *Manager) Ready(ctx context.Context, user string) bool {
 	if !m.IsRunning(ctx, user) {
 		return false

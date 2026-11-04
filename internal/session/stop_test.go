@@ -44,20 +44,15 @@ func TestStopRemovesExactlyThreeObjects(t *testing.T) {
 		t.Errorf("runtime after stop = %+v, want nil", rt)
 	}
 
-	// A second Stop is a no-op returning nil: only inspects and
-	// not-found-returning calls are recorded, nothing is touched.
+	// A second Stop is a no-op returning nil: it records only the inspects,
+	// no ContainerStop/ContainerRemove/NetworkRemove/NetworkDisconnect call.
 	before2 := len(f.fake.Calls)
 	if err := f.m.Stop(ctx, "alice"); err != nil {
 		t.Fatalf("second Stop: %v", err)
 	}
 	for _, c := range f.fake.Calls[before2:] {
-		switch {
-		case strings.HasPrefix(c, "NetworkInspect"), strings.HasPrefix(c, "ContainerInspect"),
-			strings.HasPrefix(c, "ContainerStop"), strings.HasPrefix(c, "ContainerRemove"),
-			strings.HasPrefix(c, "NetworkDisconnect"), strings.HasPrefix(c, "NetworkRemove"):
-			// allowed: inspects and not-found calls
-		default:
-			t.Errorf("second Stop made an unexpected call %q: %v", c, f.fake.Calls[before2:])
+		if !strings.HasPrefix(c, "NetworkInspect") && !strings.HasPrefix(c, "ContainerInspect") {
+			t.Errorf("second Stop made a non-inspect call %q: %v", c, f.fake.Calls[before2:])
 		}
 	}
 	f.gone(t, "alice")

@@ -13,6 +13,13 @@ const defaultHealthWait = 10 * time.Second
 // probePollInterval is how often the proxy health endpoint is polled.
 const probePollInterval = 250 * time.Millisecond
 
+// defaultProbeClient answers the default Probe. Its transport has Proxy nil,
+// so the environment's HTTP_PROXY is never used; the timeout is 2 s.
+var defaultProbeClient = &http.Client{
+	Transport: &http.Transport{Proxy: nil},
+	Timeout:   2 * time.Second,
+}
+
 // probe reports whether url answers. A nil Probe field means a GET with a
 // 2 s timeout, true on 200.
 func (m *Manager) probe(ctx context.Context, url string) bool {
@@ -22,13 +29,11 @@ func (m *Manager) probe(ctx context.Context, url string) bool {
 	if err := ctx.Err(); err != nil {
 		return false
 	}
-	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := defaultProbeClient.Do(req)
 	if err != nil {
 		return false
 	}
