@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/docker"
@@ -87,11 +88,13 @@ func loginServer(t *testing.T, mode string, seen *map[string]string) *httptest.S
 			}
 		}
 		if mode == "nocookie" {
+			w.Header().Set("Location", "/")
 			w.WriteHeader(http.StatusFound)
 			return
 		}
 		if r.PostForm.Get("password") == "pw-alice" {
 			w.Header().Add("Set-Cookie", "remember_token=tok-abc; Path=/")
+			w.Header().Set("Location", "/")
 			w.WriteHeader(http.StatusFound)
 			return
 		}
@@ -126,6 +129,17 @@ func TestSetupUnreachable(t *testing.T) {
 	_, err := (&Client{FrontendURL: closedURL(t)}).SetupPending(context.Background())
 	if err == nil || !strings.HasPrefix(err.Error(), "4CAT unreachable:") {
 		t.Errorf("SetupPending(closed) error = %v; want prefix \"4CAT unreachable:\"", err)
+	}
+}
+
+func TestSetupPendingBadStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	_, err := (&Client{FrontendURL: srv.URL}).SetupPending(context.Background())
+	if err == nil || err.Error() != "unexpected setup page status 502" {
+		t.Errorf("SetupPending(502) error = %v; want \"unexpected setup page status 502\"", err)
 	}
 }
 
@@ -247,9 +261,11 @@ func TestSetAdminNoAccount(t *testing.T) {
 
 func TestLoginTokenOK(t *testing.T) {
 	ctx := context.Background()
+	// A caller-supplied HTTP client is hardened too: redirects refused, so
+	// the 302 with Location: / is read as-is and its cookie is returned.
 	var seen map[string]string
 	srv := loginServer(t, "ok", &seen)
-	c := &Client{FrontendURL: srv.URL}
+	c := &Client{FrontendURL: srv.URL, HTTP: &http.Client{}}
 
 	token, err := c.LoginToken(ctx, "alice", "pw-alice")
 	if err != nil || token != "tok-abc" {
@@ -310,6 +326,20 @@ func TestFindContainersByLabels(t *testing.T) {
 	ctx := context.Background()
 	f := newFakeWith4CAT(t)
 
+	// A `docker compose run` oneoff of the backend service is ignored.
+	oneoff := docker.ContainerSpec{
+		Name:  "desk-4cat-backend-run-1",
+		Image: "4cat:1",
+		Labels: map[string]string{
+			"com.docker.compose.project": "desk",
+			"com.docker.compose.service": "4cat-backend",
+			"com.docker.compose.oneoff":  "True",
+		},
+	}
+	if _, err := f.ContainerCreate(ctx, oneoff); err != nil {
+		t.Fatalf("ContainerCreate oneoff: %v", err)
+	}
+
 	backend, db, err := FindContainers(ctx, f)
 	if err != nil {
 		t.Fatalf("FindContainers error: %v", err)
@@ -343,6 +373,9 @@ func TestLazyLookup(t *testing.T) {
 	if err := c.CreateAccount(ctx, "alice", "s3cret", false); err != nil {
 		t.Errorf("CreateAccount(lazy) error: %v", err)
 	}
+	if len(f.Execs) != 2 {
+		t.Fatalf("len(Execs) = %d; want 2", len(f.Execs))
+	}
 	if f.Execs[0].Container != dbName || f.Execs[1].Container != backendName {
 		t.Errorf("lazy exec containers = %q, %q; want %q then %q",
 			f.Execs[0].Container, f.Execs[1].Container, dbName, backendName)
@@ -364,6 +397,46 @@ func TestLazyLookup(t *testing.T) {
 	}
 	if len(empty.Execs) != 0 {
 		t.Errorf("Execs recorded without containers = %v; want none", empty.Execs)
+	}
+}
+
+func TestLazyLookupConcurrent(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeWith4CAT(t)
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: "1\n"}
+	c := &Client{Docker: f}
+
+	const n = 20
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ok, err := c.AccountExists(ctx, "alice")
+			if err == nil && !ok {
+				err = errors.New("AccountExists returned false")
+			}
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: %v", i, err)
+		}
+	}
+	if c.Backend != backendName || c.DB != dbName {
+		t.Errorf("after concurrent lookup Backend, DB = %q, %q; want %q, %q", c.Backend, c.DB, backendName, dbName)
+	}
+	lists := 0
+	for _, call := range f.Calls {
+		if call == "ContainerList" {
+			lists++
+		}
+	}
+	if lists != 2 {
+		t.Errorf("ContainerList calls = %d; want 2 (one pair, the lookup ran once)", lists)
 	}
 }
 
@@ -404,5 +477,16 @@ func TestNewPassword(t *testing.T) {
 	}
 	if a == b {
 		t.Errorf("two NewPassword() calls both = %q; want different", a)
+	}
+	// A leading '-' or '_' would break create_user.py's -p argv; 2000 draws
+	// must never produce one.
+	for i := 0; i < 2000; i++ {
+		p := NewPassword()
+		if len(p) != 32 {
+			t.Fatalf("NewPassword() = %q, len %d; want 32", p, len(p))
+		}
+		if p[0] == '-' || p[0] == '_' {
+			t.Fatalf("NewPassword() = %q starts with %q; want neither '-' nor '_'", p, p[0])
+		}
 	}
 }

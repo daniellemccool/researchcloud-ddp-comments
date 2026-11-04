@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/docker"
@@ -57,19 +58,38 @@ type Client struct {
 	Backend, DB string
 	FrontendURL string
 	HTTP        *http.Client
+
+	mu          sync.Mutex   // guards Backend, DB and defaultHTTP
+	defaultHTTP *http.Client // the nil-HTTP client, built once
 }
 
-// httpClient returns c.HTTP, or the default no-redirect 15 s client.
+// httpClient returns the client to talk to the 4CAT frontend with: a shallow
+// copy of c.HTTP when the caller supplied one, with redirects always refused
+// and a 15 s timeout when it has none; otherwise the default client, built
+// once under c.mu. A redirect is never followed: the login form carries the
+// password.
 func (c *Client) httpClient() *http.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		cp := *c.HTTP
+		cp.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
-		},
+		}
+		if cp.Timeout == 0 {
+			cp.Timeout = 15 * time.Second
+		}
+		return &cp
 	}
+	if c.defaultHTTP == nil {
+		c.defaultHTTP = &http.Client{
+			Timeout: 15 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	}
+	return c.defaultHTTP
 }
 
 // checkUser validates user against the username grammar. It runs before any
@@ -123,7 +143,10 @@ func (c *Client) SetupPending(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("4CAT unreachable: %T", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("unexpected setup page status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return false, err
 	}
@@ -221,11 +244,18 @@ func (c *Client) LoginToken(ctx context.Context, user, password string) (string,
 }
 
 // NewPassword returns a fresh random password: 24 bytes from crypto/rand,
-// base64.RawURLEncoding (32 URL-safe characters).
+// base64.RawURLEncoding (32 URL-safe characters). The first character is
+// never '-' or '_', so the password is always a safe argv element for
+// create_user.py's -p flag (a leading '-' would make argparse fail).
 func NewPassword() string {
-	var b [24]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("crypto/rand failed: " + err.Error())
+	for {
+		var b [24]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			panic("crypto/rand failed: " + err.Error())
+		}
+		s := base64.RawURLEncoding.EncodeToString(b[:])
+		if s[0] != '-' && s[0] != '_' {
+			return s
+		}
 	}
-	return base64.RawURLEncoding.EncodeToString(b[:])
 }

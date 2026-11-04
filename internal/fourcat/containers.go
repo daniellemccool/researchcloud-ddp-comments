@@ -15,6 +15,7 @@ var errContainersNotFound = errors.New("4CAT containers not found")
 const (
 	composeProjectLabel = "com.docker.compose.project"
 	composeServiceLabel = "com.docker.compose.service"
+	composeOneoffLabel  = "com.docker.compose.oneoff"
 	composeProject      = "desk"
 )
 
@@ -33,8 +34,9 @@ func FindContainers(ctx context.Context, d docker.Client) (backend, db string, e
 	return backend, db, nil
 }
 
-// findOne returns the name of the single container carrying the compose
-// project label and the given service label.
+// findOne returns the name of the single service container carrying the
+// compose project label and the given service label. Containers labelled
+// oneoff (a `docker compose run` side container) are ignored before counting.
 func findOne(ctx context.Context, d docker.Client, service string) (string, error) {
 	list, err := d.ContainerList(ctx, map[string]string{
 		composeProjectLabel: composeProject,
@@ -43,37 +45,62 @@ func findOne(ctx context.Context, d docker.Client, service string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	if len(list) != 1 {
+	var found []docker.Container
+	for _, ctr := range list {
+		if ctr.Labels[composeOneoffLabel] == "True" {
+			continue
+		}
+		found = append(found, ctr)
+	}
+	if len(found) != 1 {
 		return "", errContainersNotFound
 	}
-	return list[0].Name, nil
+	return found[0].Name, nil
 }
 
-// lookup finds the 4CAT containers and stores them on the client.
-func (c *Client) lookup(ctx context.Context) error {
-	backend, db, err := FindContainers(ctx, c.Docker)
-	if err != nil {
-		return err
+// lookupLocked finds the still-empty container names and stores them on the
+// client; a name the caller set is kept. The caller must hold c.mu. A failed
+// lookup stores nothing, so the next call retries.
+func (c *Client) lookupLocked(ctx context.Context) error {
+	if c.Backend == "" {
+		backend, err := findOne(ctx, c.Docker, "4cat-backend")
+		if err != nil {
+			return err
+		}
+		c.Backend = backend
 	}
-	c.Backend, c.DB = backend, db
+	if c.DB == "" {
+		db, err := findOne(ctx, c.Docker, "4cat-db")
+		if err != nil {
+			return err
+		}
+		c.DB = db
+	}
 	return nil
 }
 
 // backend returns the backend container name, looking it up lazily when
-// unset. A failed lookup is returned without anything else being done.
+// unset. The empty-check, the lookup and the read all happen under c.mu, so
+// concurrent provisioners cannot race on the names; a failed lookup is
+// returned without anything else being done.
 func (c *Client) backend(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.Backend == "" {
-		if err := c.lookup(ctx); err != nil {
+		if err := c.lookupLocked(ctx); err != nil {
 			return "", err
 		}
 	}
 	return c.Backend, nil
 }
 
-// db returns the database container name, looking it up lazily when unset.
+// db returns the database container name, looking it up lazily when unset,
+// under the same lock as backend.
 func (c *Client) db(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.DB == "" {
-		if err := c.lookup(ctx); err != nil {
+		if err := c.lookupLocked(ctx); err != nil {
 			return "", err
 		}
 	}
