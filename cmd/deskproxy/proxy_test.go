@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -300,6 +302,132 @@ func TestLiveProxyHTTP2BothLegs(t *testing.T) {
 	}
 	if !strings.Contains(recs[0], `"item":{"id":1,"t":"a<b"}`) || !strings.Contains(recs[0], `"cursor":5`) {
 		t.Errorf("record: %s", recs[0])
+	}
+}
+
+// TestLiveProxyHTTP2BoundaryRefuses pins ADR-0001 under h2: inside a tunnel
+// CONNECTed to an allowed host, each h2 stream is classified by its own
+// :authority and path, so a stream naming localhost or another .desk name,
+// and a fourcat.desk stream on a path outside the allowlist, are answered
+// 403 by the proxy itself and never reach an upstream (review M3).
+func TestLiveProxyHTTP2BoundaryRefuses(t *testing.T) {
+	var mu sync.Mutex
+	upstreamHits, fourcatHits := 0, 0
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		upstreamHits++
+		mu.Unlock()
+		_, _ = io.WriteString(w, "upstream")
+	}))
+	upstream.EnableHTTP2 = true
+	upstream.StartTLS()
+	defer upstream.Close()
+	fourcat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		fourcatHits++
+		mu.Unlock()
+		_, _ = io.WriteString(w, "4cat")
+	}))
+	defer fourcat.Close()
+
+	capPath := filepath.Join(t.TempDir(), "captures.ndjson")
+	out, err := openRecordWriter(capPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxy(testPlatform(), Meta{User: "u", Session: "s", Platform: "test", Kind: "video"}, out, newBoundary("", newTokenFile(filepath.Join(t.TempDir(), "token")), mustURL(fourcat.URL), nil))
+	caPool := useTestCA(t)
+	upAddr := upstream.Listener.Addr().String()
+	proxy.Tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, upAddr)
+	}
+	upPool := x509.NewCertPool()
+	upPool.AddCert(upstream.Certificate())
+	proxy.Tr.TLSClientConfig = &tls.Config{RootCAs: upPool, ServerName: "example.com", MinVersion: tls.VersionTLS12}
+	proxySrv := httptest.NewServer(proxy)
+	defer proxySrv.Close()
+
+	logs := &lockedBuf{}
+	log.SetOutput(logs)
+	defer log.SetOutput(os.Stderr)
+
+	// Every connection the client opens, whatever URL it is for, is one
+	// tunnel CONNECTed to the allowed capture.example, with h2 negotiated
+	// against the proxy's MITM certificate for capture.example. The request
+	// URL's host therefore reaches the proxy only as the stream's :authority.
+	var connects []string
+	tunnel := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		raw, err := (&net.Dialer{}).DialContext(ctx, network, proxySrv.Listener.Addr().String())
+		if err != nil {
+			return nil, err
+		}
+		if _, err := io.WriteString(raw, "CONNECT capture.example:443 HTTP/1.1\r\nHost: capture.example:443\r\n\r\n"); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		br := bufio.NewReader(raw)
+		resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+		if err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = raw.Close()
+			return nil, fmt.Errorf("CONNECT: %s", resp.Status)
+		}
+		mu.Lock()
+		connects = append(connects, "capture.example:443")
+		mu.Unlock()
+		tc := tls.Client(raw, &tls.Config{RootCAs: caPool, ServerName: "capture.example", NextProtos: []string{"h2"}})
+		if err := tc.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		if p := tc.ConnectionState().NegotiatedProtocol; p != "h2" {
+			_ = tc.Close()
+			return nil, fmt.Errorf("negotiated %q, want h2", p)
+		}
+		return tc, nil
+	}
+	tr := &http.Transport{DialTLSContext: tunnel, ForceAttemptHTTP2: true}
+	t.Cleanup(tr.CloseIdleConnections)
+	client := &http.Client{Transport: tr}
+
+	for _, c := range []struct{ method, url string }{
+		{http.MethodGet, "https://localhost/api/small"},
+		{http.MethodGet, "https://other.desk/api/small"},
+		{http.MethodGet, "https://fourcat.desk/api/nope/"},
+		{http.MethodPost, "https://fourcat.desk/api/check-query/"}, // the right path, the wrong method
+	} {
+		req, _ := http.NewRequest(c.method, c.url, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Errorf("%s %s: %v", c.method, c.url, err)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.Proto != "HTTP/2.0" {
+			t.Errorf("%s %s: proto = %q, want HTTP/2.0 (the stream must be h2)", c.method, c.url, resp.Proto)
+		}
+		if resp.StatusCode != http.StatusForbidden || string(body) != deniedBody {
+			t.Errorf("%s %s: %d %q, want 403 %q", c.method, c.url, resp.StatusCode, body, deniedBody)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if upstreamHits != 0 || fourcatHits != 0 {
+		t.Errorf("refused streams reached an upstream: capture.example %d, 4CAT %d", upstreamHits, fourcatHits)
+	}
+	if len(connects) == 0 {
+		t.Error("no tunnel was CONNECTed; the streams did not go through the h2 MITM path")
+	}
+	data, err := os.ReadFile(capPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != "" {
+		t.Errorf("records written for refused streams: %s", data)
 	}
 }
 
