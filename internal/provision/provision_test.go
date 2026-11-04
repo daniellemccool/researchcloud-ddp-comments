@@ -101,12 +101,14 @@ func newTestEnv(t *testing.T) *testEnv {
 		FirefoxImage:       "firefox:1",
 		ZeeschuimerVersion: "1.14.3",
 	}
-	// The extracted release template (deploy/lib.sh install_template) and
-	// the platform's hide-media stylesheet.
+	// The extracted release template (deploy/lib.sh install_template): the
+	// artifact tars the sanitised profile's entries at the TOP level, so the
+	// release directory is flat — no profile/ subdirectory.
 	rel := filepath.Join(root, "templates", "release", generation)
 	writeFile(t, filepath.Join(rel, "manifest.json"), `{"generation":"`+generation+`"}`)
-	writeFile(t, filepath.Join(rel, "profile", "prefs.js"), "user_pref(\"app.update.auto\", false);\n")
-	writeFile(t, filepath.Join(rel, "profile", "extensions", "zeeschuimer.xpi"), "xpi-bytes")
+	writeFile(t, filepath.Join(rel, "prefs.js"), "user_pref(\"app.update.auto\", false);\n")
+	writeFile(t, filepath.Join(rel, "extensions", "x.xpi"), "xpi-bytes")
+	writeFile(t, filepath.Join(rel, "storage", "default", "placeholder"), "")
 	writeFile(t, filepath.Join(root, "platform", "userContent.css"), "/* hide media */\n")
 
 	reg := &registry.Registry{Path: filepath.Join(root, "registry.tsv"), MaxSessions: cfg.MaxSessions}

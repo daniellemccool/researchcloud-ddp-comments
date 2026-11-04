@@ -151,8 +151,10 @@ func (p *Provisioner) stepDirs(user string) error {
 	return nil
 }
 
-// stepTemplate copies the verified release template's profile into the
-// user's firefox dir (via CopyProfile) and applies the hide-media stylesheet.
+// stepTemplate copies the verified release template (the extracted release
+// directory IS the profile: its entries, minus manifest.json, become the
+// user's profile/) into the user's firefox dir via copyProfile, and applies
+// the hide-media stylesheet.
 func (p *Provisioner) stepTemplate(user string) error {
 	firefoxDir := filepath.Join(p.Cfg.DeskRoot, "state", "firefox", user)
 	artifact := filepath.Join("templates", "release", render.Generation(p.Cfg))
