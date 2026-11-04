@@ -66,6 +66,7 @@ type fourcatBackend struct {
 	hosts []string
 	xfh   []string
 	xfp   []string
+	hdrs  []http.Header
 }
 
 func newFourcatBackend(t *testing.T) *fourcatBackend {
@@ -77,6 +78,7 @@ func newFourcatBackend(t *testing.T) *fourcatBackend {
 		b.hosts = append(b.hosts, r.Host)
 		b.xfh = append(b.xfh, r.Header.Get("X-Forwarded-Host"))
 		b.xfp = append(b.xfp, r.Header.Get("X-Forwarded-Proto"))
+		b.hdrs = append(b.hdrs, r.Header.Clone())
 		b.mu.Unlock()
 		if r.URL.Path == "/redirect" {
 			http.Redirect(w, r, "/after-login", http.StatusFound)
@@ -147,7 +149,11 @@ func TestFourcatProxyHostAndPrefix(t *testing.T) {
 	if len(backend.xfp) != 1 || backend.xfp[0] != "https" {
 		t.Errorf("X-Forwarded-Proto = %v, want https", backend.xfp)
 	}
+	hdrs := append([]http.Header(nil), backend.hdrs...)
 	backend.mu.Unlock()
+	// The gate secret and identity headers never reach 4CAT (F74); the
+	// inbound request carried them (doReq sets them via SetTestHeaders).
+	assertNoIdentityHeaders(t, hdrs)
 
 	// A backend redirect reaches the browser unmodified.
 	rec = doReq(t, srv, http.MethodGet, "root", adminRole, "/fourcat/redirect", nil, nil)

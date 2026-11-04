@@ -225,6 +225,7 @@ func claimedIn(view desklog.View, kind, id string) bool {
 // with the Deps Admin handler still nil the route is 404 (a later task
 // supplies it).
 func (h *handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
+	setAdminHeaders(w)
 	id := identity(r)
 	if !id.Admin {
 		h.forbidden(w)
@@ -240,6 +241,7 @@ func (h *handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 // serveAdminTree is every other /desk/admin/ path: admins only, 404 until a
 // later task supplies the handlers.
 func (h *handler) serveAdminTree(w http.ResponseWriter, r *http.Request) {
+	setAdminHeaders(w)
 	if !identity(r).Admin {
 		h.forbidden(w)
 		return

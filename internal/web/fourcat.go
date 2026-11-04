@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strings"
+
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 )
 
 // fourcatPrefix is the mount path stripped before forwarding.
@@ -53,6 +55,8 @@ func NewFourcatProxy(fqdn string) *FourcatProxy {
 			pr.Out.Header.Set("X-Forwarded-Host", p.fqdn)
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 			pr.Out.Host = p.fqdn
+			// The gate secret and identity headers never reach 4CAT (F74).
+			access.StripIdentityHeaders(pr.Out.Header)
 		},
 	}
 	return p

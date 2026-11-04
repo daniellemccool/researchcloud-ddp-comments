@@ -6,8 +6,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"strings"
+
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 )
 
 // runningChecker is what the relay needs of *session.Manager (controller
@@ -42,7 +43,6 @@ type Relay struct {
 // proxy's ErrorHandler.
 func NewRelay(s runningChecker) *Relay {
 	r := &Relay{running: s}
-	target := &url.URL{Scheme: "http", Host: ""} // host set per request from the identity
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if r.Dial != nil {
@@ -58,14 +58,19 @@ func NewRelay(s runningChecker) *Relay {
 		// ResponseHeaderTimeout, the screen may take a while to answer.
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
+			// Request-local values only: no shared mutable state, so
+			// concurrent requests can never cross targets (ADR-0008).
 			id := identity(pr.In)
-			target.Host = "desk-firefox-" + id.User + ":5800"
-			pr.Out.URL.Scheme = target.Scheme
-			pr.Out.URL.Host = target.Host
+			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Host = "desk-firefox-" + id.User + ":5800"
+			pr.Out.Host = pr.Out.URL.Host
 			// /desk/vnc/ → /, /desk/vnc/websockify → /websockify; the query
 			// is preserved (Out is a clone of In).
 			pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, vncPrefix)
 			pr.Out.URL.RawPath = ""
+			// The gate secret and identity headers never reach the
+			// Firefox container (F74).
+			access.StripIdentityHeaders(pr.Out.Header)
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			log.Printf("web: relay: %v", err)

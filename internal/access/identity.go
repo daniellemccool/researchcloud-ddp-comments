@@ -87,3 +87,13 @@ func SetTestHeaders(r *http.Request, user, roles, gate string) {
 	r.Header.Set(headerRoles, roles)
 	r.Header.Set(headerGate, gate)
 }
+
+// StripIdentityHeaders deletes the three identity headers from h. The gated
+// listener calls it on the headers it forwards to the proxied backends (the
+// Firefox containers and 4CAT), so the gate secret and the identity never
+// leave the desk. The header names stay inside this package (ADR-0003).
+func StripIdentityHeaders(h http.Header) {
+	h.Del(headerUser)
+	h.Del(headerRoles)
+	h.Del(headerGate)
+}

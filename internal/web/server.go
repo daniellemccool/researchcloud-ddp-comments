@@ -90,6 +90,7 @@ func New(d Deps) *http.Server {
 	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)   // nil Admin handler → 404
 	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin) // nil Admin handler → 404
 	mux.HandleFunc("GET /desk/admin", func(w http.ResponseWriter, r *http.Request) {
+		setAdminHeaders(w)                                               // the 301 answer carries the admin headers too
 		http.Redirect(w, r, "/desk/admin/", http.StatusMovedPermanently) // no-slash → 301
 	})
 	mux.HandleFunc("/desk/admin/", h.serveAdminTree) // admins only, else 404

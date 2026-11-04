@@ -2,13 +2,14 @@ package web
 
 import (
 	"bytes"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
@@ -44,7 +45,7 @@ func newAdminServer(t *testing.T) (*http.Server, string) {
 
 // uploadBody builds a multipart form with one file part (field may be ""
 // for no part at all) and returns (content-type, body).
-func uploadBody(t *testing.T, field, content string) (string, io.Reader) {
+func uploadBody(t *testing.T, field, content string) (string, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -64,9 +65,16 @@ func uploadBody(t *testing.T, field, content string) (string, io.Reader) {
 }
 
 // postPool sends POST /desk/admin/pool as the admin with the extra headers;
-// contentLength, when non-nil, overrides the request's Content-Length field
-// (the header itself is never set by httptest.NewRequest).
-func postPool(t *testing.T, srv *http.Server, hdrs map[string]string, ctype string, body io.Reader, contentLength *int64) *httptest.ResponseRecorder {
+// the Content-Length header is set explicitly from the body (the handler
+// reads only the header).
+func postPool(t *testing.T, srv *http.Server, hdrs map[string]string, ctype string, body *bytes.Buffer) *httptest.ResponseRecorder {
+	t.Helper()
+	return postPoolCL(t, srv, hdrs, ctype, body, strconv.Itoa(body.Len()))
+}
+
+// postPoolCL is postPool with an explicit Content-Length header value; cl ==
+// "" sends no Content-Length header at all.
+func postPoolCL(t *testing.T, srv *http.Server, hdrs map[string]string, ctype string, body *bytes.Buffer, cl string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/desk/admin/pool", body)
 	access.SetTestHeaders(req, "root", adminRole, testGate)
@@ -76,8 +84,8 @@ func postPool(t *testing.T, srv *http.Server, hdrs map[string]string, ctype stri
 	for k, v := range hdrs {
 		req.Header.Set(k, v)
 	}
-	if contentLength != nil {
-		req.ContentLength = *contentLength
+	if cl != "" {
+		req.Header.Set("Content-Length", cl)
 	}
 	rec := httptest.NewRecorder()
 	srv.Handler.ServeHTTP(rec, req)
@@ -106,7 +114,7 @@ func TestAdminHeaders(t *testing.T) {
 	}
 	// The same three headers on a 403 from the admin handler (bad CSRF).
 	ctype, body := uploadBody(t, "file", "id\n1\n")
-	rec = postPool(t, srv, map[string]string{"Sec-Fetch-Site": "cross-site"}, ctype, body, nil)
+	rec = postPool(t, srv, map[string]string{"Sec-Fetch-Site": "cross-site"}, ctype, body)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-site POST: status = %d, want 403", rec.Code)
 	}
@@ -126,13 +134,13 @@ func TestAdminCSRF(t *testing.T) {
 
 	// Sec-Fetch-Site: same-origin → accepted (303 after the upload).
 	ctype, body := uploadBody(t, "file", "id\n1\n")
-	rec := postPool(t, srv, map[string]string{"Sec-Fetch-Site": "same-origin"}, ctype, body, nil)
+	rec := postPool(t, srv, map[string]string{"Sec-Fetch-Site": "same-origin"}, ctype, body)
 	if rec.Code != http.StatusSeeOther {
 		t.Errorf("same-origin: status = %d, want 303 (body %q)", rec.Code, rec.Body.String())
 	}
 	// Sec-Fetch-Site: cross-site → refused.
 	ctype, body = uploadBody(t, "file", "id\n1\n")
-	rec = postPool(t, srv, map[string]string{"Sec-Fetch-Site": "cross-site"}, ctype, body, nil)
+	rec = postPool(t, srv, map[string]string{"Sec-Fetch-Site": "cross-site"}, ctype, body)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("cross-site: status = %d, want 403", rec.Code)
 	}
@@ -141,19 +149,19 @@ func TestAdminCSRF(t *testing.T) {
 	}
 	// No Sec-Fetch-Site, Origin matching Host (httptest's Host is example.com) → accepted.
 	ctype, body = uploadBody(t, "file", "id\n1\n")
-	rec = postPool(t, srv, map[string]string{"Origin": "https://example.com"}, ctype, body, nil)
+	rec = postPool(t, srv, map[string]string{"Origin": "https://example.com"}, ctype, body)
 	if rec.Code != http.StatusSeeOther {
 		t.Errorf("matching Origin: status = %d, want 303", rec.Code)
 	}
 	// No Sec-Fetch-Site, mismatching Origin → refused.
 	ctype, body = uploadBody(t, "file", "id\n1\n")
-	rec = postPool(t, srv, map[string]string{"Origin": "https://evil.example"}, ctype, body, nil)
+	rec = postPool(t, srv, map[string]string{"Origin": "https://evil.example"}, ctype, body)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("mismatching Origin: status = %d, want 403", rec.Code)
 	}
 	// Neither header → refused.
 	ctype, body = uploadBody(t, "file", "id\n1\n")
-	rec = postPool(t, srv, map[string]string{}, ctype, body, nil)
+	rec = postPool(t, srv, map[string]string{}, ctype, body)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("neither header: status = %d, want 403", rec.Code)
 	}
@@ -162,12 +170,11 @@ func TestAdminCSRF(t *testing.T) {
 func TestAdminUploadLimits(t *testing.T) {
 	srv, _ := newAdminServer(t)
 	csrf := map[string]string{"Sec-Fetch-Site": "same-origin"}
-	fresh := func() (string, io.Reader) { return uploadBody(t, "file", "id\n1\n") }
+	fresh := func() (string, *bytes.Buffer) { return uploadBody(t, "file", "id\n1\n") }
 
-	// Missing Content-Length (unknown length, no header) → 411.
-	neg := int64(-1)
+	// No Content-Length header at all → 411, as the Python did.
 	ctype, body := fresh()
-	rec := postPool(t, srv, csrf, ctype, body, &neg)
+	rec := postPoolCL(t, srv, csrf, ctype, body, "")
 	if rec.Code != http.StatusLengthRequired {
 		t.Errorf("missing Content-Length: status = %d, want 411", rec.Code)
 	}
@@ -176,13 +183,13 @@ func TestAdminUploadLimits(t *testing.T) {
 	}
 	// Non-integer Content-Length → 411.
 	ctype, body = fresh()
-	rec = postPoolHeader(t, srv, csrf, ctype, body, "Content-Length", "abc")
+	rec = postPoolCL(t, srv, csrf, ctype, body, "abc")
 	if rec.Code != http.StatusLengthRequired {
 		t.Errorf("non-integer Content-Length: status = %d, want 411", rec.Code)
 	}
 	// Negative Content-Length → 400.
 	ctype, body = fresh()
-	rec = postPoolHeader(t, srv, csrf, ctype, body, "Content-Length", "-1")
+	rec = postPoolCL(t, srv, csrf, ctype, body, "-1")
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("negative Content-Length: status = %d, want 400", rec.Code)
 	}
@@ -191,7 +198,7 @@ func TestAdminUploadLimits(t *testing.T) {
 	}
 	// Over 5 MiB → 413.
 	ctype, body = fresh()
-	rec = postPoolHeader(t, srv, csrf, ctype, body, "Content-Length", "6291456")
+	rec = postPoolCL(t, srv, csrf, ctype, body, "6291456")
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("6 MiB Content-Length: status = %d, want 413", rec.Code)
 	}
@@ -199,7 +206,7 @@ func TestAdminUploadLimits(t *testing.T) {
 		t.Errorf("413 body %q lacks the text", b)
 	}
 	// Not a multipart form → 400.
-	rec = postPool(t, srv, csrf, "text/plain", strings.NewReader("id\n1\n"), nil)
+	rec = postPool(t, srv, csrf, "text/plain", bytes.NewBufferString("id\n1\n"))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("text/plain: status = %d, want 400", rec.Code)
 	}
@@ -208,7 +215,7 @@ func TestAdminUploadLimits(t *testing.T) {
 	}
 	// Multipart without a file part → 400.
 	ctype2, body2 := uploadBody(t, "other", "id\n1\n")
-	rec = postPool(t, srv, csrf, ctype2, body2, nil)
+	rec = postPool(t, srv, csrf, ctype2, body2)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("no file field: status = %d, want 400", rec.Code)
 	}
@@ -217,30 +224,13 @@ func TestAdminUploadLimits(t *testing.T) {
 	}
 }
 
-// postPoolHeader is postPool with one extra raw header set after creation.
-func postPoolHeader(t *testing.T, srv *http.Server, hdrs map[string]string, ctype string, body io.Reader, key, value string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/desk/admin/pool", body)
-	access.SetTestHeaders(req, "root", adminRole, testGate)
-	if ctype != "" {
-		req.Header.Set("Content-Type", ctype)
-	}
-	for k, v := range hdrs {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set(key, value)
-	rec := httptest.NewRecorder()
-	srv.Handler.ServeHTTP(rec, req)
-	return rec
-}
-
 func TestAdminUploadNotices(t *testing.T) {
 	srv, root := newAdminServer(t)
 	csrf := map[string]string{"Sec-Fetch-Site": "same-origin"}
 
 	// A header without an id column: nothing added, notice shown once.
 	ctype, body := uploadBody(t, "file", "name\nx\n")
-	rec := postPool(t, srv, csrf, ctype, body, nil)
+	rec := postPool(t, srv, csrf, ctype, body)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("bad header: status = %d, want 303", rec.Code)
 	}
@@ -259,7 +249,7 @@ func TestAdminUploadNotices(t *testing.T) {
 
 	// Two good rows and one empty id: added 2 of 3 with the reject line.
 	ctype, body = uploadBody(t, "file", "id,note\n1,a\n,b\n3,c\n")
-	rec = postPool(t, srv, csrf, ctype, body, nil)
+	rec = postPool(t, srv, csrf, ctype, body)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("rejects: status = %d, want 303", rec.Code)
 	}
@@ -271,7 +261,7 @@ func TestAdminUploadNotices(t *testing.T) {
 
 	// A clean upload: added 2 of 2; no rejects.
 	ctype, body = uploadBody(t, "file", "id\n7\n8\n")
-	rec = postPool(t, srv, csrf, ctype, body, nil)
+	rec = postPool(t, srv, csrf, ctype, body)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("clean: status = %d, want 303", rec.Code)
 	}
@@ -295,7 +285,7 @@ func TestAdminUploadNotices(t *testing.T) {
 		sb.WriteString(",x\n")
 	}
 	ctype, body = uploadBody(t, "file", sb.String())
-	rec = postPool(t, srv, csrf, ctype, body, nil)
+	rec = postPool(t, srv, csrf, ctype, body)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("21 rejects: status = %d, want 303", rec.Code)
 	}
@@ -357,6 +347,16 @@ func TestAdminRedirectNoSlash(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "/desk/admin/" {
 		t.Errorf("Location = %q, want /desk/admin/", loc)
 	}
+	// The 301 answer carries the three admin headers too.
+	for k, want := range map[string]string{
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"Cache-Control":           "no-store",
+	} {
+		if got := rec.Header().Get(k); got != want {
+			t.Errorf("301 header %s = %q, want %q", k, got, want)
+		}
+	}
 }
 
 func TestAdminForbiddenForCollector(t *testing.T) {
@@ -368,15 +368,80 @@ func TestAdminForbiddenForCollector(t *testing.T) {
 	if b := rec.Body.String(); !strings.Contains(b, testContact) {
 		t.Errorf("403 body %q lacks the contact %q", b, testContact)
 	}
+	// The non-admin 403 carries the three admin headers too.
+	for k, want := range map[string]string{
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"Cache-Control":           "no-store",
+	} {
+		if got := rec.Header().Get(k); got != want {
+			t.Errorf("403 header %s = %q, want %q", k, got, want)
+		}
+	}
 	// The same for the POST route.
 	ctype, body := uploadBody(t, "file", "id\n1\n")
 	req := httptest.NewRequest(http.MethodPost, "/desk/admin/pool", body)
 	access.SetTestHeaders(req, "dmccool2", collectorRole, testGate)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Content-Length", strconv.Itoa(body.Len()))
 	rec = httptest.NewRecorder()
 	srv.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("collector POST /desk/admin/pool: status = %d, want 403", rec.Code)
+	}
+	for k, want := range map[string]string{
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"Cache-Control":           "no-store",
+	} {
+		if got := rec.Header().Get(k); got != want {
+			t.Errorf("POST 403 header %s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+func TestAdminConcurrentUploadsLoseNothing(t *testing.T) {
+	srv, root := newAdminServer(t)
+
+	// 10 concurrent uploads of disjoint ids through the same admin handler;
+	// pool.Add is a read-modify-write, so the handler must hold its lock (F75).
+	const n = 10
+	type upload struct {
+		ctype string
+		body  *bytes.Buffer
+	}
+	ups := make([]upload, n)
+	for i := range ups {
+		ups[i].ctype, ups[i].body = uploadBody(t, "file", "id\n"+strconv.Itoa(100+i)+"\n")
+	}
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/desk/admin/pool", ups[i].body)
+			access.SetTestHeaders(req, "root", adminRole, testGate)
+			req.Header.Set("Content-Type", ups[i].ctype)
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			req.Header.Set("Content-Length", strconv.Itoa(ups[i].body.Len()))
+			rec := httptest.NewRecorder()
+			srv.Handler.ServeHTTP(rec, req)
+			codes[i] = rec.Code
+		}(i)
+	}
+	wg.Wait()
+	for i, c := range codes {
+		if c != http.StatusSeeOther {
+			t.Errorf("upload %d: status = %d, want 303", i, c)
+		}
+	}
+	rows, err := pool.Read(filepath.Join(root, "pool.csv"), "video")
+	if err != nil {
+		t.Fatalf("pool.Read: %v", err)
+	}
+	if len(rows) != n {
+		t.Errorf("pool has %d rows, want all %d: %v", len(rows), n, rows)
 	}
 }

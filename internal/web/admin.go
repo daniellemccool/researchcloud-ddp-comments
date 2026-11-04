@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
@@ -47,6 +48,15 @@ func adminShell(title, inner, notice string, back bool) string {
 		`<style>` + adminCSS + `</style></head><body><h1>` + html.EscapeString(title) + `</h1>` + box + inner + link + `</body></html>`
 }
 
+// setAdminHeaders sets the framing and no-store headers every admin answer
+// carries (desk_admin_routes.py FRAMING + NO_STORE), including the non-admin
+// 403s and the /desk/admin → /desk/admin/ redirect.
+func setAdminHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	w.Header().Set("Cache-Control", "no-store")
+}
+
 // adminHandler serves GET /desk/admin/{$} and POST /desk/admin/pool
 // (desk_admin_routes.py handle_admin, plan-2a part only). It is mounted
 // admin-only by the gated listener; every response carries the framing and
@@ -56,6 +66,7 @@ type adminHandler struct {
 	kinds    *platformKinds
 	log      *desklog.Log
 
+	addMu   sync.Mutex // held around pool.Add, whose read-modify-write contract requires it (F75)
 	mu      sync.Mutex
 	notices map[string]string // one-shot notice per user (desk_stub.py set/take_notice)
 }
@@ -73,9 +84,7 @@ func NewAdmin(d Deps) http.Handler {
 // ServeHTTP routes the two admin routes and sets the security headers on
 // every response.
 func (a *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
-	w.Header().Set("Cache-Control", "no-store")
+	setAdminHeaders(w)
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/desk/admin/":
 		a.serveOverview(w, r)
@@ -145,11 +154,6 @@ func (a *adminHandler) servePoolUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw := r.Header.Get("Content-Length")
-	if raw == "" && r.ContentLength >= 0 {
-		// The Go server moves Content-Length out of the header map into
-		// the field; use it when the header is absent.
-		raw = strconv.FormatInt(r.ContentLength, 10)
-	}
 	if raw == "" {
 		a.say(w, http.StatusLengthRequired, "Content-Length required")
 		return
@@ -180,7 +184,7 @@ func (a *adminHandler) servePoolUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text := strings.ToValidUTF8(string(data), "�")
+	text := decodeReplace(string(data))
 	rows, rejects, err := pool.ParseSelection(text, a.kinds)
 	var selErr *pool.SelectionError
 	switch {
@@ -193,7 +197,9 @@ func (a *adminHandler) servePoolUpload(w http.ResponseWriter, r *http.Request) {
 		a.say(w, http.StatusInternalServerError, "could not read the upload")
 		return
 	}
+	a.addMu.Lock()
 	added, _, err := pool.Add(a.poolPath, rows, a.kinds)
+	a.addMu.Unlock()
 	if err != nil {
 		body := a.overviewBody("could not add to the pool: " + err.Error())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -203,6 +209,27 @@ func (a *adminHandler) servePoolUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	a.setNotice(id.User, fmt.Sprintf("added %d of %d; %s", added, len(rows)+len(rejects), rejectText(rejects)))
 	a.redirect(w)
+}
+
+// decodeReplace decodes s as UTF-8, replacing each invalid byte with one
+// U+FFFD, like Python's data.decode("utf-8", errors="replace") (Go's
+// strings.ToValidUTF8 would collapse a run of invalid bytes into one).
+func decodeReplace(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		if r == utf8.RuneError && size == 1 {
+			b.WriteRune('�')
+		} else {
+			b.WriteString(s[:size])
+		}
+		s = s[size:]
+	}
+	return b.String()
 }
 
 // csrfOK is desk_admin_routes.py csrf_ok: a Sec-Fetch-Site header must say

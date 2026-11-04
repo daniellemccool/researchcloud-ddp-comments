@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -65,12 +66,13 @@ func (d *dialRecorder) dialled() []string {
 	return append([]string(nil), d.hosts...)
 }
 
-// screenBackend is a fake noVNC server: it counts requests and answers with
-// the owner's name.
+// screenBackend is a fake noVNC server: it counts requests, records the
+// forwarded headers and answers with the owner's name.
 type screenBackend struct {
-	srv *httptest.Server
-	mu  sync.Mutex
-	n   int
+	srv  *httptest.Server
+	mu   sync.Mutex
+	n    int
+	hdrs []http.Header
 }
 
 func newScreenBackend(t *testing.T, name string) *screenBackend {
@@ -79,6 +81,7 @@ func newScreenBackend(t *testing.T, name string) *screenBackend {
 	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
 		b.n++
+		b.hdrs = append(b.hdrs, r.Header.Clone())
 		b.mu.Unlock()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(name + " " + r.URL.Path + "?" + r.URL.RawQuery))
@@ -91,6 +94,26 @@ func (b *screenBackend) requests() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.n
+}
+
+func (b *screenBackend) headers() []http.Header {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]http.Header(nil), b.hdrs...)
+}
+
+// assertNoIdentityHeaders fails when any recorded header set still holds one
+// of the three identity headers. The names stay inside internal/access: if
+// stripping changes the set, one of them was present.
+func assertNoIdentityHeaders(t *testing.T, hs []http.Header) {
+	t.Helper()
+	for _, h := range hs {
+		stripped := h.Clone()
+		access.StripIdentityHeaders(stripped)
+		if !reflect.DeepEqual(stripped, h) {
+			t.Errorf("backend saw identity headers: %v", h)
+		}
+	}
 }
 
 func newTestRelay(t *testing.T, running map[string]bool, backends map[string]string) (*Relay, *dialRecorder) {
@@ -121,6 +144,7 @@ func TestRelayTargetsIdentityNotPath(t *testing.T) {
 	}
 	for _, p := range paths {
 		req := httptest.NewRequest(http.MethodGet, p, nil)
+		access.SetTestHeaders(req, "alice", collectorRole, testGate)
 		rec := httptest.NewRecorder()
 		relay.ServeHTTP(rec, withIdentity(req, id))
 		if rec.Code != http.StatusOK {
@@ -138,6 +162,62 @@ func TestRelayTargetsIdentityNotPath(t *testing.T) {
 	if n := bob.requests(); n != 0 {
 		t.Errorf("bob's backend got %d requests, want 0", n)
 	}
+	// The gate secret and identity headers never reach the container (F74).
+	assertNoIdentityHeaders(t, alice.headers())
+}
+
+func TestRelayConcurrentUsersNeverCross(t *testing.T) {
+	alice := newScreenBackend(t, "alice-screen")
+	bob := newScreenBackend(t, "bob-screen")
+	backends := map[string]string{
+		"desk-firefox-alice": alice.srv.Listener.Addr().String(),
+		"desk-firefox-bob":   bob.srv.Listener.Addr().String(),
+	}
+	relay, dials := newTestRelay(t, map[string]bool{"alice": true, "bob": true}, backends)
+
+	// 50 goroutines alternate alice and bob through the SAME relay; every
+	// response body must be the requester's own screen. Run under -race.
+	const n = 50
+	var wg sync.WaitGroup
+	errs := make(chan string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			user := "alice"
+			if i%2 == 1 {
+				user = "bob"
+			}
+			req := httptest.NewRequest(http.MethodGet, "/desk/vnc/", nil)
+			access.SetTestHeaders(req, user, collectorRole, testGate)
+			rec := httptest.NewRecorder()
+			relay.ServeHTTP(rec, withIdentity(req, access.Identity{User: user, Collector: true}))
+			if rec.Code != http.StatusOK {
+				errs <- fmt.Sprintf("%s: status = %d, want 200", user, rec.Code)
+				return
+			}
+			if !strings.Contains(rec.Body.String(), user+"-screen") {
+				errs <- fmt.Sprintf("%s: body %q is not the requester's screen", user, rec.Body.String())
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
+	}
+	// The transport pools connections per target host, so fewer dials than
+	// requests is fine; every dialled host must still be alice's or bob's.
+	if got := len(dials.dialled()); got > n {
+		t.Errorf("dialled %d times, want at most %d", got, n)
+	}
+	for _, h := range dials.dialled() {
+		if h != "desk-firefox-alice" && h != "desk-firefox-bob" {
+			t.Errorf("dialled host %q, want only alice's or bob's", h)
+		}
+	}
+	assertNoIdentityHeaders(t, alice.headers())
+	assertNoIdentityHeaders(t, bob.headers())
 }
 
 func TestRelayStripsPrefix(t *testing.T) {
