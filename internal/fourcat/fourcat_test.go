@@ -50,15 +50,24 @@ func withService(service string) map[string]string {
 	return labels
 }
 
-// setupServer serves "/" with a page whose title is "Complete 4CAT Setup"
-// when pending is true.
-func setupServer(t *testing.T, pending bool) *httptest.Server {
+// setupServer stands in for the 4CAT frontend: while pending it serves
+// /first-run/ with the "Complete 4CAT Setup" title; once set up it answers
+// /first-run/ with a 302 to /. seen, when non-nil, receives the last path hit.
+func setupServer(t *testing.T, pending bool, seen *string) *httptest.Server {
 	t.Helper()
 	page := "<html><head><title>4CAT</title></head><body>dashboard</body></html>"
 	if pending {
 		page = "<html><head><title>Complete 4CAT Setup</title></head><body>setup</body></html>"
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if seen != nil {
+			*seen = r.URL.Path
+		}
+		if r.URL.Path == "/first-run/" && !pending {
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
 		_, _ = w.Write([]byte(page))
 	}))
 	t.Cleanup(srv.Close)
@@ -115,13 +124,40 @@ func closedURL(t *testing.T) string {
 
 func TestSetupPending(t *testing.T) {
 	ctx := context.Background()
-	pending := setupServer(t, true)
-	done := setupServer(t, false)
+	var seen string
+	pending := setupServer(t, true, &seen)
 	if ok, err := (&Client{FrontendURL: pending.URL}).SetupPending(ctx); err != nil || !ok {
 		t.Errorf("SetupPending(pending) = %v, %v; want true, nil", ok, err)
 	}
+	if seen != "/first-run/" {
+		t.Errorf("SetupPending requested %q; want /first-run/", seen)
+	}
+	done := setupServer(t, false, nil)
 	if ok, err := (&Client{FrontendURL: done.URL}).SetupPending(ctx); err != nil || ok {
 		t.Errorf("SetupPending(done) = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestSetupPendingRedirectMeansDone(t *testing.T) {
+	// Once set up, /first-run/ answers with a redirect; never followed, and
+	// it means not pending.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/")
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	if ok, err := (&Client{FrontendURL: srv.URL}).SetupPending(context.Background()); err != nil || ok {
+		t.Errorf("SetupPending(302) = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestSetupPendingNotFoundMeansDone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	if ok, err := (&Client{FrontendURL: srv.URL}).SetupPending(context.Background()); err != nil || ok {
+		t.Errorf("SetupPending(404) = %v, %v; want false, nil", ok, err)
 	}
 }
 
@@ -129,32 +165,6 @@ func TestSetupUnreachable(t *testing.T) {
 	_, err := (&Client{FrontendURL: closedURL(t)}).SetupPending(context.Background())
 	if err == nil || !strings.HasPrefix(err.Error(), "4CAT unreachable:") {
 		t.Errorf("SetupPending(closed) error = %v; want prefix \"4CAT unreachable:\"", err)
-	}
-}
-
-func TestSetupPendingFirstRunRedirect(t *testing.T) {
-	// While 4CAT's first run is pending it redirects to /first-run/, where
-	// the "Complete 4CAT Setup" page lives; the redirect itself means pending.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "/first-run/")
-		w.WriteHeader(http.StatusFound)
-	}))
-	t.Cleanup(srv.Close)
-	if ok, err := (&Client{FrontendURL: srv.URL}).SetupPending(context.Background()); err != nil || !ok {
-		t.Errorf("SetupPending(302 /first-run/) = %v, %v; want true, nil", ok, err)
-	}
-}
-
-func TestSetupPendingRedirectMeansDone(t *testing.T) {
-	// A completed 4CAT answers GET / with a redirect to its login page; the
-	// client never follows it, and the stub body has no setup title.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "/login/")
-		w.WriteHeader(http.StatusFound)
-	}))
-	t.Cleanup(srv.Close)
-	if ok, err := (&Client{FrontendURL: srv.URL}).SetupPending(context.Background()); err != nil || ok {
-		t.Errorf("SetupPending(302) = %v, %v; want false, nil", ok, err)
 	}
 }
 

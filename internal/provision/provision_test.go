@@ -143,18 +143,21 @@ func newTestEnv(t *testing.T) *testEnv {
 	return env
 }
 
-// serve4CAT stands in for the 4CAT frontend: "/" is the setup page while
-// pending, "/login/" answers per the env's mode.
+// serve4CAT stands in for the 4CAT frontend: "/first-run/" is the setup
+// probe (200 with the setup title while pending, a 302 to "/" once set up),
+// "/" is the dashboard, "/login/" answers per the env's mode.
 func (e *testEnv) serve4CAT(w http.ResponseWriter, r *http.Request) {
+	e.mu.Lock()
+	pending := e.pending
+	e.mu.Unlock()
 	switch r.URL.Path {
-	case "/":
-		e.mu.Lock()
-		pending := e.pending
-		e.mu.Unlock()
+	case "/first-run/":
 		if pending {
 			_, _ = w.Write([]byte("<html><head><title>Complete 4CAT Setup</title></head></html>"))
 			return
 		}
+		http.Redirect(w, r, "/", http.StatusFound)
+	case "/":
 		_, _ = w.Write([]byte("<html><head><title>4CAT</title></head><body>dashboard</body></html>"))
 	case "/login/":
 		e.mu.Lock()

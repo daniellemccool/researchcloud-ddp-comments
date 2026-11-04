@@ -132,14 +132,12 @@ func (c *Client) psql(ctx context.Context, sql string) (string, error) {
 }
 
 // SetupPending reports whether the 4CAT frontend still shows its first-run
-// setup page. A 3xx whose Location path starts with /first-run means pending
-// (4CAT redirects there while its setup is incomplete). Any other 2xx/3xx
-// is a page to inspect — the client never follows redirects, so a completed
-// 4CAT answers GET / with a redirect stub whose body has no title, meaning
-// not pending; the body (up to 1 MiB) is searched for "Complete 4CAT Setup".
-// Only a 4xx or 5xx is an error.
+// setup page, by requesting GET <FrontendURL>/first-run/ directly (redirects
+// are never followed). A 2xx whose body (up to 1 MiB) contains
+// "Complete 4CAT Setup" means pending; a 2xx without the title, any 3xx, or
+// a 404 means the setup is done. Any other 4xx/5xx is an error.
 func (c *Client) SetupPending(ctx context.Context) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.FrontendURL, "/")+"/", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.FrontendURL, "/")+"/first-run/", nil)
 	if err != nil {
 		return false, err
 	}
@@ -148,15 +146,14 @@ func (c *Client) SetupPending(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("4CAT unreachable: %T", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return false, fmt.Errorf("unexpected setup page status %d", resp.StatusCode)
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
 	}
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		if loc := resp.Header.Get("Location"); loc != "" {
-			if u, parseErr := url.Parse(loc); parseErr == nil && strings.HasPrefix(u.Path, "/first-run") {
-				return true, nil
-			}
-		}
+		return false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return false, fmt.Errorf("unexpected setup page status %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
