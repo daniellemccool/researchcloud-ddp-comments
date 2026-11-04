@@ -71,13 +71,24 @@ func NewRelay(s runningChecker) *Relay {
 			// The gate secret and identity headers never reach the
 			// Firefox container (F74).
 			access.StripIdentityHeaders(pr.Out.Header)
+			// noVNC needs neither the collector's browser cookies nor
+			// an Authorization header, and the Firefox container is the
+			// least-trusted component: neither leaves the desk.
+			pr.Out.Header.Del("Cookie")
+			pr.Out.Header.Del("Authorization")
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			log.Printf("web: relay: %v", err)
-			plain(w, http.StatusBadGateway, "bad gateway")
-		},
+		ErrorHandler: badGateway("relay"),
 	}
 	return r
+}
+
+// badGateway is the reverse proxies' ErrorHandler: it logs the error under
+// name and answers a plain 502 "bad gateway", never the error text.
+func badGateway(name string) func(http.ResponseWriter, *http.Request, error) {
+	return func(w http.ResponseWriter, _ *http.Request, err error) {
+		log.Printf("web: %s: %v", name, err)
+		plain(w, http.StatusBadGateway, "bad gateway")
+	}
 }
 
 // ServeHTTP relays the request to the identity's own Firefox container.

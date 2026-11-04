@@ -189,10 +189,15 @@ func newCollectorEnv(t *testing.T, fourcatEnabled bool) *collectorEnv {
 	return &collectorEnv{srv: srv, root: root, cfg: cfg, prov: prov, sess: sess, log: dlog}
 }
 
+// doMethod sends a gated request; a POST carries Sec-Fetch-Site: same-origin,
+// as the collector page's own fetch() does.
 func doMethod(t *testing.T, srv *http.Server, method, user, roles, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
 	access.SetTestHeaders(req, user, roles, testGate)
+	if method == http.MethodPost {
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	}
 	rec := httptest.NewRecorder()
 	srv.Handler.ServeHTTP(rec, req)
 	return rec
@@ -1084,5 +1089,85 @@ func TestKindsAdapterAnchors(t *testing.T) {
 	}
 	if _, ok := k.Kind("any"); ok {
 		t.Errorf("Kind(any) with a nil ID regexp found, want unknown (false), never match-everything")
+	}
+}
+
+// postWith POSTs path as alice with extra headers set on the request.
+func postWith(t *testing.T, srv *http.Server, path string, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, nil)
+	access.SetTestHeaders(req, "alice", collectorRole, testGate)
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// The collector page may be framed by the desk's own origin only (review M2).
+func TestHomeFrameAncestorsSelf(t *testing.T) {
+	e := readyPageEnv(t, true)
+	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n")
+	rec := e.get(t, "alice", collectorRole, "/desk/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page: status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'self'" {
+		t.Errorf("page: Content-Security-Policy = %q, want %q", got, "frame-ancestors 'self'")
+	}
+	// A message answer of the same route carries it too.
+	e2 := newCollectorEnv(t, true)
+	rec = e2.get(t, "alice", collectorRole, "/desk/")
+	if got := rec.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'self'" {
+		t.Errorf("message: Content-Security-Policy = %q, want %q", got, "frame-ancestors 'self'")
+	}
+}
+
+// A cross-site POST to a collector route is refused before it has any effect;
+// the page's own same-origin fetch passes (review M2, the admin's csrfOK).
+func TestCollectorPostsRefuseCrossSite(t *testing.T) {
+	e := newCollectorEnv(t, true)
+	makeTemplateDir(t, e)
+	writeProvisionState(t, e.root, "alice", allDoneSteps())
+	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n222,video,b1,\n")
+	if err := e.log.Append(desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	refused := []map[string]string{
+		{"Sec-Fetch-Site": "cross-site"},
+		{"Sec-Fetch-Site": "same-site"},
+		{"Origin": "https://evil.example"},
+		{}, // neither header
+	}
+	paths := []string{"/desk/claim?n=5", "/desk/open?id=111", "/desk/problem?id=111&code=NOT_FOUND"}
+	before, err := e.log.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		for _, h := range refused {
+			if rec := postWith(t, e.srv, p, h); rec.Code != http.StatusForbidden {
+				t.Errorf("%s with %v: status = %d, want 403", p, h, rec.Code)
+			}
+		}
+	}
+	after, err := e.log.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("refused posts changed the desk log: %d events, want %d", len(after), len(before))
+	}
+	if n := e.sess.openCount(); n != 0 {
+		t.Errorf("refused posts ran OpenURL %d times, want 0", n)
+	}
+	// The page's own fetch: Sec-Fetch-Site same-origin, or (an older
+	// browser) an Origin equal to the Host.
+	if rec := postWith(t, e.srv, "/desk/open?id=111", map[string]string{"Sec-Fetch-Site": "same-origin"}); rec.Code != http.StatusNoContent {
+		t.Errorf("same-origin open: status = %d, want 204", rec.Code)
+	}
+	if rec := postWith(t, e.srv, "/desk/open?id=111", map[string]string{"Origin": "http://example.com"}); rec.Code != http.StatusNoContent {
+		t.Errorf("same-host Origin open: status = %d, want 204", rec.Code)
 	}
 }

@@ -12,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/ctl"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/docker"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/locks"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
@@ -113,6 +116,85 @@ func TestStopValidatesUser(t *testing.T) {
 		if !strings.Contains(stderr.String(), "invalid username") {
 			t.Errorf("dispatch(%v) stderr = %q, want an invalid username message", args, stderr.String())
 		}
+	}
+}
+
+// The serving desk validates the username itself: a socket client that skips
+// the check never reaches the manager (review M5).
+func TestOpsStopValidatesUser(t *testing.T) {
+	fake := docker.NewFake()
+	o := &ops{mgr: &session.Manager{
+		Cfg:    &config.Config{DeskRoot: t.TempDir()},
+		Docker: fake,
+		Locks:  &locks.Set{},
+	}}
+	for _, user := range []string{"Bad Name", "../alice", "", "alice/../bob"} {
+		err := o.Stop(context.Background(), user)
+		if err == nil || !strings.Contains(err.Error(), "invalid username") {
+			t.Errorf("Stop(%q) = %v, want an invalid username error", user, err)
+		}
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("invalid names reached Docker: %v", fake.Calls)
+	}
+}
+
+// The admin 4CAT proxy is mounted only when 4CAT is enabled; disabled, the
+// handler is a nil interface so /fourcat/ answers 404 (review M6).
+func TestFourcatProxyMountedOnlyWhenEnabled(t *testing.T) {
+	if h := fourcatProxy(&config.Config{FQDN: "desk.example.org"}); h != nil {
+		t.Errorf("fourcatProxy(disabled) = %#v, want nil", h)
+	}
+	if h := fourcatProxy(&config.Config{FQDN: "desk.example.org", FourcatEnabled: true}); h == nil {
+		t.Error("fourcatProxy(enabled) = nil, want the proxy")
+	}
+}
+
+// desk serve refuses a daemon below Docker Engine 28 / API 1.48, which
+// cannot be trusted to honour ADR-0007's isolated gateway (ruling F91).
+func TestCheckDockerVersion(t *testing.T) {
+	cases := []struct {
+		engine, api string
+		ok          bool
+	}{
+		{"29.1.3", "1.52", true},
+		{"28.0.0", "1.48", true},
+		{"28.5.1+dfsg1", "1.51", true},
+		{"27.5.1", "1.47", false},
+		{"28.0.0", "1.47", false},
+		{"27.5.1", "1.48", false},
+		{"20.10.24", "1.41", false},
+		{"1.13.1", "1.26", false},
+		{"29.0.0", "1.9", false}, // the API's minor compares as a number, not as text
+		{"", "", false},
+		{"dev", "1.52", false},
+		{"29.0.0", "bogus", false},
+	}
+	for _, c := range cases {
+		fake := docker.NewFake()
+		fake.Version = docker.Version{Engine: c.engine, API: c.api}
+		err := checkDockerVersion(context.Background(), fake)
+		if c.ok && err != nil {
+			t.Errorf("engine %q api %q: %v, want accepted", c.engine, c.api, err)
+		}
+		if !c.ok {
+			if err == nil {
+				t.Errorf("engine %q api %q accepted, want refused", c.engine, c.api)
+				continue
+			}
+			for _, want := range []string{"Docker Engine 28", "API 1.48", "ADR-0007", "isolated gateway"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("engine %q api %q: error %q does not name %q", c.engine, c.api, err, want)
+				}
+			}
+		}
+	}
+	// A daemon that cannot answer is refused too.
+	fake := docker.NewFake()
+	fake.Version = docker.Version{Engine: "29.1.3", API: "1.52"}
+	fake.Fail["ServerVersion"] = errors.New("daemon down")
+	if err := checkDockerVersion(context.Background(), fake); err == nil || !strings.Contains(err.Error(), "daemon down") {
+		t.Errorf("failing ServerVersion: %v, want an error carrying the cause", err)
 	}
 }
 

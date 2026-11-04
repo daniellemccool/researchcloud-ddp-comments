@@ -82,13 +82,13 @@ func New(d Deps) *http.Server {
 		kinds:    newPlatformKinds(d.Platform),
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /desk/{$}", h.serveHome)          // the collector page, exactly /desk/
-	mux.HandleFunc("GET /desk/status", h.serveStatus)     // {"ready":bool} for the page's poll
-	mux.HandleFunc("POST /desk/claim", h.serveClaim)      // get more items
-	mux.HandleFunc("POST /desk/open", h.serveOpen)        // open one claimed item
-	mux.HandleFunc("POST /desk/problem", h.serveProblem)  // mark a problem on a claimed item
-	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)   // nil Admin handler → 404
-	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin) // nil Admin handler → 404
+	mux.HandleFunc("GET /desk/{$}", h.serveHome)                     // the collector page, exactly /desk/
+	mux.HandleFunc("GET /desk/status", h.serveStatus)                // {"ready":bool} for the page's poll
+	mux.HandleFunc("POST /desk/claim", sameOrigin(h.serveClaim))     // get more items
+	mux.HandleFunc("POST /desk/open", sameOrigin(h.serveOpen))       // open one claimed item
+	mux.HandleFunc("POST /desk/problem", sameOrigin(h.serveProblem)) // mark a problem on a claimed item
+	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)              // nil Admin handler → 404
+	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin)            // nil Admin handler → 404
 	mux.HandleFunc("GET /desk/admin", func(w http.ResponseWriter, r *http.Request) {
 		setAdminHeaders(w)                                               // the 301 answer carries the admin headers too
 		http.Redirect(w, r, "/desk/admin/", http.StatusMovedPermanently) // no-slash → 301
@@ -98,6 +98,21 @@ func New(d Deps) *http.Server {
 	mux.HandleFunc("/fourcat/", h.serveFourcat)      // admins only, nil proxy → 404
 	h.routes = mux
 	return &http.Server{Addr: defaultGatedAddr, Handler: h}
+}
+
+// sameOrigin refuses a request that csrfOK does not accept with 403 before
+// next runs. The collector page's own fetch() POSTs are same-origin, so the
+// browser marks them Sec-Fetch-Site: same-origin (or sends an Origin equal to
+// the Host); a cross-site page cannot claim, open or mark a problem for a
+// signed-in collector (review M2).
+func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !csrfOK(r) {
+			plain(w, http.StatusForbidden, "refused: this request did not come from the desk page")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // NewContainer returns the container listener: GET /healthz answers 200
@@ -134,7 +149,8 @@ type handler struct {
 	admin    http.Handler   // /desk/admin/ pages, nil → 404
 	kinds    *platformKinds // the pool.Kinds adapter over the platform
 
-	provisioning sync.Map // users with an Advance goroutine in flight
+	provisioning   sync.Map      // users with an Advance goroutine in flight
+	advanceTimeout time.Duration // deadline of a kicked Advance; 0 → defaultAdvanceTimeout
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

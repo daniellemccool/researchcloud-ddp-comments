@@ -358,3 +358,31 @@ func TestRelay502OnDialFailure(t *testing.T) {
 		t.Fatalf("status = %d, want 502", rec.Code)
 	}
 }
+
+// The collector's browser cookies and Authorization never reach the Firefox
+// container: noVNC needs neither and the container is the least-trusted
+// component (review M1).
+func TestRelayDropsCookieAndAuthorization(t *testing.T) {
+	alice := newScreenBackend(t, "alice-screen")
+	relay, _ := newTestRelay(t, map[string]bool{"alice": true}, map[string]string{
+		"desk-firefox-alice": alice.srv.Listener.Addr().String(),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/desk/vnc/", nil)
+	access.SetTestHeaders(req, "alice", collectorRole, testGate)
+	req.Header.Set("Cookie", "session=sram-secret")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	relay.ServeHTTP(rec, withIdentity(req, access.Identity{User: "alice", Collector: true}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	hs := alice.headers()
+	if len(hs) != 1 {
+		t.Fatalf("backend saw %d requests, want 1", len(hs))
+	}
+	for _, name := range []string{"Cookie", "Authorization"} {
+		if v := hs[0].Values(name); len(v) != 0 {
+			t.Errorf("backend saw %s = %q, want none", name, v)
+		}
+	}
+}

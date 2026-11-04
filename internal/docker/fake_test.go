@@ -410,3 +410,20 @@ func TestFakeNetworkOptions(t *testing.T) {
 		t.Errorf("Options of an option-less network = %v, want nil", insp.Options)
 	}
 }
+
+func TestFakeServerVersion(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	f.Version = Version{Engine: "29.1.3", API: "1.52"}
+	v, err := f.ServerVersion(ctx)
+	if err != nil || v != f.Version {
+		t.Fatalf("ServerVersion = %+v, %v; want %+v, nil", v, err, f.Version)
+	}
+	f.Fail["ServerVersion"] = errors.New("boom")
+	if _, err := f.ServerVersion(ctx); err == nil {
+		t.Error("ServerVersion with an injected failure returned nil")
+	}
+	if n := len(f.Calls); n != 2 || f.Calls[0] != "ServerVersion" {
+		t.Errorf("Calls = %v, want two ServerVersion entries", f.Calls)
+	}
+}

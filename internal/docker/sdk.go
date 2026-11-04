@@ -322,3 +322,11 @@ func (s *sdkClient) Exec(ctx context.Context, containerName string, cmd []string
 	}
 	return Exec{ExitCode: insp.ExitCode, Stdout: stdout.String(), Stderr: stderr.String()}, nil
 }
+
+func (s *sdkClient) ServerVersion(ctx context.Context) (Version, error) {
+	v, err := s.cli.ServerVersion(ctx)
+	if err != nil {
+		return Version{}, wrapErr(err)
+	}
+	return Version{Engine: v.Version, API: v.APIVersion}, nil
+}

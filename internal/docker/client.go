@@ -42,6 +42,15 @@ type Client interface {
 	// labels. ExitCode is always 0: the list API cannot report it.
 	ContainerList(ctx context.Context, labels map[string]string) ([]Container, error)
 	Exec(ctx context.Context, container string, cmd []string, env []string, stdin []byte) (Exec, error)
+	// ServerVersion reports the daemon's engine version and the highest API
+	// version it speaks.
+	ServerVersion(ctx context.Context) (Version, error)
+}
+
+// Version is the daemon's version as the desk sees it.
+type Version struct {
+	Engine string // e.g. "29.1.3"
+	API    string // the daemon's highest API version, e.g. "1.52"
 }
 
 // Network is a Docker network as the desk sees it.

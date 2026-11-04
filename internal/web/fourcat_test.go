@@ -164,3 +164,23 @@ func TestFourcatProxyHostAndPrefix(t *testing.T) {
 		t.Errorf("Location = %q, want /after-login (unmodified)", loc)
 	}
 }
+
+// A dial failure answers the relay's plain 502, not the stdlib's empty one
+// (review M6).
+func TestFourcatProxyPlainBadGateway(t *testing.T) {
+	fp := NewFourcatProxy("desk.example.org")
+	fp.Dial = func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("4cat-frontend is down")
+	}
+	srv := newTestServerWith(t, func(d *Deps) { d.FourcatProxy = fp })
+	rec := doReq(t, srv, http.MethodGet, "root", adminRole, "/fourcat/", nil, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if b := rec.Body.String(); b != "bad gateway" {
+		t.Errorf("body = %q, want %q", b, "bad gateway")
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", ct)
+	}
+}

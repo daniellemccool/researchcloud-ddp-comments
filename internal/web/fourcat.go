@@ -58,6 +58,7 @@ func NewFourcatProxy(fqdn string) *FourcatProxy {
 			// The gate secret and identity headers never reach 4CAT (F74).
 			access.StripIdentityHeaders(pr.Out.Header)
 		},
+		ErrorHandler: badGateway("fourcat"),
 	}
 	return p
 }

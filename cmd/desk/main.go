@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -117,6 +119,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("docker client: %w", err)
 	}
+	vctx, vcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = checkDockerVersion(vctx, dc)
+	vcancel()
+	if err != nil {
+		return 0, err
+	}
 	selfID, err := docker.SelfID()
 	if err != nil {
 		return 0, fmt.Errorf("container id: %w", err)
@@ -192,7 +200,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		Prov:         prov,
 		Sessions:     mgr,
 		Log:          dlog,
-		FourcatProxy: web.NewFourcatProxy(cfg.FQDN),
+		FourcatProxy: fourcatProxy(cfg),
 		Relay:        web.NewRelay(mgr),
 	}
 	deps.Admin = web.NewAdmin(deps)
@@ -243,4 +251,57 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return 0, nil
 	}
+}
+
+// fourcatProxy returns the admin 4CAT proxy, or a nil handler when 4CAT is
+// disabled so the /fourcat/ route answers 404 (review M6).
+func fourcatProxy(cfg *config.Config) http.Handler {
+	if !cfg.FourcatEnabled {
+		return nil
+	}
+	return web.NewFourcatProxy(cfg.FQDN)
+}
+
+// The daemon floor for ADR-0007's isolated gateway
+// (com.docker.network.bridge.gateway_mode_ipv4=isolated): Docker Engine 28,
+// which speaks API 1.48.
+const (
+	minEngineMajor = 28
+	minAPIMajor    = 1
+	minAPIMinor    = 48
+)
+
+// checkDockerVersion refuses a daemon below Docker Engine 28 / API 1.48
+// (controller ruling F91): an older daemon may ignore the isolated gateway
+// option silently, and the pair network would then route to the host. A
+// version that cannot be read or parsed is refused too, so the check fails
+// closed.
+func checkDockerVersion(ctx context.Context, dc docker.Client) error {
+	const need = "the desk needs Docker Engine 28 / API 1.48 or newer for the isolated gateway of its pair networks (ADR-0007)"
+	v, err := dc.ServerVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("%s; reading the daemon version failed: %w", need, err)
+	}
+	engineMajor, _, engineOK := majorMinor(v.Engine)
+	apiMajor, apiMinor, apiOK := majorMinor(v.API)
+	if !engineOK || !apiOK || engineMajor < minEngineMajor ||
+		apiMajor < minAPIMajor || (apiMajor == minAPIMajor && apiMinor < minAPIMinor) {
+		return fmt.Errorf("%s; this daemon is Engine %q, API %q", need, v.Engine, v.API)
+	}
+	return nil
+}
+
+// majorMinor parses the leading "<major>.<minor>" of a version string such
+// as "28.5.1+dfsg1" or "1.48"; ok is false when either part is not a number.
+func majorMinor(s string) (major, minor int, ok bool) {
+	parts := strings.SplitN(s, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }

@@ -213,6 +213,11 @@ func (o *ops) Render(ctx context.Context) error {
 }
 
 // Stop stops the user's pair through the manager (under the user's lock).
+// The name is validated here as well as in the client: the socket is the
+// trust boundary, not the client that happens to use it.
 func (o *ops) Stop(ctx context.Context, user string) error {
+	if !userRe.MatchString(user) {
+		return fmt.Errorf("invalid username: %q", user)
+	}
 	return o.mgr.Stop(ctx, user)
 }

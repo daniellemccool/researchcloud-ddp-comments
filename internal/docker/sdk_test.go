@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,5 +218,22 @@ func TestSDKExecTimeout(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("Exec returned after %v, want about 1s (500ms deadline)", elapsed)
+	}
+}
+
+func TestSDKServerVersion(t *testing.T) {
+	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
+		t.Skip("no /var/run/docker.sock: daemon test skipped")
+	}
+	c, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	v, err := c.ServerVersion(context.Background())
+	if err != nil {
+		t.Fatalf("ServerVersion: %v", err)
+	}
+	if v.Engine == "" || !strings.HasPrefix(v.API, "1.") {
+		t.Errorf("ServerVersion = %+v, want an engine version and a 1.x API version", v)
 	}
 }

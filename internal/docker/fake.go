@@ -27,6 +27,7 @@ type Fake struct {
 	Execs       []ExecCall               // every Exec call in order, with its full argv
 	Created     []ContainerSpec          // every created spec, in creation order
 	Specs       map[string]ContainerSpec // created specs by name, removed on ContainerRemove
+	Version     Version                  // what ServerVersion reports
 
 	mu         sync.Mutex
 	networks   map[string]*fakeNetwork
@@ -471,4 +472,14 @@ func (f *Fake) Exec(ctx context.Context, containerName string, cmd []string, env
 		return ex, nil
 	}
 	return Exec{ExitCode: 0}, nil
+}
+
+// ServerVersion returns f.Version; Fail["ServerVersion"] fails it.
+func (f *Fake) ServerVersion(ctx context.Context) (Version, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("ServerVersion", "ServerVersion"); err != nil {
+		return Version{}, err
+	}
+	return f.Version, nil
 }

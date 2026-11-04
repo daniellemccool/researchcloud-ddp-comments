@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
@@ -29,6 +30,8 @@ import (
 // background Advance (rulings F73/F79), so a failed step is retried on the
 // next visit.
 func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
+	// Only the desk's own origin may frame the collector page (review M2).
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'self'")
 	id := identity(r)
 	user := id.User
 	contact := h.cfg.Contact
@@ -88,16 +91,28 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// defaultAdvanceTimeout bounds one kicked Advance (controller ruling F89):
+// a hung exec (4CAT's database starting or locked) then fails its step with
+// a recorded error instead of holding the user's lock and the single-flight
+// entry until the desk restarts, and the next visit retries (ruling F79).
+const defaultAdvanceTimeout = 2 * time.Minute
+
 // kick runs Prov.Advance in a goroutine unless one is already running for
 // user (desk_stub.py kick). The goroutine's context is not cancelled by the
-// request.
+// request; it carries its own deadline, defaultAdvanceTimeout.
 func (h *handler) kick(user string, admin bool) {
 	if _, loaded := h.provisioning.LoadOrStore(user, true); loaded {
 		return
 	}
+	timeout := h.advanceTimeout
+	if timeout <= 0 {
+		timeout = defaultAdvanceTimeout
+	}
 	go func() {
 		defer h.provisioning.Delete(user)
-		_ = h.prov.Advance(context.Background(), user, admin)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		_ = h.prov.Advance(ctx, user, admin)
 	}()
 }
 
