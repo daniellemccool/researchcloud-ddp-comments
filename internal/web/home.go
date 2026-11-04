@@ -25,6 +25,9 @@ import (
 // no release template and no profile → 503 not-ready; the provisioning state
 // decides between the full / setup-failed / not-ready / setting-up messages;
 // once ready, Start decides between busy / start-failed / gone / the page.
+// Every not-ready state except registry-full kicks the single-flight
+// background Advance (rulings F73/F79), so a failed step is retried on the
+// next visit.
 func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
 	user := id.User
@@ -48,6 +51,7 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 	if !st.Ready() {
 		switch errText := st.Error(); {
 		case errText == provision.RegistryFull:
+			// The desk is full: no kick, no refresh — asking again changes nothing.
 			h.say(w, http.StatusOK, "The desk is full; ask "+contact+".", 0)
 		case errText == "error: "+fourcat.ErrSetupPending.Error():
 			// 4CAT's first-run setup is pending: kick provisioning again so
@@ -56,7 +60,10 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 			h.kick(user, id.Admin)
 			h.say(w, http.StatusServiceUnavailable, notReady, 0)
 		case errText != "":
-			h.say(w, http.StatusOK, "Setup failed at "+st.Current()+"; ask "+contact+".", 0)
+			// A failed step is retried on the next visit (ruling F79): kick
+			// and refresh like the provisioning branch; the text is unchanged.
+			h.kick(user, id.Admin)
+			h.say(w, http.StatusOK, "Setup failed at "+st.Current()+"; ask "+contact+".", 3)
 		default:
 			h.kick(user, id.Admin)
 			h.say(w, http.StatusOK, "Setting up your desk — "+st.Current(), 3)

@@ -63,6 +63,7 @@ type fakeProvisioner struct {
 	block     chan struct{}
 	finished  chan struct{}
 	onAdvance func(user string)
+	result    provision.State // returned by Advance when Steps is non-nil
 }
 
 func (f *fakeProvisioner) Advance(_ context.Context, user string, admin bool) provision.State {
@@ -80,6 +81,9 @@ func (f *fakeProvisioner) Advance(_ context.Context, user string, admin bool) pr
 	}
 	if f.finished != nil {
 		f.finished <- struct{}{}
+	}
+	if f.result.Steps != nil {
+		return f.result
 	}
 	return provision.State{Steps: map[string]string{}}
 }
@@ -113,10 +117,20 @@ type fakeSessions struct {
 	openStderr  string
 	openErr     error
 	opens       []openCall
+	starts      int
 }
 
 func (f *fakeSessions) Start(_ context.Context, _ string) (session.StartResult, error) {
+	f.mu.Lock()
+	f.starts++
+	f.mu.Unlock()
 	return f.startResult, nil
+}
+
+func (f *fakeSessions) startCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.starts
 }
 
 func (f *fakeSessions) Ready(_ context.Context, _ string) bool { return f.ready }
@@ -295,7 +309,10 @@ func TestHomeFullMessage(t *testing.T) {
 	if b := rec.Body.String(); !strings.Contains(b, want) {
 		t.Errorf("body %q lacks %q", b, want)
 	}
-	// The registry-full branch does not kick provisioning.
+	// The registry-full branch does not kick provisioning and carries no refresh.
+	if b := rec.Body.String(); strings.Contains(b, "refresh") {
+		t.Errorf("full branch body %q carries a refresh meta", b)
+	}
 	time.Sleep(50 * time.Millisecond)
 	if n := e.prov.callCount(); n != 0 {
 		t.Errorf("Advance called %d times on the full branch, want 0", n)
@@ -350,7 +367,7 @@ func TestHomeSetupPendingShowsNotReady(t *testing.T) {
 	}
 }
 
-func TestHomeSetupFailedDoesNotKick(t *testing.T) {
+func TestHomeSetupFailedKicksAndRefreshes(t *testing.T) {
 	e := newCollectorEnv(t, true)
 	makeTemplateDir(t, e)
 	writeProvisionState(t, e.root, "alice", map[string]string{
@@ -358,18 +375,72 @@ func TestHomeSetupFailedDoesNotKick(t *testing.T) {
 		"dirs":     "done",
 		"template": "error: template missing",
 	})
+	e.prov.started = make(chan string, 1)
+	e.prov.block = make(chan struct{})
+	e.prov.finished = make(chan struct{}, 1)
+
 	rec := e.get(t, "alice", collectorRole, "/desk/")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
+	b := rec.Body.String()
 	want := "Setup failed at template; ask " + testContact + "."
-	if b := rec.Body.String(); !strings.Contains(b, want) {
+	if !strings.Contains(b, want) {
 		t.Errorf("body %q lacks %q", b, want)
 	}
-	// The setup-failed branch does not kick provisioning.
-	time.Sleep(50 * time.Millisecond)
-	if n := e.prov.callCount(); n != 0 {
-		t.Errorf("Advance called %d times on the setup-failed branch, want 0", n)
+	// F79: the setup-failed answer carries the same refresh meta as the
+	// provisioning answer.
+	if !strings.Contains(b, `<meta http-equiv="refresh" content="3">`) {
+		t.Errorf("body %q lacks the refresh meta", b)
+	}
+	// F79: the setup-failed branch kicks provisioning (one Advance).
+	<-e.prov.started
+	close(e.prov.block)
+	<-e.prov.finished
+	if n := e.prov.callCount(); n != 1 {
+		t.Errorf("Advance called %d times on the setup-failed branch, want 1", n)
+	}
+}
+
+func TestHomeSetupFailedHealsOnNextVisit(t *testing.T) {
+	e := newCollectorEnv(t, true)
+	makeTemplateDir(t, e)
+	writeProvisionState(t, e.root, "alice", map[string]string{
+		"registry": "done",
+		"dirs":     "done",
+		"template": "error: template missing: templates/release/test-1.0",
+	})
+	// The retried Advance succeeds: it returns a ready State and heals the
+	// step file on disk.
+	e.prov.result = provision.State{Steps: allDoneSteps()}
+	e.prov.finished = make(chan struct{}, 1)
+	e.prov.onAdvance = func(user string) {
+		_ = writeStateFile(e.root, user, allDoneSteps())
+	}
+	e.sess.startResult = session.Started
+
+	rec := e.get(t, "alice", collectorRole, "/desk/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first visit: status = %d, want 200", rec.Code)
+	}
+	if b := rec.Body.String(); !strings.Contains(b, "Setup failed at template; ask "+testContact+".") {
+		t.Errorf("first visit body %q lacks the failure text", b)
+	}
+	<-e.prov.finished // the kicked Advance has run and healed the step file
+
+	rec2 := e.get(t, "alice", collectorRole, "/desk/")
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second visit: status = %d, want 200", rec2.Code)
+	}
+	b2 := rec2.Body.String()
+	if strings.Contains(b2, "Setup failed") {
+		t.Errorf("second visit still shows the failure")
+	}
+	if !strings.Contains(b2, "<b>Your videos</b>") {
+		t.Errorf("second visit did not render the collector page")
+	}
+	if n := e.sess.startCount(); n != 1 {
+		t.Errorf("Start called %d times, want 1 (the second visit proceeded to Start)", n)
 	}
 }
 
