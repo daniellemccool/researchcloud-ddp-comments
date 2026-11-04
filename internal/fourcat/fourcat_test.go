@@ -168,6 +168,18 @@ func TestSetupUnreachable(t *testing.T) {
 	}
 }
 
+func TestSetupPendingForbiddenMeansDone(t *testing.T) {
+	// Once the admin completed the first-run form, 4CAT answers /first-run/
+	// with 403; any status below 500 means set up.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+	if ok, err := (&Client{FrontendURL: srv.URL}).SetupPending(context.Background()); err != nil || ok {
+		t.Errorf("SetupPending(403) = %v, %v; want false, nil", ok, err)
+	}
+}
+
 func TestSetupPendingBadStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

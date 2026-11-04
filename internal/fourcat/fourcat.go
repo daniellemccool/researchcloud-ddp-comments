@@ -133,9 +133,11 @@ func (c *Client) psql(ctx context.Context, sql string) (string, error) {
 
 // SetupPending reports whether the 4CAT frontend still shows its first-run
 // setup page, by requesting GET <FrontendURL>/first-run/ directly (redirects
-// are never followed). A 2xx whose body (up to 1 MiB) contains
-// "Complete 4CAT Setup" means pending; a 2xx without the title, any 3xx, or
-// a 404 means the setup is done. Any other 4xx/5xx is an error.
+// are never followed). Only a 2xx whose body (up to 1 MiB) contains
+// "Complete 4CAT Setup" means pending; every other answer with a status
+// below 500 — a 2xx without the title, any 3xx, any 4xx including the 403
+// 4CAT answers once the admin completed the form, and 404 — means the setup
+// is done. A 5xx is an error.
 func (c *Client) SetupPending(ctx context.Context) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.FrontendURL, "/")+"/first-run/", nil)
 	if err != nil {
@@ -146,14 +148,11 @@ func (c *Client) SetupPending(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("4CAT unreachable: %T", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusNotFound {
-		return false, nil
-	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return false, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+	if resp.StatusCode >= 500 {
 		return false, fmt.Errorf("unexpected setup page status %d", resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, nil
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
