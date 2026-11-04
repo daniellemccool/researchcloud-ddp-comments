@@ -11,6 +11,7 @@ import (
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 )
 
@@ -41,7 +42,14 @@ func newTestServer(t *testing.T) (*http.Server, string) {
 	}
 	logPath := filepath.Join(root, "state", "access.ndjson")
 	ac := access.Config{CollectorRole: collectorRole, AdminRole: adminRole, GateSecret: testGate}
-	return New(cfg, ac, plat, logPath), logPath
+	// Prov and Sessions stay nil here, as in cmd/desk until a later task wires them.
+	return New(Deps{
+		Cfg:      cfg,
+		Access:   ac,
+		Platform: plat,
+		LogPath:  logPath,
+		Log:      &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: plat.DefaultKind},
+	}), logPath
 }
 
 // do sends one GET through the gated handler and returns the recorded
@@ -69,8 +77,8 @@ func TestNonMember403HasContact(t *testing.T) {
 func TestCollectorNotReadyPage(t *testing.T) {
 	srv, _ := newTestServer(t)
 	rec := do(t, srv, "dmccool2", collectorRole, testGate, "/desk/")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 	b := rec.Body.String()
 	if !strings.Contains(b, "not ready yet") || !strings.Contains(b, testContact) {
@@ -78,15 +86,15 @@ func TestCollectorNotReadyPage(t *testing.T) {
 	}
 }
 
-func TestAdminPlaceholder(t *testing.T) {
+func TestAdminNotReadyWithoutDeps(t *testing.T) {
 	srv, _ := newTestServer(t)
 	rec := do(t, srv, "dmccool2", adminRole, testGate, "/desk/")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 	b := rec.Body.String()
-	if !strings.Contains(b, "Desk admin") || !strings.Contains(b, "dmccool2") {
-		t.Errorf("body %q lacks the title or the username", b)
+	if !strings.Contains(b, "not ready yet") || !strings.Contains(b, testContact) {
+		t.Errorf("body %q lacks the not-ready wording or the contact", b)
 	}
 }
 
@@ -104,10 +112,10 @@ func TestForgedGate(t *testing.T) {
 
 func TestDeskRouteIsExact(t *testing.T) {
 	srv, _ := newTestServer(t)
-	// GET /desk/ still serves the page.
+	// GET /desk/ still serves the home route (503 not-ready without deps).
 	rec := do(t, srv, "dmccool2", collectorRole, testGate, "/desk/")
-	if rec.Code != http.StatusOK {
-		t.Errorf("/desk/: status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("/desk/: status = %d, want 503", rec.Code)
 	}
 	// An authenticated GET /desk/x is 404: the route is exact, not a subtree.
 	rec = do(t, srv, "dmccool2", collectorRole, testGate, "/desk/x")
@@ -116,15 +124,13 @@ func TestDeskRouteIsExact(t *testing.T) {
 	}
 }
 
-func TestFourcatNotYet(t *testing.T) {
+func TestFourcatNilHandler404(t *testing.T) {
 	srv, _ := newTestServer(t)
+	// The FourcatProxy Deps handler is nil until a later task: 404, not 503.
 	for _, path := range []string{"/fourcat/", "/fourcat/anything"} {
 		rec := do(t, srv, "dmccool2", adminRole, testGate, path)
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Fatalf("%s: status = %d, want 503", path, rec.Code)
-		}
-		if b := rec.Body.String(); !strings.Contains(b, "4CAT access through the desk is not yet available") {
-			t.Errorf("%s: body %q lacks the not-yet text", path, b)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s: status = %d, want 404", path, rec.Code)
 		}
 	}
 }

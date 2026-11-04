@@ -17,6 +17,7 @@ import (
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/web"
 )
@@ -76,7 +77,13 @@ func serve(args []string) error {
 	}
 	logPath := filepath.Join(cfg.DeskRoot, "state", "access.ndjson")
 
-	gated := web.New(cfg, ac, p, logPath)
+	gated := web.New(web.Deps{
+		Cfg:      cfg,
+		Access:   ac,
+		Platform: p,
+		LogPath:  logPath,
+		Log:      &desklog.Log{Path: filepath.Join(cfg.DeskRoot, "state", "desk-log.ndjson"), DefaultKind: p.DefaultKind},
+	})
 	gated.Addr = *listen
 	container := web.NewContainer()
 	container.Addr = *containerListen

@@ -16,7 +16,10 @@ import (
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
 
 // Default addresses of the two listeners; the caller may override Addr.
@@ -25,25 +28,70 @@ const (
 	defaultContainerAddr = ":8111"
 )
 
+// provisioner is what the home handler needs of *provision.Provisioner
+// (controller ruling F54: small interfaces, so tests can use fakes).
+type provisioner interface {
+	Advance(ctx context.Context, user string, admin bool) provision.State
+}
+
+// sessions is what the routes need of *session.Manager.
+type sessions interface {
+	Start(ctx context.Context, user string) (session.StartResult, error)
+	Ready(ctx context.Context, user string) bool
+	OpenURL(ctx context.Context, user, url string) (int, string, error)
+}
+
+// Deps are the gated listener's dependencies. Prov and Sessions may be nil
+// until a later task wires them; the home handler then answers the 503
+// not-ready message. FourcatProxy, Relay and Admin are nil until a later
+// task supplies them; their routes then answer 404.
+type Deps struct {
+	Cfg          *config.Config
+	Access       access.Config
+	Platform     *platform.Platform
+	LogPath      string       // the access log
+	Prov         provisioner  // *provision.Provisioner
+	Sessions     sessions     // *session.Manager
+	Log          *desklog.Log // the desk log (<desk root>/state/desk-log.ndjson)
+	FourcatProxy http.Handler // nil until a later task
+	Relay        http.Handler // nil until a later task
+	Admin        http.Handler // nil until a later task
+}
+
 // New returns the gated listener's server. Every request goes through the
 // gate first: access.FromRequest is called exactly once per request, in the
-// handler below. logPath is the access log (<desk root>/state/access.ndjson).
-// New panics when ac.GateSecret is empty: an empty secret must fail closed,
-// never open, so a server built without one is a programming error.
-func New(cfg *config.Config, ac access.Config, p *platform.Platform, logPath string) *http.Server {
-	if ac.GateSecret == "" {
+// handler below. New panics when d.Access.GateSecret is empty: an empty
+// secret must fail closed, never open, so a server built without one is a
+// programming error.
+func New(d Deps) *http.Server {
+	if d.Access.GateSecret == "" {
 		panic("web: New: access.Config.GateSecret is empty; the gate must fail closed")
 	}
 	h := &handler{
-		cfg:      cfg,
-		ac:       ac,
-		platform: p,
-		log:      newAccessLog(logPath),
+		cfg:      d.Cfg,
+		ac:       d.Access,
+		platform: d.Platform,
+		log:      newAccessLog(d.LogPath),
 		pages:    mustLoadPages(),
+		prov:     d.Prov,
+		sessions: d.Sessions,
+		deskLog:  d.Log,
+		fourcat:  d.FourcatProxy,
+		relay:    d.Relay,
+		admin:    d.Admin,
+		kinds:    newPlatformKinds(d.Platform),
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /desk/{$}", h.serveDesk) // the desk page, exactly /desk/
-	mux.HandleFunc("/fourcat/", h.serveFourcat)  // every method under the prefix
+	mux.HandleFunc("GET /desk/{$}", h.serveHome)          // the collector page, exactly /desk/
+	mux.HandleFunc("GET /desk/status", h.serveStatus)     // {"ready":bool} for the page's poll
+	mux.HandleFunc("POST /desk/claim", h.serveClaim)      // get more items
+	mux.HandleFunc("POST /desk/open", h.serveOpen)        // open one claimed item
+	mux.HandleFunc("POST /desk/problem", h.serveProblem)  // mark a problem on a claimed item
+	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)   // nil Admin handler → 404
+	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin) // nil Admin handler → 404
+	mux.HandleFunc("/desk/admin/", h.serveAdminTree)      // admins only, else 404
+	mux.HandleFunc("/desk/vnc/", h.serveVNC)              // nil Relay → 404
+	mux.HandleFunc("/fourcat/", h.serveFourcat)           // admins only, nil proxy → 404
 	h.routes = mux
 	return &http.Server{Addr: defaultGatedAddr, Handler: h}
 }
@@ -73,6 +121,16 @@ type handler struct {
 	log      *accessLog
 	pages    *pages
 	routes   *http.ServeMux
+
+	prov     provisioner    // nil until wired: home answers 503 not-ready
+	sessions sessions       // nil until wired: home answers 503 not-ready
+	deskLog  *desklog.Log   // the desk log
+	fourcat  http.Handler   // /fourcat/ proxy, nil → 404
+	relay    http.Handler   // /desk/vnc/ relay, nil → 404
+	admin    http.Handler   // /desk/admin/ pages, nil → 404
+	kinds    *platformKinds // the pool.Kinds adapter over the platform
+
+	provisioning sync.Map // users with an Advance goroutine in flight
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -93,26 +151,6 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.routes.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, id)))
-}
-
-func (h *handler) serveDesk(w http.ResponseWriter, r *http.Request) {
-	id := r.Context().Value(ctxKey{}).(access.Identity)
-	if id.Admin {
-		h.pages.render(w, http.StatusOK, "admin", pageData{
-			Title:    "Desk admin",
-			User:     id.User,
-			Platform: h.platform.Label,
-		})
-		return
-	}
-	h.pages.render(w, http.StatusOK, "notready", pageData{
-		Title:   "Desk",
-		Contact: h.cfg.Contact,
-	})
-}
-
-func (h *handler) serveFourcat(w http.ResponseWriter, _ *http.Request) {
-	plain(w, http.StatusServiceUnavailable, "4CAT access through the desk is not yet available")
 }
 
 func plain(w http.ResponseWriter, status int, body string) {
