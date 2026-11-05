@@ -26,7 +26,9 @@ const maxBody = 16 << 20
 // Member is one CO member as the desk uses it.
 type Member struct {
 	Username string
-	Roles    []string
+	// Roles nil means the API sent no usable role list; callers must treat
+	// it as unknown, not as no role.
+	Roles []string
 }
 
 // Client reads the CO member list. HTTP nil means a client with a 10 s timeout
@@ -52,9 +54,9 @@ func (c *Client) http() *http.Client {
 	return defaultHTTP
 }
 
-// Fetch returns the members, skipping entries with an invalid username or
-// roles that are not a list. Any failure, and an empty list (ErrEmpty), is an
-// error.
+// Fetch returns the members, skipping entries with an invalid username; an
+// entry whose roles are not a list of strings is kept with Roles nil. Any
+// failure, and an empty list (ErrEmpty), is an error.
 func (c *Client) Fetch(ctx context.Context) ([]Member, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Endpoint, nil)
 	if err != nil {
@@ -87,17 +89,23 @@ func (c *Client) Fetch(ctx context.Context) ([]Member, error) {
 		if !userRe.MatchString(e.Username) {
 			continue
 		}
-		if !bytes.HasPrefix(bytes.TrimSpace(e.Roles), []byte("[")) {
-			continue
-		}
-		var roles []string
-		if err := json.Unmarshal(e.Roles, &roles); err != nil {
-			continue
-		}
-		out = append(out, Member{Username: e.Username, Roles: roles})
+		out = append(out, Member{Username: e.Username, Roles: parseRoles(e.Roles)})
 	}
 	if len(out) == 0 {
 		return nil, ErrEmpty
 	}
 	return out, nil
+}
+
+// parseRoles returns the roles when raw is a JSON list of strings, else nil
+// (absent, null, a string, or a list holding a non-string).
+func parseRoles(raw json.RawMessage) []string {
+	if !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("[")) {
+		return nil
+	}
+	var roles []string
+	if err := json.Unmarshal(raw, &roles); err != nil {
+		return nil
+	}
+	return roles
 }

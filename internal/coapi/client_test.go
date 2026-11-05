@@ -73,20 +73,32 @@ func TestFetchFailures(t *testing.T) {
 	}
 }
 
+// Only an invalid username is skipped; an entry whose roles are not a list
+// of strings keeps its username with Roles nil (unknown, not "no role").
 func TestFetchSkipsBadEntries(t *testing.T) {
 	c := serve(t, 200, `[
 		{"username":"alice","roles":["src_co_admin"]},
 		{"username":"Bad User","roles":[]},
 		{"username":"bob","roles":"src_co_member"},
 		{"roles":[]},
-		{"username":"carol","roles":["x"]}]`)
+		{"username":"carol","roles":["x"]},
+		{"username":"erin","roles":[1,2]},
+		{"username":"frank"},
+		{"username":"gina","roles":null}]`)
 	got, err := c.Fetch(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Member{{"alice", []string{"src_co_admin"}}, {"carol", []string{"x"}}}
+	want := []Member{
+		{"alice", []string{"src_co_admin"}},
+		{"bob", nil},
+		{"carol", []string{"x"}},
+		{"erin", nil},
+		{"frank", nil},
+		{"gina", nil},
+	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
+		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }
 
@@ -110,6 +122,7 @@ func TestFetchFixture(t *testing.T) {
 		{"alice", []string{"src_co_admin", "rsc_developers"}},
 		{"bob", []string{"src_co_member"}},
 		{"carol", []string{}},
+		{"dave", nil}, // roles is a string, not a list: kept, roles unknown
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
