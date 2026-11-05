@@ -47,10 +47,9 @@ func ReadMemTotal(path string) (int64, error) {
 	return 0, fmt.Errorf("%s: no MemTotal line", path)
 }
 
-// CapByMemory returns min(maxRunning, max(1, (memTotal-MemoryReserve) /
-// (FirefoxMemory+ProxyMemory))) and whether the memory term was the smaller.
-// MemorySeats returns how many pairs memTotal allows: (memTotal-MemoryReserve)
-// / (FirefoxMemory+ProxyMemory), at least 1.
+// MemorySeats returns how many pairs fit in memTotal once MemoryReserve is
+// kept back: (memTotal-MemoryReserve) / (FirefoxMemory+ProxyMemory), never
+// less than 1, so a small box still runs one pair.
 func MemorySeats(memTotal int64) int {
 	return int(max((memTotal-MemoryReserve)/(FirefoxMemory+ProxyMemory), 1))
 }
