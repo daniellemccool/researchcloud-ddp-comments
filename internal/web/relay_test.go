@@ -585,3 +585,32 @@ func TestOnlyUpgradesCountAsScreens(t *testing.T) {
 		t.Errorf("lastScreenClose = %v, want %v", last, closedAt)
 	}
 }
+
+// absentView is the relay's poll view in the tests.
+type absentView map[string]bool
+
+func (a absentView) Absent(user string) bool { return a[user] }
+
+// A user absent from the last good CO list gets 403 before the running
+// check, so noVNC's auto-reconnect cannot reopen a screen during a revoke.
+func TestRelayRefusesAbsentUser(t *testing.T) {
+	alice := newScreenBackend(t, "alice-screen")
+	relay, dials := newTestRelay(t, map[string]bool{"alice": true, "bob": true},
+		map[string]string{"desk-firefox-alice": alice.srv.Listener.Addr().String()})
+	relay.Members = absentView{"alice": true}
+	req := httptest.NewRequest(http.MethodGet, "/desk/vnc/", nil)
+	rec := httptest.NewRecorder()
+	relay.ServeHTTP(rec, withIdentity(req, access.Identity{User: "alice", Collector: true}))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if n := len(dials.dialled()); n != 0 {
+		t.Errorf("dialled %d times, want 0 for an absent user", n)
+	}
+	if n := alice.requests(); n != 0 {
+		t.Errorf("alice's backend got %d requests, want 0", n)
+	}
+	if n := relay.activity.CloseUser("alice"); n != 0 {
+		t.Errorf("an absent user's refused request left %d open screens", n)
+	}
+}

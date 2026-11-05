@@ -37,6 +37,12 @@ type Relay struct {
 	// Dial is the transport's dial function; nil means a plain net.Dialer.
 	// Tests set it to observe or redirect the dialled host.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// Members is the CO poll's view, set after NewRelay; nil means nobody
+	// is ever absent. A user the last good list lacks is refused before the
+	// running check, so noVNC's auto-reconnect cannot reopen a screen while
+	// a revoke stops the pair (ADR-0008).
+	Members interface{ Absent(user string) bool }
 }
 
 // NewRelay returns the screen relay. A request whose owner's pair is not
@@ -102,6 +108,10 @@ func badGateway(name string) func(http.ResponseWriter, *http.Request, error) {
 // Plain requests (noVNC's assets) are not screens and are not tracked.
 func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	id := identity(req)
+	if r.Members != nil && r.Members.Absent(id.User) {
+		plain(w, http.StatusForbidden, "access removed")
+		return
+	}
 	if !r.running.IsRunning(req.Context(), id.User) {
 		plain(w, http.StatusConflict, "screen not running")
 		return

@@ -445,3 +445,40 @@ func TestAdminConcurrentUploadsLoseNothing(t *testing.T) {
 		t.Errorf("pool has %d rows, want all %d: %v", len(rows), n, rows)
 	}
 }
+
+// The overview shows the CO poll status line, as a warning when it alarms,
+// and no line at all without a poller.
+func TestAdminOverviewShowsPollLine(t *testing.T) {
+	newServer := func(m interface {
+		Absent(string) bool
+		StatusLine() string
+	}) *http.Server {
+		root := t.TempDir()
+		plat := testPlatform()
+		d := Deps{
+			Cfg:      &config.Config{DeskRoot: root, CollectorRole: collectorRole, AdminRole: adminRole, Contact: testContact, Platform: "test"},
+			Access:   access.Config{CollectorRole: collectorRole, AdminRole: adminRole, GateSecret: testGate},
+			Platform: plat,
+			LogPath:  filepath.Join(root, "state", "access.ndjson"),
+			Log:      &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: plat.DefaultKind},
+			Members:  m,
+		}
+		d.Admin = NewAdmin(d)
+		return New(d)
+	}
+
+	b := getAdmin(t, newServer(fakeMembers{line: "CO poll: last good 12:34, 0 failures"}), "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<h2>Members</h2><p>CO poll: last good 12:34, 0 failures</p>`; !strings.Contains(b, want) {
+		t.Errorf("overview lacks %q:\n%s", want, b)
+	}
+
+	b = getAdmin(t, newServer(fakeMembers{line: "ALARM: CO poll: no good poll yet, 3 failures <x>"}), "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<p class="warn">ALARM: CO poll: no good poll yet, 3 failures &lt;x&gt;</p>`; !strings.Contains(b, want) {
+		t.Errorf("overview lacks the alarm line %q:\n%s", want, b)
+	}
+
+	b = getAdmin(t, newServer(nil), "root", adminRole, "/desk/admin/").Body.String()
+	if strings.Contains(b, "CO poll") || strings.Contains(b, "<h2>Members</h2>") {
+		t.Errorf("overview without a poller shows a poll line:\n%s", b)
+	}
+}

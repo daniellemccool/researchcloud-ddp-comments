@@ -12,11 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/coapi"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/ctl"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/docker"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/locks"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
 
@@ -325,5 +328,96 @@ func TestOpsSeatsLine(t *testing.T) {
 	o.memorySeats = 0
 	if got, want := o.seatsLine(), "seats: 3 running at most (configured 6; memory allows unknown)"; got != want {
 		t.Errorf("seatsLine = %q, want %q", got, want)
+	}
+}
+
+// statusLiner is a fixed poll status line.
+type statusLiner string
+
+func (s statusLiner) StatusLine() string { return string(s) }
+
+// desk status prints the CO poll line right after the seats line.
+func TestOpsStatusPrintsPollLine(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{DeskRoot: root, MaxRunning: 2}
+	reg := &registry.Registry{Path: filepath.Join(root, "registry.tsv"), MaxSessions: 4}
+	if err := os.WriteFile(reg.Path, []byte("alice\t1\tlive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := &ops{
+		mgr:           &session.Manager{Cfg: cfg, Docker: docker.NewFake(), Reg: reg, Locks: &locks.Set{}},
+		cfg:           cfg,
+		configuredMax: 2,
+		memorySeats:   3,
+		members:       statusLiner("CO poll: last good 09:15, 0 failures"),
+	}
+	text, err := o.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "seats: ") ||
+		lines[1] != "CO poll: last good 09:15, 0 failures" || !strings.HasPrefix(lines[2], "alice\t1\t") {
+		t.Errorf("status = %q, want the seats line, the poll line, then alice's row", text)
+	}
+}
+
+// One poll round: a good list without alice revokes her, logs a revoke
+// event with code co_absent and closes her screens; a failed poll changes
+// nothing.
+func TestPollOnceRevokesAbsent(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{DeskRoot: root, MaxRunning: 2, MaxSessions: 4}
+	reg := &registry.Registry{Path: filepath.Join(root, "registry.tsv"), MaxSessions: 4}
+	if err := os.WriteFile(reg.Path, []byte("alice\t1\tlive\nbob\t2\tlive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &session.Manager{Cfg: cfg, Docker: docker.NewFake(), Reg: reg, Locks: &locks.Set{}}
+	dlog := &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson")}
+	var closed []string
+	fail := true
+	poller := &coapi.Poller{
+		Fetch: func(context.Context) ([]coapi.Member, error) {
+			if fail {
+				return nil, errors.New("api down")
+			}
+			return []coapi.Member{{Username: "bob"}}, nil
+		},
+		Now: time.Now,
+	}
+	round := &pollRound{
+		poller:       poller,
+		mgr:          mgr,
+		closeScreens: func(u string) int { closed = append(closed, u); return 0 },
+		forget:       func(string) {},
+		log:          dlog,
+		logf:         t.Logf,
+	}
+	ctx := context.Background()
+	round.once(ctx)
+	if live, _ := reg.Live(); len(live) != 2 {
+		t.Fatalf("a failed poll changed the registry: %v", live)
+	}
+	fail = false
+	round.once(ctx)
+	live, err := reg.Live()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := live["alice"]; ok {
+		t.Error("alice still live after a good poll without her")
+	}
+	if _, ok := live["bob"]; !ok {
+		t.Error("bob was revoked")
+	}
+	evs, err := dlog.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0].User != "alice" || evs[0].Action != "revoke" || evs[0].Code != "co_absent" || evs[0].T == 0 {
+		t.Errorf("desk log = %+v, want one revoke/co_absent event for alice", evs)
+	}
+	if len(closed) != 2 || closed[0] != "alice" || closed[1] != "alice" {
+		t.Errorf("closeScreens calls = %v, want alice twice", closed)
 	}
 }

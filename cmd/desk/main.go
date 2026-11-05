@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/coapi"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/ctl"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
@@ -162,7 +163,11 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 
 	reg := &registry.Registry{Path: filepath.Join(cfg.DeskRoot, "registry.tsv"), MaxSessions: cfg.MaxSessions}
 	lockSet := &locks.Set{}
-	prov := &provision.Provisioner{Cfg: cfg, Reg: reg, Fourcat: fc, Locks: lockSet}
+	// The CO poll's view (ADR-0005): the registry step, the relay and the
+	// home page refuse a user the last good member list lacks.
+	co := &coapi.Client{Endpoint: cfg.COEndpoint, Token: cfg.COToken}
+	poller := &coapi.Poller{Fetch: co.Fetch, Now: time.Now}
+	prov := &provision.Provisioner{Cfg: cfg, Reg: reg, Fourcat: fc, Locks: lockSet, Members: poller}
 	dlog := &desklog.Log{Path: filepath.Join(cfg.DeskRoot, "state", "desk-log.ndjson"), DefaultKind: p.DefaultKind}
 	mgr := &session.Manager{
 		Cfg:    cfg,
@@ -189,7 +194,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	ctlErr := make(chan error, 1)
 	ctlReady := make(chan struct{}, 1)
 	go func() {
-		ctlErr <- ctl.ServeReady(ctlCtx, socketPath, &ops{mgr: mgr, cfg: cfg, platformDir: platformDir, configuredMax: configured, memorySeats: memAllows}, ctlReady)
+		ctlErr <- ctl.ServeReady(ctlCtx, socketPath, &ops{mgr: mgr, cfg: cfg, platformDir: platformDir, configuredMax: configured, memorySeats: memAllows, members: poller}, ctlReady)
 	}()
 	select {
 	case <-ctlReady:
@@ -208,6 +213,8 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// One activity tracker for the whole desk: the relay records open
 	// screens in it and can close a user's screens through it.
 	activity := web.NewActivity(time.Now)
+	relay := web.NewRelay(mgr, activity)
+	relay.Members = poller
 	deps := web.Deps{
 		Cfg:          cfg,
 		Access:       ac,
@@ -217,8 +224,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		Sessions:     mgr,
 		Log:          dlog,
 		FourcatProxy: fourcatProxy(cfg),
-		Relay:        web.NewRelay(mgr, activity),
+		Relay:        relay,
 		Activity:     activity,
+		Members:      poller,
 	}
 	// The idle stop (the reaper) runs for the serve lifetime: serveCtx is
 	// cancelled on every way out of serve. desk_idle_seconds = 0 turns it off.
@@ -237,6 +245,16 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	} else {
 		_, _ = fmt.Fprintln(stderr, "desk: idle stop off (desk_idle_seconds = 0)")
 	}
+	// The CO poll runs for the serve lifetime too: a first poll now, then
+	// every minute; a good list revokes the users it omits.
+	go (&pollRound{
+		poller:       poller,
+		mgr:          mgr,
+		closeScreens: activity.CloseUser,
+		forget:       activity.Forget,
+		log:          dlog,
+		logf:         mgr.Log.Printf,
+	}).run(serveCtx, time.Minute)
 
 	deps.Admin = web.NewAdmin(deps)
 	gated := web.New(deps)
@@ -342,4 +360,49 @@ func majorMinor(s string) (major, minor int, ok bool) {
 		return 0, 0, false
 	}
 	return major, minor, true
+}
+
+// pollRound is the CO poll loop of desk serve (ADR-0005): each round fetches
+// the member list once and, only when the poll is good, revokes the users it
+// omits and finishes revokes cut short. A failed poll changes nothing; the
+// poller counts it for the status line.
+type pollRound struct {
+	poller       *coapi.Poller
+	mgr          *session.Manager
+	closeScreens func(user string) int // closes a user's relayed screens
+	forget       func(user string)     // restarts a user's idle clocks
+	log          *desklog.Log
+	logf         func(format string, args ...any)
+}
+
+// run polls now and then every period until ctx is cancelled.
+func (p *pollRound) run(ctx context.Context, every time.Duration) {
+	p.once(ctx)
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.once(ctx)
+		}
+	}
+}
+
+// once is one round: poll, then on a good list revoke, restart the revoked
+// users' clocks and append a revoke event per revoked user.
+func (p *pollRound) once(ctx context.Context) {
+	present, ok := p.poller.Poll(ctx)
+	if !ok {
+		p.logf("CO poll failed (%d in a row); nothing changes", p.poller.Failures())
+		return
+	}
+	for _, user := range p.mgr.RevokeAbsent(ctx, present, p.closeScreens) {
+		p.forget(user)
+		ev := desklog.Event{T: time.Now().Unix(), User: user, Action: "revoke", Code: "co_absent"}
+		if err := p.log.Append(ev); err != nil {
+			p.logf("desk log (revoke %s): %v", user, err)
+		}
+	}
 }

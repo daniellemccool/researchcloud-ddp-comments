@@ -63,6 +63,7 @@ type adminHandler struct {
 	poolPath string
 	kinds    *platformKinds
 	log      *desklog.Log
+	members  interface{ StatusLine() string } // the CO poll, nil → no poll line
 
 	addMu   sync.Mutex // held around pool.Add, whose read-modify-write contract requires it (F75)
 	mu      sync.Mutex
@@ -75,6 +76,7 @@ func NewAdmin(d Deps) http.Handler {
 		poolPath: filepath.Join(d.Cfg.DeskRoot, "pool.csv"),
 		kinds:    newPlatformKinds(d.Platform),
 		log:      d.Log,
+		members:  d.Members,
 		notices:  make(map[string]string),
 	}
 }
@@ -93,8 +95,8 @@ func (a *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveOverview is GET /desk/admin/{$}: the queue line, the upload form and
-// the plan-2b note, with the one-shot notice taken for this user.
+// serveOverview is GET /desk/admin/{$}: the queue line, the upload form, the
+// CO poll line and the plan-2b note, with the one-shot notice taken for this user.
 func (a *adminHandler) serveOverview(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
 	body := a.overviewBody(a.takeNotice(id.User))
@@ -105,9 +107,23 @@ func (a *adminHandler) serveOverview(w http.ResponseWriter, r *http.Request) {
 
 // overviewBody renders the admin page with the given notice (not stored).
 func (a *adminHandler) overviewBody(notice string) string {
-	inner := `<h2>Queue</h2><p>` + a.poolLine() + `</p>` + uploadForm +
+	inner := `<h2>Queue</h2><p>` + a.poolLine() + `</p>` + uploadForm + a.pollLine() +
 		`<p>Sessions, 4CAT, export and problems arrive in plan 2b.</p>`
 	return adminShell("Desk admin", inner, notice, false)
+}
+
+// pollLine is the Members section: the CO poll's status line (ADR-0005),
+// shown as a warning while it alarms; "" without a poller.
+func (a *adminHandler) pollLine() string {
+	if a.members == nil {
+		return ""
+	}
+	line := a.members.StatusLine()
+	class := ""
+	if strings.HasPrefix(line, "ALARM") {
+		class = ` class="warn"`
+	}
+	return `<h2>Members</h2><p` + class + `>` + html.EscapeString(line) + `</p>`
 }
 
 // poolLine is the Queue line (the overview's pool line):

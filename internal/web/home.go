@@ -23,8 +23,11 @@ import (
 )
 
 // serveHome is GET /desk/, in order:
-// no release template and no profile → 503 not-ready; the provisioning state
-// decides between the full / setup-failed / not-ready / setting-up messages;
+// no release template and no profile → 503 not-ready; a user the last good CO
+// list lacks gets the access-removed message and no kick (a revoke marked
+// their registry step undone, and reactivation needs the poll's agreement);
+// otherwise the provisioning state decides between the full / setup-failed /
+// not-ready / setting-up messages;
 // once ready, Start decides between busy / start-failed / gone / the page.
 // Every not-ready state except registry-full kicks the single-flight
 // background Advance (rulings F73/F79), so a failed step is retried on the
@@ -52,6 +55,14 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 
 	st := provision.Load(h.cfg, user)
 	if !st.Ready() {
+		if h.members != nil && h.members.Absent(user) {
+			// No kick: the registry step would refuse anyway, and a gate
+			// still admitting a removed member must not make the desk
+			// reactivate and revoke them every minute. A member just added
+			// sees this until the next good poll lists them.
+			h.say(w, http.StatusOK, "Your access to the desk was removed. If you were just re-added, try again in a minute; otherwise contact "+contact+".", 0)
+			return
+		}
 		switch errText := st.Error(); {
 		case errText == provision.RegistryFull:
 			// The desk is full: no kick, no refresh — asking again changes nothing.
@@ -74,6 +85,12 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Restart the idle clocks before Start too: a reaper pass waiting on the
+	// user lock re-checks idleness after Start releases it, and must find
+	// this page load (F105).
+	if h.activity != nil {
+		h.activity.Forget(user)
+	}
 	res, err := h.sessions.Start(r.Context(), user)
 	if err != nil {
 		log.Printf("web: start %s: %v", user, err)

@@ -119,12 +119,16 @@ type fakeSessions struct {
 	openErr     error
 	opens       []openCall
 	starts      int
+	onStart     func() // runs inside Start, before it returns
 }
 
 func (f *fakeSessions) Start(_ context.Context, _ string) (session.StartResult, error) {
 	f.mu.Lock()
 	f.starts++
 	f.mu.Unlock()
+	if f.onStart != nil {
+		f.onStart()
+	}
 	return f.startResult, nil
 }
 

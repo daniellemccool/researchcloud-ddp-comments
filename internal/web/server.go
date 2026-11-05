@@ -42,6 +42,13 @@ type sessions interface {
 	OpenURL(ctx context.Context, user, url string) (int, string, error)
 }
 
+// membersView is what the routes need of the CO poll (*coapi.Poller): Absent
+// gates the home page and the relay, StatusLine is the admin overview's line.
+type membersView interface {
+	Absent(user string) bool
+	StatusLine() string
+}
+
 // Deps are the gated listener's dependencies. Prov and Sessions may be nil
 // until a later task wires them; the home handler then answers the 503
 // not-ready message. FourcatProxy, Relay and Admin are nil until a later
@@ -55,6 +62,7 @@ type Deps struct {
 	Sessions     sessions     // *session.Manager
 	Log          *desklog.Log // the desk log (<desk root>/state/desk-log.ndjson)
 	Activity     *Activity    // nil: /desk/active records nothing, home skips the Forget
+	Members      membersView  // the CO poll (*coapi.Poller); nil: nobody is ever absent, no poll line
 	FourcatProxy http.Handler // nil until a later task
 	Relay        http.Handler // nil until a later task
 	Admin        http.Handler // nil until a later task
@@ -82,6 +90,7 @@ func New(d Deps) *http.Server {
 		relay:    d.Relay,
 		admin:    d.Admin,
 		activity: d.Activity,
+		members:  d.Members,
 		kinds:    newPlatformKinds(d.Platform),
 	}
 	mux := http.NewServeMux()
@@ -152,6 +161,7 @@ type handler struct {
 	relay    http.Handler   // /desk/vnc/ relay, nil → 404
 	admin    http.Handler   // /desk/admin/ pages, nil → 404
 	activity *Activity      // per-user input and screen clocks, nil → nothing recorded
+	members  membersView    // the CO poll's view, nil → nobody absent
 	kinds    *platformKinds // the pool.Kinds adapter over the platform
 
 	provisioning   sync.Map      // users with an Advance goroutine in flight

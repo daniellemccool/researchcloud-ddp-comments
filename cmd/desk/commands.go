@@ -190,18 +190,24 @@ func statusText(rows []session.Row) string {
 type ops struct {
 	mgr           *session.Manager
 	cfg           *config.Config
-	platformDir   string // <repo>/platforms/<cfg.Platform>
-	configuredMax int    // desk_max_running as configured, before the memory cap
-	memorySeats   int    // pairs the box memory allows; 0 = unknown (meminfo unreadable)
+	platformDir   string                           // <repo>/platforms/<cfg.Platform>
+	configuredMax int                              // desk_max_running as configured, before the memory cap
+	memorySeats   int                              // pairs the box memory allows; 0 = unknown (meminfo unreadable)
+	members       interface{ StatusLine() string } // the CO poll; nil → no poll line
 }
 
-// Status returns the one-line-per-row text of the manager's Status.
+// Status returns the seats line, the CO poll line (ADR-0005) and the
+// one-line-per-row text of the manager's Status.
 func (o *ops) Status(ctx context.Context) (string, error) {
 	rows, err := o.mgr.Status(ctx)
 	if err != nil {
 		return "", err
 	}
-	return o.seatsLine() + "\n" + statusText(rows), nil
+	head := o.seatsLine() + "\n"
+	if o.members != nil {
+		head += o.members.StatusLine() + "\n"
+	}
+	return head + statusText(rows), nil
 }
 
 // seatsLine is the first line of Status: the effective running cap beside the
