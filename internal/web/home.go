@@ -87,6 +87,11 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 	case session.Gone:
 		h.say(w, http.StatusOK, "Your desk is changing; this page reloads in a moment.", 3)
 	default: // session.Started
+		// Opening the page is input: a pair started after any stop begins
+		// with both idle clocks fresh.
+		if h.activity != nil {
+			h.activity.Forget(user)
+		}
 		h.servePage(w, id)
 	}
 }
@@ -253,6 +258,7 @@ func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 		Body:          body.String(),
 		OpenHelp:      len(view.Claims) == 0,
 		FooterHint:    footer,
+		IdleMinutes:   h.cfg.IdleSeconds / 60,
 	})))
 }
 

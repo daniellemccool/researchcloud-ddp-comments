@@ -38,6 +38,7 @@ type provisioner interface {
 type sessions interface {
 	Start(ctx context.Context, user string) (session.StartResult, error)
 	Ready(ctx context.Context, user string) bool
+	IsRunning(ctx context.Context, user string) bool
 	OpenURL(ctx context.Context, user, url string) (int, string, error)
 }
 
@@ -53,6 +54,7 @@ type Deps struct {
 	Prov         provisioner  // *provision.Provisioner
 	Sessions     sessions     // *session.Manager
 	Log          *desklog.Log // the desk log (<desk root>/state/desk-log.ndjson)
+	Activity     *Activity    // nil: /desk/active records nothing, home skips the Forget
 	FourcatProxy http.Handler // nil until a later task
 	Relay        http.Handler // nil until a later task
 	Admin        http.Handler // nil until a later task
@@ -79,6 +81,7 @@ func New(d Deps) *http.Server {
 		fourcat:  d.FourcatProxy,
 		relay:    d.Relay,
 		admin:    d.Admin,
+		activity: d.Activity,
 		kinds:    newPlatformKinds(d.Platform),
 	}
 	mux := http.NewServeMux()
@@ -87,6 +90,7 @@ func New(d Deps) *http.Server {
 	mux.HandleFunc("POST /desk/claim", sameOrigin(h.serveClaim))     // get more items
 	mux.HandleFunc("POST /desk/open", sameOrigin(h.serveOpen))       // open one claimed item
 	mux.HandleFunc("POST /desk/problem", sameOrigin(h.serveProblem)) // mark a problem on a claimed item
+	mux.HandleFunc("POST /desk/active", sameOrigin(h.serveActive))   // page heartbeat: input seen, is the pair running
 	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)              // nil Admin handler → 404
 	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin)            // nil Admin handler → 404
 	mux.HandleFunc("GET /desk/admin", func(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +151,7 @@ type handler struct {
 	fourcat  http.Handler   // /fourcat/ proxy, nil → 404
 	relay    http.Handler   // /desk/vnc/ relay, nil → 404
 	admin    http.Handler   // /desk/admin/ pages, nil → 404
+	activity *Activity      // per-user input and screen clocks, nil → nothing recorded
 	kinds    *platformKinds // the pool.Kinds adapter over the platform
 
 	provisioning   sync.Map      // users with an Advance goroutine in flight

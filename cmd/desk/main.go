@@ -217,6 +217,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		Log:          dlog,
 		FourcatProxy: fourcatProxy(cfg),
 		Relay:        web.NewRelay(mgr, activity),
+		Activity:     activity,
 	}
 	deps.Admin = web.NewAdmin(deps)
 	gated := web.New(deps)

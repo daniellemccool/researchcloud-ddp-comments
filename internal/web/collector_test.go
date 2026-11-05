@@ -113,6 +113,7 @@ type fakeSessions struct {
 	mu          sync.Mutex
 	startResult session.StartResult
 	ready       bool
+	running     bool
 	openRC      int
 	openStderr  string
 	openErr     error
@@ -134,6 +135,8 @@ func (f *fakeSessions) startCount() int {
 }
 
 func (f *fakeSessions) Ready(_ context.Context, _ string) bool { return f.ready }
+
+func (f *fakeSessions) IsRunning(_ context.Context, _ string) bool { return f.running }
 
 func (f *fakeSessions) OpenURL(_ context.Context, user, url string) (int, string, error) {
 	f.mu.Lock()
@@ -1169,5 +1172,88 @@ func TestCollectorPostsRefuseCrossSite(t *testing.T) {
 	}
 	if rec := postWith(t, e.srv, "/desk/open?id=111", map[string]string{"Origin": "http://example.com"}); rec.Code != http.StatusNoContent {
 		t.Errorf("same-host Origin open: status = %d, want 204", rec.Code)
+	}
+}
+
+// activeEnv is a collectorEnv whose server carries a fake-clock Activity.
+func newActiveEnv(t *testing.T) (*collectorEnv, *Activity, *time.Time) {
+	t.Helper()
+	e := newCollectorEnv(t, false)
+	clock := time.Unix(1_000_000, 0)
+	act := NewActivity(func() time.Time { return clock })
+	e.srv.Handler.(*handler).activity = act
+	return e, act, &clock
+}
+
+func TestActiveRecordsInputAndAnswersRunning(t *testing.T) {
+	e, act, clock := newActiveEnv(t)
+	e.sess.running = true
+	act.Idle("alice", time.Hour) // creates the entry at t0
+	*clock = clock.Add(10 * time.Minute)
+	if idle, _ := act.Idle("alice", 5*time.Minute); !idle {
+		t.Fatal("setup: alice should be idle before the heartbeat")
+	}
+	rec := e.post(t, "alice", collectorRole, "/desk/active")
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"running":true}` {
+		t.Fatalf("active = %d %q, want 200 {\"running\":true}", rec.Code, rec.Body.String())
+	}
+	if idle, why := act.Idle("alice", 5*time.Minute); idle && why == "no input" {
+		t.Errorf("alice idle (%s) right after /desk/active; want fresh input", why)
+	}
+}
+
+func TestActiveNotRunning(t *testing.T) {
+	e, _, _ := newActiveEnv(t)
+	rec := e.post(t, "alice", collectorRole, "/desk/active")
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"running":false}` {
+		t.Fatalf("active = %d %q, want 200 {\"running\":false}", rec.Code, rec.Body.String())
+	}
+}
+
+func TestActiveRefusesCrossSite(t *testing.T) {
+	e, act, clock := newActiveEnv(t)
+	e.sess.running = true
+	act.Idle("alice", time.Hour)
+	*clock = clock.Add(10 * time.Minute)
+	req := httptest.NewRequest(http.MethodPost, "/desk/active", nil)
+	access.SetTestHeaders(req, "alice", collectorRole, testGate)
+	rec := httptest.NewRecorder()
+	e.srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site active = %d, want 403", rec.Code)
+	}
+	if idle, _ := act.Idle("alice", 5*time.Minute); !idle {
+		t.Error("a refused request recorded input")
+	}
+}
+
+func TestActiveWithoutActivityStillAnswers(t *testing.T) {
+	e := newCollectorEnv(t, false)
+	e.sess.running = true
+	rec := e.post(t, "alice", collectorRole, "/desk/active")
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"running":true}` {
+		t.Fatalf("active = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHomeStartedCountsAsInput(t *testing.T) {
+	e, act, clock := newActiveEnv(t)
+	e.sess.startResult = session.Started
+	writeProvisionState(t, e.root, "alice", allDoneSteps())
+	makeTemplateDir(t, e)
+	const idle = 15 * time.Minute
+	// Stale clocks: a screen opened then closed, then no input for longer than idle.
+	closed := act.openScreen("alice", func() {})
+	closed()
+	*clock = clock.Add(idle + time.Hour)
+	if gone, _ := act.Idle("alice", idle); !gone {
+		t.Fatal("setup: alice should be idle")
+	}
+	if rec := e.get(t, "alice", collectorRole, "/desk/"); rec.Code != http.StatusOK {
+		t.Fatalf("home = %d", rec.Code)
+	}
+	*clock = clock.Add(idle - time.Second)
+	if gone, why := act.Idle("alice", idle); gone {
+		t.Errorf("alice idle (%s) %v after a Started home visit; want both clocks restarted", why, idle-time.Second)
 	}
 }

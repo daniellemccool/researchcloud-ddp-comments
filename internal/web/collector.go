@@ -42,6 +42,29 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// serveActive is POST /desk/active, the page heartbeat: it records that the
+// collector touched mouse or keyboard and answers {"running":bool}, so the
+// page can show the stopped banner once the pair is gone.
+func (h *handler) serveActive(w http.ResponseWriter, r *http.Request) {
+	user := identity(r).User
+	if h.activity != nil {
+		h.activity.Input(user)
+	}
+	running := false
+	if h.sessions != nil {
+		running = h.sessions.IsRunning(r.Context(), user)
+	}
+	body, err := json.Marshal(map[string]bool{"running": running})
+	if err != nil {
+		log.Printf("web: active: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
 // serveClaim is POST /desk/claim: n must be ASCII
 // digits and one of BatchSizes, the desk must be ready, and Log.Claim must
 // not be busy or empty.

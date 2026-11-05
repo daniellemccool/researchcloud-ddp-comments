@@ -144,3 +144,29 @@ func TestDeskPageAdminLinkAndNoFooter(t *testing.T) {
 		t.Errorf("page with SECONDS=0 still has the timer help")
 	}
 }
+
+func TestPageHeartbeatScript(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15})
+	for _, want := range []string{
+		`fetch('active',{method:'POST'})`,
+		"'pointerdown'", "'pointermove'", "'keydown'", "'wheel'", "'touchstart'",
+		`id="stopped" hidden`,
+		"Your desk was stopped after 15 minutes without activity. Reload to continue.",
+		"setInterval(",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+}
+
+func TestPageReattachesListenersOnIframeLoad(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15})
+	i := strings.Index(out, `.addEventListener('load'`)
+	if i < 0 {
+		t.Fatal("page has no load handler on the iframe")
+	}
+	if !strings.Contains(out[i:], "contentDocument") {
+		t.Error("the load handler does not attach the listeners to the iframe's contentDocument")
+	}
+}
