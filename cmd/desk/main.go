@@ -29,6 +29,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/locks"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/reaper"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/render"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
@@ -219,6 +220,24 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		Relay:        web.NewRelay(mgr, activity),
 		Activity:     activity,
 	}
+	// The idle stop (the reaper) runs for the serve lifetime: serveCtx is
+	// cancelled on every way out of serve. desk_idle_seconds = 0 turns it off.
+	serveCtx, serveCancel := context.WithCancel(context.Background())
+	defer serveCancel()
+	if cfg.IdleSeconds > 0 {
+		r := &reaper.Reaper{
+			Idle:  time.Duration(cfg.IdleSeconds) * time.Second,
+			Clock: activity,
+			Pairs: mgr,
+			Log:   dlog,
+			Logf:  mgr.Log.Printf,
+		}
+		go r.Run(serveCtx, time.Minute)
+		_, _ = fmt.Fprintf(stderr, "desk: idle stop after %ds\n", cfg.IdleSeconds)
+	} else {
+		_, _ = fmt.Fprintln(stderr, "desk: idle stop off (desk_idle_seconds = 0)")
+	}
+
 	deps.Admin = web.NewAdmin(deps)
 	gated := web.New(deps)
 	gated.Addr = *listen
@@ -236,6 +255,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	select {
 	case sig := <-sigCh:
 		_, _ = fmt.Fprintf(stderr, "desk: %s received, shutting down\n", sig)
+		serveCancel()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		ctlCancel()
@@ -250,6 +270,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		// The operator socket died while serving: fatal, same path as a
 		// listener error.
 		_, _ = fmt.Fprintf(stderr, "desk: operator socket: %v\n", err)
+		serveCancel()
 		ctlCancel()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -257,6 +278,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = container.Shutdown(shutdownCtx)
 		return 0, err
 	case err := <-errCh:
+		serveCancel()
 		ctlCancel()
 		select {
 		case <-ctlErr:

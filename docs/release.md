@@ -113,9 +113,10 @@ releases from the next tag on. The desk root on the volume survives a recreate.
 
 ## Running desk: seats and the Docker floor
 
-Plan 2a has no idle stop. A collector's pair (Firefox and proxy) runs until an
-operator stops it, whatever `desk_idle_seconds` says; that parameter takes
-effect from plan 2b, which adds the reaper. Once `desk_max_running` collectors
+The desk stops a collector's pair (Firefox and proxy) once its page has reported
+no input, or no screen has been open, for `desk_idle_seconds` (checked every
+minute; `0` turns the idle stop off), and the collector's next visit starts it
+again. Once `desk_max_running` collectors
 have a running pair, every other collector who opens `/desk/` sees "The desk is
 busy, try again in a few minutes" until a seat is freed. Check the pairs with
 `sudo docker exec desk-desk-1 desk status` (one line per registry row: user,

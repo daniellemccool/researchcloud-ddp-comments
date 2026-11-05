@@ -30,7 +30,7 @@ import (
 type Event struct {
 	T       int64  `json:"t"`
 	User    string `json:"user"`
-	Action  string `json:"action"` // claim | open | problem | stop
+	Action  string `json:"action"` // claim | open | problem | stop (stop codes: idle_no_input, idle_no_screen)
 	Kind    string `json:"kind,omitempty"`
 	ID      string `json:"id,omitempty"`
 	Batch   int    `json:"batch,omitempty"`

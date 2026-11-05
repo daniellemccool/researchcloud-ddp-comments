@@ -257,3 +257,31 @@ func TestViewOfIgnoresOtherUsers(t *testing.T) {
 		t.Fatalf("bob view = %+v", b)
 	}
 }
+
+// TestViewIgnoresStopEvents: a stop event (the reaper's idle stop) marks
+// nothing in the claim view: the claim stays outstanding, so the user cannot
+// claim a new batch until it is done.
+func TestViewIgnoresStopEvents(t *testing.T) {
+	l := newTestLog(t)
+	evs := []Event{
+		{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "1", Batch: 1, Code: ""},
+		{T: 2, User: "alice", Action: "stop", Code: "idle_no_input", IdleS: 900},
+		{T: 3, User: "alice", Action: "stop", Code: "idle_no_screen", IdleS: 900},
+	}
+	v := l.ViewOf("alice", evs)
+	if len(v.Claims) != 1 || v.Claims[0].Key != (Key{Kind: "video", ID: "1"}) {
+		t.Fatalf("claims = %+v, want only key 1", v.Claims)
+	}
+	if len(v.Done) != 0 || len(v.Opened) != 0 || len(v.Problems) != 0 {
+		t.Fatalf("view = %+v, want stop events to mark nothing", v)
+	}
+	if taken := l.Taken(evs); len(taken) != 1 {
+		t.Fatalf("taken = %v, want only key 1", taken)
+	}
+	if err := l.Append(evs...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Claim("alice", 5, videoRows(3)); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Claim after stop events = %v, want ErrBusy", err)
+	}
+}

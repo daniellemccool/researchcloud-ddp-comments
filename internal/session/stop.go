@@ -25,6 +25,21 @@ func (m *Manager) Stop(ctx context.Context, user string) error {
 	return m.stop(ctx, user)
 }
 
+// StopIf takes user's lock, evaluates cond under it and stops the pair only
+// when cond holds; a false cond makes no Docker call. stopped reports whether
+// cond held and the stop ran; err is the stop's error. The reaper uses it to
+// re-check idleness after taking the lock, so a page load that starts or
+// finds the pair between its selection and the stop wins.
+func (m *Manager) StopIf(ctx context.Context, user string, cond func() bool) (stopped bool, err error) {
+	userLock := m.Locks.User(user)
+	userLock.Lock()
+	defer userLock.Unlock()
+	if !cond() {
+		return false, nil
+	}
+	return true, m.stop(ctx, user)
+}
+
 // stop is Stop without the user lock: the caller must hold Locks.User(user).
 func (m *Manager) stop(ctx context.Context, user string) error {
 	netName := "net-" + user

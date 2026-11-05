@@ -38,7 +38,7 @@ none; both are N/A for the platform-sourced parameters.
 | `desk_contact` | Fixed | `<fill-me-in>` | yes | yes | interactive |
 | `desk_hide_media` | Fixed | `true` | yes | no | keep |
 | `desk_batch_sizes` | Fixed | `5,10` | yes | no | keep |
-| `desk_idle_seconds` (no effect in plan 2a, see the notes) | Fixed | `900` | yes | no | keep |
+| `desk_idle_seconds` | Fixed | `900` | yes | no | keep |
 | `desk_timer_minutes` | Fixed | `3` | yes | no | keep |
 | `desk_max_sessions` | Fixed | `99` | yes | no | keep |
 | `desk_max_running` | Fixed | `auto` | yes | no | keep |
@@ -59,10 +59,8 @@ Notes on the values:
   and each be held by at least one CO member. The collector default is the
   placeholder so an unedited launch fails loudly.
 - `desk_contact` appears in page text; no quotes.
-- `desk_idle_seconds` has no effect in plan 2a: the desk has no idle stop yet,
-  so a collector's pair runs until an operator stops it with `desk stop <user>`
-  (docs/release.md, "Running desk: seats and the Docker floor"). The value takes
-  effect from plan 2b.
+- `desk_idle_seconds` is how long a collector's pair may go without page input or
+  without an open screen before the desk stops it; `0` turns the idle stop off.
 - `co_id`, `co_name` and `workspace_fqdn` are read by the init script from
   `PLUGIN_PARAMETERS` too, so all three must be declared.
 

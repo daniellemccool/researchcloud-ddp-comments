@@ -207,6 +207,7 @@ func TestNumericParamBounds(t *testing.T) {
 		want  bool // true: Load must succeed
 	}{
 		{"nine digits ok", "desk_max_sessions", "123456789", true},
+		{"zero idle accepted", "desk_idle_seconds", "0", true},
 		{"ten digits refused", "desk_max_sessions", "1234567890", false},
 		{"twenty digits refused", "desk_max_sessions", "12345678901234567890", false},
 		{"non-digit refused", "desk_idle_seconds", "90a", false},
@@ -225,5 +226,18 @@ func TestNumericParamBounds(t *testing.T) {
 				t.Fatalf("err = %v, want one naming %s and \"1-9 digits\"", err, tc.key)
 			}
 		})
+	}
+}
+
+// TestIdleSecondsZero: desk_idle_seconds = 0 loads as 0, the value that turns
+// the idle stop off (desk serve does not start the reaper).
+func TestIdleSecondsZero(t *testing.T) {
+	dir := writeDeskRoot(t, func(m map[string]any) { m["desk_idle_seconds"] = "0" }, true)
+	cfg, err := Load(filepath.Join(dir, "desk.json"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.IdleSeconds != 0 {
+		t.Fatalf("IdleSeconds = %d, want 0", cfg.IdleSeconds)
 	}
 }

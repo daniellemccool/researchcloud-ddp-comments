@@ -82,3 +82,73 @@ func TestStopRefusesForeignObjects(t *testing.T) {
 		t.Errorf("foreign container was removed: %v", err)
 	}
 }
+
+// TestStopIfFalseTouchesNothing: a false condition makes no Docker call at
+// all and leaves the pair running; the condition runs under the user lock.
+func TestStopIfFalseTouchesNothing(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	ctx := context.Background()
+	if res, err := f.m.Start(ctx, "alice"); res != Started || err != nil {
+		t.Fatalf("Start = %v, %v; want Started, nil", res, err)
+	}
+	before := len(f.fake.Calls)
+	heldLock := false
+	stopped, err := f.m.StopIf(ctx, "alice", func() bool {
+		// TryLock fails while StopIf holds the user lock.
+		if f.m.Locks.User("alice").TryLock() {
+			f.m.Locks.User("alice").Unlock()
+		} else {
+			heldLock = true
+		}
+		return false
+	})
+	if stopped || err != nil {
+		t.Fatalf("StopIf = %v, %v; want false, nil", stopped, err)
+	}
+	if !heldLock {
+		t.Error("cond ran without the user lock held")
+	}
+	if got := f.fake.Calls[before:]; len(got) != 0 {
+		t.Errorf("StopIf(false) made Docker calls: %v", got)
+	}
+	if !f.m.IsRunning(ctx, "alice") {
+		t.Error("pair not running after StopIf(false)")
+	}
+}
+
+// TestStopIfTrueStops: a true condition runs the full stop: the same call
+// sequence as Stop, the pair gone and the runtime cleared.
+func TestStopIfTrueStops(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	ctx := context.Background()
+	if res, err := f.m.Start(ctx, "alice"); res != Started || err != nil {
+		t.Fatalf("Start = %v, %v; want Started, nil", res, err)
+	}
+	before := len(f.fake.Calls)
+	stopped, err := f.m.StopIf(ctx, "alice", func() bool { return true })
+	if !stopped || err != nil {
+		t.Fatalf("StopIf = %v, %v; want true, nil", stopped, err)
+	}
+	want := []string{
+		"NetworkInspect net-alice",
+		"ContainerInspect desk-proxy-alice",
+		"ContainerInspect desk-firefox-alice",
+		"ContainerStop desk-firefox-alice",
+		"ContainerStop desk-proxy-alice",
+		"ContainerRemove desk-firefox-alice",
+		"ContainerRemove desk-proxy-alice",
+		"NetworkDisconnect net-alice deskself",
+		"NetworkRemove net-alice",
+	}
+	if got := f.fake.Calls[before:]; !reflect.DeepEqual(got, want) {
+		t.Errorf("StopIf calls =\n%v\nwant\n%v", got, want)
+	}
+	f.gone(t, "alice")
+	_, rt, err := render.ReadPair(f.cfg, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt != nil {
+		t.Errorf("runtime after StopIf = %+v, want nil", rt)
+	}
+}

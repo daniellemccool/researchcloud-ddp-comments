@@ -36,7 +36,8 @@ type View struct {
 // ViewOf walks the user's events in file order: a claim appends (key, batch);
 // an open with exec_rc == 0 marks the key opened and done (any other exit
 // code, or no exec_rc, marks nothing); a problem records (code, note) and
-// marks the key done. Other users' events are ignored.
+// marks the key done. A stop (the idle stop) marks nothing, so an
+// outstanding claim stays outstanding. Other users' events are ignored.
 func (l *Log) ViewOf(user string, evs []Event) View {
 	v := View{
 		Done:     make(map[Key]bool),

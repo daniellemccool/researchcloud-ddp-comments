@@ -38,6 +38,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0016 — Reattach by preserving data and regenerating workspace state](./0016-reattach-by-preserving-data-and-regenerating-workspace-state.md)
 - [0021 — Create a collector's pair at start and remove it at stop](./0021-create-a-collector-s-pair-at-start-and-remove-it-at-stop.md)
 - [0023 — Cap every pair container's memory and the seats by memory](./0023-cap-every-pair-container-s-memory-and-the-seats-by-memory.md)
+- [0024 — Stop a pair after idle input or no open screen](./0024-stop-a-pair-after-idle-input-or-no-open-screen.md)
 
 ### Deploy
 
