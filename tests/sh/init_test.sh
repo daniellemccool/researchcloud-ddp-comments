@@ -222,7 +222,9 @@ case_ok_fresh() {
 	local d
 	d=$(desk)
 	a_file "$d/desk.json"
-	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "25"
+	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "26"
+	a_eq "desk.json co_user_api_endpoint" "$(jq -r .co_user_api_endpoint "$d/desk.json")" \
+		"$(jq -r .co_user_api_endpoint "$FIX/workspace.json")"
 	a_eq "layout_version" "$(jq -r '.layout_version' "$d/desk.json")" "1"
 	a_eq "package_version" "$(jq -r '.package_version' "$d/desk.json")" "v0.1.0-alpha.1"
 	a_eq "desk.json desk_image" "$(jq -r '.desk_image' "$d/desk.json")" \
@@ -285,7 +287,7 @@ case_python_repr_params() {
 	local d k
 	d=$(desk)
 	a_file "$d/desk.json"
-	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "25"
+	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "26"
 	while IFS= read -r k; do
 		a_eq "desk.json $k" \
 			"$(jq -r --arg k "$k" '.[$k]' "$d/desk.json")" \
@@ -594,6 +596,10 @@ case_update_ok() {
 		digitalmethodsinitiative/4cat:v9.99 1.14.3 \
 		"$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)" \
 		jlesage/firefox:v26.09.1
+	# An older 25-key desk.json: update must add the endpoint from workspace.json.
+	jq "del(.co_user_api_endpoint)" "$d/desk.json" >"$d/desk.json.old25"
+	mv "$d/desk.json.old25" "$d/desk.json"
+	a_eq "old desk.json has 25 keys" "$(jq "keys | length" "$d/desk.json")" "25"
 	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
 	run_init_repo "$SYSROOT/repo" update v0.2.0-test
 	a_rc 0
@@ -606,6 +612,9 @@ case_update_ok() {
 	a_eq "firefox_image" "$(jq -r '.firefox_image' "$d/desk.json")" \
 		"ghcr.io/daniellemccool/researchcloud-ddp-comments/firefox:v26.09.1"
 	a_eq "package_version" "$(jq -r '.package_version' "$d/desk.json")" "v0.2.0-test"
+	a_eq "update adds co_user_api_endpoint" "$(jq -r .co_user_api_endpoint "$d/desk.json")" \
+		"$(jq -r .co_user_api_endpoint "$FIX/workspace.json")"
+	a_eq "update key count" "$(jq "keys | length" "$d/desk.json")" "26"
 	# The template pins are adopted from the new copy's manifest, which the
 	# default tarball pins to the same values as the fresh launch.
 	a_eq "zeeschuimer_version unchanged" "$(jq -r '.zeeschuimer_version' "$d/desk.json")" "1.14.3"

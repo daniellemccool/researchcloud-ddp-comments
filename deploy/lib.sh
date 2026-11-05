@@ -533,7 +533,7 @@ write_desk_json() {
 		set -- "$@" --arg "$k" "$(param "$k")"
 	done
 	# The five retired names are still recorded, from the release's pins, so
-	# the key set stays at 25 for the Go side.
+	# the key set is the 26 keys the Go side knows.
 	jq -n "$@" \
 		--arg fourcat_image "$PIN_FOURCAT_IMAGE" \
 		--arg firefox_image "$PIN_FIREFOX_IMAGE" \
@@ -541,6 +541,7 @@ write_desk_json() {
 		--arg deskproxy_image "$PIN_DESKPROXY_IMAGE" \
 		--arg zeeschuimer_version "$PIN_ZSV" \
 		--arg template_sha256 "$PIN_TEMPLATE_SHA256" \
+		--arg co_user_api_endpoint "$CO_ENDPOINT" \
 		--arg desk_root "$DESK_ROOT" \
 		--arg package_version "$PIN_RELEASE" \
 		--arg applied_at "$applied_at" \
@@ -933,6 +934,13 @@ update_mode() {
 	# must not be installed under this name.
 	[ "$PIN_RELEASE" = "$release" ] ||
 		die "update: the release's DESK_IMAGE tag $PIN_RELEASE differs from $release"
+	# desk.json written before the CO member API was polled lacks the endpoint;
+	# it is (re)taken from workspace.json, before the swap, so a workspace
+	# without it refuses the update with nothing changed.
+	if ! read_workspace; then
+		printf '%s' "$ERRORS" >&2
+		die "update: workspace.json does not name the CO user API"
+	fi
 	# Installing a new template at update is not supported yet: refuse a
 	# release whose manifest differs from what desk.json recorded.
 	old_zsv=$(jq -r '.zeeschuimer_version' "$dj")
@@ -987,7 +995,8 @@ update_mode() {
 	dj_new=$dj.new
 	if ! jq --arg di "$PIN_DESK_IMAGE" --arg dpi "$PIN_DESKPROXY_IMAGE" \
 		--arg fci "$PIN_FOURCAT_IMAGE" --arg ffi "$PIN_FIREFOX_IMAGE" --arg release "$release" \
-		'.desk_image = $di | .deskproxy_image = $dpi | .fourcat_image = $fci | .firefox_image = $ffi | .package_version = $release' \
+		--arg coep "$CO_ENDPOINT" \
+		'.co_user_api_endpoint = $coep | .desk_image = $di | .deskproxy_image = $dpi | .fourcat_image = $fci | .firefox_image = $ffi | .package_version = $release' \
 		"$dj" >"$dj_new"; then
 		update_fail "update: could not rewrite desk.json"
 	fi

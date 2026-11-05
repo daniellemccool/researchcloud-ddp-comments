@@ -18,31 +18,32 @@ const hostDeskRoot = "/data/vol1/desk"
 func deskJSON(t *testing.T, mutate func(map[string]any)) string {
 	t.Helper()
 	m := map[string]any{
-		"desk_collector_role": "src_co_students",
-		"desk_admin_role":     "src_co_admin",
-		"desk_platform":       "tiktok",
-		"desk_contact":        "desk-admin@example.org",
-		"desk_hide_media":     "false",
-		"desk_batch_sizes":    "5,10",
-		"desk_idle_seconds":   "3600",
-		"desk_timer_minutes":  "10",
-		"desk_max_sessions":   "8",
-		"desk_max_running":    "auto",
-		"desk_storage_path":   "auto",
-		"fourcat_enabled":     "true",
-		"fourcat_image":       "ghcr.io/fourcat/fourcat:1.0.0",
-		"firefox_image":       "ghcr.io/ns/firefox:v26.08.3",
-		"desk_image":          "ghcr.io/ns/desk:v1.2.3",
-		"deskproxy_image":     "ghcr.io/ns/deskproxy:v1.2.3",
-		"zeeschuimer_version": "1.2.3",
-		"template_sha256":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		"co_id":               "12345",
-		"co_name":             "Example CO",
-		"workspace_fqdn":      "desk.example.org",
-		"desk_root":           hostDeskRoot,
-		"layout_version":      1,
-		"package_version":     "v1.2.3",
-		"applied_at":          "2026-10-30T12:00:00Z",
+		"desk_collector_role":  "src_co_students",
+		"desk_admin_role":      "src_co_admin",
+		"desk_platform":        "tiktok",
+		"desk_contact":         "desk-admin@example.org",
+		"desk_hide_media":      "false",
+		"desk_batch_sizes":     "5,10",
+		"desk_idle_seconds":    "3600",
+		"desk_timer_minutes":   "10",
+		"desk_max_sessions":    "8",
+		"desk_max_running":     "auto",
+		"desk_storage_path":    "auto",
+		"fourcat_enabled":      "true",
+		"fourcat_image":        "ghcr.io/fourcat/fourcat:1.0.0",
+		"firefox_image":        "ghcr.io/ns/firefox:v26.08.3",
+		"desk_image":           "ghcr.io/ns/desk:v1.2.3",
+		"deskproxy_image":      "ghcr.io/ns/deskproxy:v1.2.3",
+		"zeeschuimer_version":  "1.2.3",
+		"template_sha256":      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"co_id":                "12345",
+		"co_name":              "Example CO",
+		"co_user_api_endpoint": "https://gw.live.surfresearchcloud.nl/user/co_users/",
+		"workspace_fqdn":       "desk.example.org",
+		"desk_root":            hostDeskRoot,
+		"layout_version":       1,
+		"package_version":      "v1.2.3",
+		"applied_at":           "2026-10-30T12:00:00Z",
 	}
 	if mutate != nil {
 		mutate(m)
@@ -54,7 +55,7 @@ func deskJSON(t *testing.T, mutate func(map[string]any)) string {
 	return string(b)
 }
 
-// writeDeskRoot creates a temp desk root with desk.json and secrets/gate.
+// writeDeskRoot creates a temp desk root with desk.json, secrets/gate and secrets/co_token.
 func writeDeskRoot(t *testing.T, mutate func(map[string]any), withGate bool) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -66,6 +67,9 @@ func writeDeskRoot(t *testing.T, mutate func(map[string]any), withGate bool) str
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "secrets", "gate"), []byte("  test-gate-secret \n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "secrets", "co_token"), []byte(" test-co-token\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -127,6 +131,9 @@ func TestLoadDeskJSONStrict(t *testing.T) {
 		}
 		if cfg.GateSecret != "test-gate-secret" {
 			t.Errorf("GateSecret = %q, want trimmed %q", cfg.GateSecret, "test-gate-secret")
+		}
+		if cfg.COEndpoint != "https://gw.live.surfresearchcloud.nl/user/co_users/" || cfg.COToken != "test-co-token" {
+			t.Errorf("COEndpoint/COToken = %q/%q", cfg.COEndpoint, cfg.COToken)
 		}
 	})
 
@@ -239,5 +246,68 @@ func TestIdleSecondsZero(t *testing.T) {
 	}
 	if cfg.IdleSeconds != 0 {
 		t.Fatalf("IdleSeconds = %d, want 0", cfg.IdleSeconds)
+	}
+}
+
+func TestLoadCOEndpoint(t *testing.T) {
+	dir := writeDeskRoot(t, func(m map[string]any) {
+		m["co_user_api_endpoint"] = "https://example.org/user/co_users/"
+	}, true)
+	cfg, err := Load(filepath.Join(dir, "desk.json"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.COEndpoint != "https://example.org/user/co_users/" {
+		t.Errorf("COEndpoint = %q", cfg.COEndpoint)
+	}
+}
+
+func TestLoadRejectsBadEndpoint(t *testing.T) {
+	for _, v := range []string{"http://example.org/co_users/", "https://", "example.org/co_users", "", "ftp://example.org/x"} {
+		dir := writeDeskRoot(t, func(m map[string]any) { m["co_user_api_endpoint"] = v }, true)
+		_, err := Load(filepath.Join(dir, "desk.json"))
+		if err == nil || !strings.Contains(err.Error(), "co_user_api_endpoint") {
+			t.Errorf("endpoint %q: err = %v, want one naming co_user_api_endpoint", v, err)
+		}
+	}
+}
+
+func TestLoadRejectsHTTPEndpoint(t *testing.T) {
+	dir := writeDeskRoot(t, func(m map[string]any) {
+		m["co_user_api_endpoint"] = "http://example.org/user/co_users/"
+	}, true)
+	_, err := Load(filepath.Join(dir, "desk.json"))
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("err = %v, want one naming https", err)
+	}
+}
+
+func TestLoadMissingCOToken(t *testing.T) {
+	dir := writeDeskRoot(t, nil, true)
+	if err := os.Remove(filepath.Join(dir, "secrets", "co_token")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(filepath.Join(dir, "desk.json"))
+	if err == nil || !strings.Contains(err.Error(), "secrets/co_token") {
+		t.Fatalf("err = %v, want one naming secrets/co_token", err)
+	}
+}
+
+func TestLoadEmptyCOToken(t *testing.T) {
+	dir := writeDeskRoot(t, nil, true)
+	if err := os.WriteFile(filepath.Join(dir, "secrets", "co_token"), []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(filepath.Join(dir, "desk.json"))
+	if err == nil || !strings.Contains(err.Error(), "secrets/co_token") {
+		t.Fatalf("err = %v, want one naming secrets/co_token", err)
+	}
+}
+
+func TestLoadMissingEndpointKey(t *testing.T) {
+	dir := writeDeskRoot(t, func(m map[string]any) { delete(m, "co_user_api_endpoint") }, true)
+	_, err := Load(filepath.Join(dir, "desk.json"))
+	if err == nil || !strings.Contains(err.Error(), "co_user_api_endpoint") {
+		t.Fatalf("err = %v, want one naming co_user_api_endpoint", err)
 	}
 }

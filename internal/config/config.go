@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,10 +48,12 @@ type Config struct {
 	LayoutVersion      int
 	PackageVersion     string
 	AppliedAt          string
+	COEndpoint         string // the CO member API URL (https)
 	GateSecret         string // from <DeskRoot>/secrets/gate, trimmed
+	COToken            string // from <DeskRoot>/secrets/co_token, trimmed
 }
 
-// rawConfig mirrors the 25 keys of desk.json exactly; DisallowUnknownFields
+// rawConfig mirrors the 26 keys of desk.json exactly; DisallowUnknownFields
 // rejects anything else.
 type rawConfig struct {
 	DeskCollectorRole  string `json:"desk_collector_role"`
@@ -73,6 +76,7 @@ type rawConfig struct {
 	TemplateSHA256     string `json:"template_sha256"`
 	COID               string `json:"co_id"`
 	COName             string `json:"co_name"`
+	COUserAPIEndpoint  string `json:"co_user_api_endpoint"`
 	WorkspaceFQDN      string `json:"workspace_fqdn"`
 	DeskRoot           string `json:"desk_root"`
 	LayoutVersion      int    `json:"layout_version"`
@@ -80,13 +84,13 @@ type rawConfig struct {
 	AppliedAt          string `json:"applied_at"`
 }
 
-// knownKeys are the 25 keys desk.json must hold, no others.
+// knownKeys are the 26 keys desk.json must hold, no others.
 var knownKeys = []string{
 	"desk_collector_role", "desk_admin_role", "desk_platform", "desk_contact",
 	"desk_hide_media", "desk_batch_sizes", "desk_idle_seconds", "desk_timer_minutes",
 	"desk_max_sessions", "desk_max_running", "desk_storage_path", "fourcat_enabled",
 	"fourcat_image", "firefox_image", "desk_image", "deskproxy_image", "zeeschuimer_version",
-	"template_sha256", "co_id", "co_name", "workspace_fqdn",
+	"template_sha256", "co_id", "co_name", "co_user_api_endpoint", "workspace_fqdn",
 	"desk_root", "layout_version", "package_version", "applied_at",
 }
 
@@ -100,7 +104,8 @@ var (
 // Load reads and validates the desk.json at path. DeskRoot is the directory
 // the file was loaded from (the container-local desk root); the file's
 // desk_root value is the host path and lands in HostDeskRoot. The gate
-// secret is read from <DeskRoot>/secrets/gate and trimmed.
+// secret and the CO token are read from <DeskRoot>/secrets/gate and
+// secrets/co_token and trimmed.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -150,6 +155,15 @@ func Load(path string) (*Config, error) {
 	cfg.GateSecret = strings.TrimSpace(string(gate))
 	if cfg.GateSecret == "" {
 		return nil, fmt.Errorf("gate secret %s is empty", gatePath)
+	}
+	coPath := filepath.Join(cfg.DeskRoot, "secrets", "co_token")
+	tok, err := os.ReadFile(coPath)
+	if err != nil {
+		return nil, fmt.Errorf("CO token (secrets/co_token): %w", err)
+	}
+	cfg.COToken = strings.TrimSpace(string(tok))
+	if cfg.COToken == "" {
+		return nil, fmt.Errorf("CO token secrets/co_token (%s) is empty", coPath)
 	}
 	return cfg, nil
 }
@@ -201,6 +215,9 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 	if err != nil {
 		return nil, fail("desk_max_running", "%v", err)
 	}
+	if u, err := url.Parse(raw.COUserAPIEndpoint); err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fail("co_user_api_endpoint", "must be an https URL with a host, got %q", raw.COUserAPIEndpoint)
+	}
 
 	return &Config{
 		HostDeskRoot:       raw.DeskRoot,
@@ -225,6 +242,7 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 		TemplateSHA256:     raw.TemplateSHA256,
 		COID:               raw.COID,
 		COName:             raw.COName,
+		COEndpoint:         raw.COUserAPIEndpoint,
 		LayoutVersion:      raw.LayoutVersion,
 		PackageVersion:     raw.PackageVersion,
 		AppliedAt:          raw.AppliedAt,
