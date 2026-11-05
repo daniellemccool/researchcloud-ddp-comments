@@ -1,0 +1,7 @@
+[
+  {"co_id": "00000000-0000-4000-8000-000000000001", "co_integer_id": 101, "integer_id": 1001, "roles": ["src_co_admin", "rsc_developers"], "services": [], "ssh_keys": [], "user_id": "00000000-0000-4000-8000-0000000000a1", "username": "alice"},
+  {"co_id": "00000000-0000-4000-8000-000000000001", "co_integer_id": 101, "integer_id": 1002, "roles": ["src_co_member"], "services": [], "ssh_keys": [], "user_id": "00000000-0000-4000-8000-0000000000a2", "username": "bob"},
+  {"co_id": "00000000-0000-4000-8000-000000000001", "co_integer_id": 101, "integer_id": 1003, "roles": [], "services": [], "ssh_keys": [], "user_id": "00000000-0000-4000-8000-0000000000a3", "username": "carol"},
+  {"co_id": "00000000-0000-4000-8000-000000000001", "co_integer_id": 101, "integer_id": 1004, "roles": ["src_co_member"], "services": [], "ssh_keys": [], "user_id": "00000000-0000-4000-8000-0000000000a4", "username": "Bad User"},
+  {"co_id": "00000000-0000-4000-8000-000000000001", "co_integer_id": 101, "integer_id": 1005, "roles": "src_co_member", "services": [], "ssh_keys": [], "user_id": "00000000-0000-4000-8000-0000000000a5", "username": "dave"}
+]
