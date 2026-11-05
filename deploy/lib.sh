@@ -11,6 +11,9 @@ GATE=
 PG_SECRET=
 CO_TOKEN=
 CO_ENDPOINT=
+# A role is a CO's own src_co_ group or SRC's src_no_ext_apps group (the
+# D3I CO's own src_co_ groups never reached SRC; internal/config matches).
+ROLE_RE='^(src_co_[A-Za-z0-9_-]+|src_no_ext_apps)$'
 MEMBERS_FILE=
 VOLUME=
 backup=
@@ -176,8 +179,8 @@ validate_params() {
 		v=$(param "$k")
 		case $k in
 		desk_collector_role | desk_admin_role)
-			if ! printf '%s' "$v" | grep -Eq '^src_co_[A-Za-z0-9_-]+$'; then
-				param_err "$k" "must match ^src_co_[A-Za-z0-9_-]+$"
+			if ! printf '%s' "$v" | grep -Eq "$ROLE_RE"; then
+				param_err "$k" "must match $ROLE_RE"
 			fi
 			case $v in
 			*"<"*) param_err "$k" "must not contain a placeholder" ;;
@@ -420,14 +423,14 @@ role_held() {
 }
 
 roles_seen() {
-	seen=$(jq -r '[.[] | .roles[]? | select(type=="string" and startswith("src_co_")) | gsub("[^A-Za-z0-9_-]";"")] | unique | join(", ")' "$MEMBERS_FILE" 2>/dev/null)
+	seen=$(jq -r '[.[] | .roles[]? | select(type=="string" and startswith("src_")) | gsub("[^A-Za-z0-9_-]";"")] | unique | join(", ")' "$MEMBERS_FILE" 2>/dev/null)
 	printf '%s' "${seen:-none}"
 }
 
 check_roles() {
 	for k in desk_collector_role desk_admin_role; do
 		v=$(param "$k")
-		if printf '%s' "$v" | grep -Eq '^src_co_[A-Za-z0-9_-]+$' && ! printf '%s' "$v" | grep -q '<'; then
+		if printf '%s' "$v" | grep -Eq "$ROLE_RE" && ! printf '%s' "$v" | grep -q '<'; then
 			if ! role_held "$v"; then
 				param_err "$k" "not held by any CO member (seen: $(roles_seen))"
 			fi

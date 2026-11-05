@@ -262,6 +262,28 @@ func TestLoadCOEndpoint(t *testing.T) {
 	}
 }
 
+// src_no_ext_apps is the one SRC-defined group accepted as a role besides
+// the src_co_ groups: a D3I CO's own src_co_ groups never reached SRC.
+func TestLoadAcceptsNoExtAppsRole(t *testing.T) {
+	dir := writeDeskRoot(t, func(m map[string]any) { m["desk_collector_role"] = "src_no_ext_apps" }, true)
+	cfg, err := Load(filepath.Join(dir, "desk.json"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CollectorRole != "src_no_ext_apps" {
+		t.Errorf("CollectorRole = %q", cfg.CollectorRole)
+	}
+}
+
+func TestLoadRejectsNearMissRoles(t *testing.T) {
+	for _, v := range []string{"src_no_ext_appsx", "src_no_ext", "src_no_other", "no_ext_apps", "src_co_"} {
+		dir := writeDeskRoot(t, func(m map[string]any) { m["desk_collector_role"] = v }, true)
+		if _, err := Load(filepath.Join(dir, "desk.json")); err == nil || !strings.Contains(err.Error(), "desk_collector_role") {
+			t.Errorf("role %q: err = %v, want one naming desk_collector_role", v, err)
+		}
+	}
+}
+
 func TestLoadRejectsBadEndpoint(t *testing.T) {
 	for _, v := range []string{"http://example.org/co_users/", "https://", "example.org/co_users", "", "ftp://example.org/x"} {
 		dir := writeDeskRoot(t, func(m map[string]any) { m["co_user_api_endpoint"] = v }, true)

@@ -95,9 +95,11 @@ var knownKeys = []string{
 }
 
 var (
-	intRe      = regexp.MustCompile(`^[0-9]+$`)
-	batchRe    = regexp.MustCompile(`^[0-9]+(,[0-9]+)*$`)
-	roleRe     = regexp.MustCompile(`^src_co_[A-Za-z0-9_-]+$`)
+	intRe   = regexp.MustCompile(`^[0-9]+$`)
+	batchRe = regexp.MustCompile(`^[0-9]+(,[0-9]+)*$`)
+	// A role is a CO's own src_co_ group or SRC's src_no_ext_apps group;
+	// deploy/lib.sh's ROLE_RE is the same pattern.
+	roleRe     = regexp.MustCompile(`^(src_co_[A-Za-z0-9_-]+|src_no_ext_apps)$`)
 	platformRe = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 )
 
@@ -251,7 +253,7 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 
 func checkRole(v string) (string, error) {
 	if !roleRe.MatchString(v) {
-		return "", fmt.Errorf("must match ^src_co_[A-Za-z0-9_-]+$, got %q", v)
+		return "", fmt.Errorf("must match %s, got %q", roleRe, v)
 	}
 	return v, nil
 }

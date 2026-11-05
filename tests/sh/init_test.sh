@@ -304,6 +304,25 @@ case_placeholder_role() {
 	a_nothing_written
 }
 
+case_no_ext_apps_role() {
+	PLUGIN_PARAMETERS=$(jq -c '.desk_collector_role = "src_no_ext_apps"' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	jq 'map(if .username == "dmccool2" then .roles = ["src_no_ext_apps"] else . end)' \
+		"$FIX/members.json" >"$SYSROOT/members.json"
+	export DESK_CO_MEMBERS_FILE=$SYSROOT/members.json
+	run_init
+	a_rc 0
+	a_eq "desk.json collector role" "$(jq -r .desk_collector_role "$(desk)/desk.json")" "src_no_ext_apps"
+}
+
+case_near_miss_role() {
+	PLUGIN_PARAMETERS=$(jq -c '.desk_collector_role = "src_no_ext_appsx"' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	run_init
+	a_rc 2
+	a_err_has "desk_collector_role: must match"
+}
+
 case_uppercase_role() {
 	PLUGIN_PARAMETERS=$(jq -c '.desk_collector_role = "Src_co_students"' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
@@ -1148,6 +1167,8 @@ case_pins_deskproxy_tag_differs() {
 run_case ok-fresh case_ok_fresh
 run_case python-repr-params case_python_repr_params
 run_case placeholder-role case_placeholder_role
+run_case no-ext-apps-role case_no_ext_apps_role
+run_case near-miss-role case_near_miss_role
 run_case uppercase-role case_uppercase_role
 run_case crlf-value case_crlf_value
 run_case trailing-lf-value case_trailing_lf_value
