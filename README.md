@@ -1,19 +1,30 @@
 # researchcloud-ddp-comments
 
 SURF Research Cloud deployment of **ddp-comments**: comment collection for the videos in
-donated TikTok watch histories. Each collector gets their own SRAM-gated, streamed
-Firefox session where Zeeschuimer captures the comments and uploads them to 4CAT; a
-mitmproxy sidecar keeps an automatic copy.
+donated TikTok watch histories. Each collector signs in through SRAM and gets their own
+streamed Firefox, in which Zeeschuimer captures the comments of the videos they open and
+uploads them to 4CAT under the collector's own account. A capture proxy in front of each
+Firefox keeps a safety copy of every comment response.
 
-Architecture decisions: `docs/decisions/README.md`. Release runbook: `docs/release.md`.
-Catalog item record: `docs/catalog-item.md`.
+The desk is one Go binary. On a collector's visit it provisions what the collector needs
+(a 4CAT account and token, a Firefox profile from the verified release template), then starts
+a pair of containers for them on a private Docker network with no route out: their Firefox,
+and a proxy that is the Firefox's only way to the internet and to 4CAT. Stopping the session
+removes the pair; everything persistent stays on the volume.
 
-| Path | Runs on | Purpose |
-|---|---|---|
-| `desk/desklib/render.py` | desk workspace | render Compose, the nginx gate and the Firefox policy from the session registry |
-| `desk/desklib/config.py` | desk workspace | the desk's configuration file `desk.json` |
-| `desk/desk_stub.py`, `desk/desk-stub.service` | desk workspace | two-pane desk page per user; users pull batches from one shared queue; opens videos in that user's Firefox |
-| `desk/pool-add.py` | desk workspace | append a `selection.csv` to the shared queue (`pool.csv`), skipping known ids |
-| `desk/mitm/addons/capture.py` | desk workspace (in the proxy) | automatic comment capture |
+| Path | Purpose |
+|---|---|
+| `cmd/desk` | the desk: `serve` (the collector and admin pages, the screen relay, provisioning and sessions), the operator commands `status`, `stop` and `render`, and `template release`, which builds the sanitised Firefox profile template a release ships |
+| `cmd/deskproxy` | the per-collector capture proxy: the egress boundary, the 4CAT token injection and the safety copy |
+| `internal/` | the desk's packages: `access` (identity from the SRAM gate), `provision`, `session`, `render`, `docker`, `fourcat`, `web`, `ctl`, `pool`, `registry`, `template`, … |
+| `deploy/` | `compose.yml`, the init script SRC runs at launch, and the nginx locations it installs |
+| `platforms/tiktok/` | the platform definition: capture rules, item kinds, the pinned profile template |
+| `docs/decisions/` | architecture decisions (lean ADRs); start at `docs/decisions/README.md` |
+| `docs/release.md` | release and operator runbook |
+| `docs/catalog-item.md` | the SRC catalog item record |
 
-Tests: `scripts/test-all.sh` (bash + Python, no SRC access needed).
+Checks: `scripts/check.sh` runs the layers `adr`, `shell`, `go`, `compose` and `shape`; a missing
+tool is a failure, not a skip. Go tests: `go test ./...`.
+
+The Python under `desk/`, `bin/` and `tests/test_*.py` is the prototype the Go desk was ported
+from; it is retired in the next plan.
