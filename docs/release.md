@@ -119,8 +119,9 @@ minute; `0` turns the idle stop off), and the collector's next visit starts it
 again. Once `desk_max_running` collectors
 have a running pair, every other collector who opens `/desk/` sees "The desk is
 busy, try again in a few minutes" until a seat is freed. Check the pairs with
-`sudo docker exec desk-desk-1 desk status` (one line per registry row: user,
-index, `running` or `stopped`, and `ready` or the provisioning step it is at),
+`sudo docker exec desk-desk-1 desk status` (first a seats line and a CO poll
+line, then one line per registry row: user, index, `running` or `stopped`, and
+`ready` or the provisioning step it is at),
 and free a seat with `sudo docker exec desk-desk-1 desk stop <user>`. The
 collector's next visit starts a fresh pair; the profile, captures and 4CAT
 account stay on the volume.
