@@ -36,14 +36,20 @@ type Client struct {
 	HTTP            *http.Client
 }
 
+// defaultHTTP is built once so its idle connections are reused, not leaked per Fetch.
+var defaultHTTP = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		Proxy:           nil,
+		IdleConnTimeout: 90 * time.Second,
+	},
+}
+
 func (c *Client) http() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: &http.Transport{Proxy: nil},
-	}
+	return defaultHTTP
 }
 
 // Fetch returns the members, skipping entries with an invalid username or

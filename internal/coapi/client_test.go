@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func serve(t *testing.T, status int, body string) *Client {
@@ -112,5 +113,27 @@ func TestFetchFixture(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestDefaultHTTPClientIsShared(t *testing.T) {
+	c := &Client{Endpoint: "http://127.0.0.1:1", Token: "t"}
+	a, b := c.http(), c.http()
+	if a != b {
+		t.Fatal("default http client is rebuilt per call")
+	}
+	if a.Timeout != 10*time.Second {
+		t.Fatalf("timeout = %v", a.Timeout)
+	}
+	tr, ok := a.Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Fatalf("transport = %#v, want *http.Transport with nil Proxy", a.Transport)
+	}
+	if tr.IdleConnTimeout == 0 {
+		t.Fatal("no IdleConnTimeout")
+	}
+	other := &Client{}
+	if other.http() != a {
+		t.Fatal("clients do not share the default")
 	}
 }
