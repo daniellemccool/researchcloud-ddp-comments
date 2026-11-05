@@ -316,3 +316,14 @@ func TestStopBothFlagOrders(t *testing.T) {
 		}
 	}
 }
+
+func TestOpsSeatsLine(t *testing.T) {
+	o := &ops{cfg: &config.Config{MaxRunning: 3}, configuredMax: 6, memorySeats: 3}
+	if got, want := o.seatsLine(), "seats: 3 running at most (configured 6; memory allows 3)"; got != want {
+		t.Errorf("seatsLine = %q, want %q", got, want)
+	}
+	o.memorySeats = 0
+	if got, want := o.seatsLine(), "seats: 3 running at most (configured 6; memory allows unknown)"; got != want {
+		t.Errorf("seatsLine = %q, want %q", got, want)
+	}
+}

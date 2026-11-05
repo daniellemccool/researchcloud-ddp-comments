@@ -265,3 +265,32 @@ func TestPairSpecInvariantsNegative(t *testing.T) {
 		}
 	})
 }
+
+// TestPairContainersHaveMemoryLimits enforces ADR-0023: both pair containers
+// carry a hard memory limit and an equal memory+swap limit (no swap).
+func TestPairContainersHaveMemoryLimits(t *testing.T) {
+	cfg := &config.Config{
+		DeskRoot:           t.TempDir(),
+		HostDeskRoot:       t.TempDir(),
+		FQDN:               "desk.example.org",
+		Platform:           "tiktok",
+		DeskproxyImage:     "img/proxy:1",
+		FirefoxImage:       "img/firefox:1",
+		ZeeschuimerVersion: "1.14.3",
+	}
+	s := render.Build(cfg, "alice", 1)
+	for role, c := range map[string]struct {
+		spec docker.ContainerSpec
+		want int64
+	}{
+		"firefox": {s.Firefox, config.FirefoxMemory},
+		"proxy":   {s.Proxy, config.ProxyMemory},
+	} {
+		if c.spec.Memory != c.want {
+			t.Errorf("%s Memory = %d, want %d", role, c.spec.Memory, c.want)
+		}
+		if c.spec.MemorySwap != c.spec.Memory {
+			t.Errorf("%s MemorySwap = %d, want equal to Memory %d (no swap)", role, c.spec.MemorySwap, c.spec.Memory)
+		}
+	}
+}

@@ -68,6 +68,7 @@ type Container struct {
 	Labels          map[string]string
 	Networks        []string          // names of the networks the container is attached to
 	IPs             map[string]string // network name -> IPv4 address on that network; a network without an address has no key
+	Memory          int64             // HostConfig.Memory in bytes from inspect; 0 = no limit
 }
 
 // Mount is a bind mount.
@@ -93,6 +94,8 @@ type ContainerSpec struct {
 	ShmSize     int64      // bytes; 0 = daemon default
 	Restart     string     // "unless-stopped" or ""
 	User        string     // "" = the image's default
+	Memory      int64      // hard memory limit in bytes; 0 = unset
+	MemorySwap  int64      // memory+swap limit in bytes; equal to Memory means no swap; 0 = unset
 }
 
 // Exec is the result of running a command inside a container.

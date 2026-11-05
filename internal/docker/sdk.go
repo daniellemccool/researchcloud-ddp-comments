@@ -135,24 +135,7 @@ func (s *sdkClient) ContainerCreate(ctx context.Context, spec ContainerSpec) (st
 		Labels: spec.Labels,
 		User:   spec.User,
 	}
-	mounts := make([]mount.Mount, 0, len(spec.Mounts))
-	for _, m := range spec.Mounts {
-		mounts = append(mounts, mount.Mount{
-			Type:     mount.TypeBind,
-			Source:   m.Source,
-			Target:   m.Target,
-			ReadOnly: m.ReadOnly,
-		})
-	}
-	hc := &container.HostConfig{
-		Mounts:  mounts,
-		ShmSize: spec.ShmSize,
-		// No PortBindings and PublishAllPorts stays false: nothing is ever
-		// published (ADR-0006).
-	}
-	if spec.Restart != "" {
-		hc.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyMode(spec.Restart)}
-	}
+	hc := hostConfig(spec)
 	nc := &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{}}
 	for _, ep := range spec.Endpoints {
 		nc.EndpointsConfig[ep.Network] = &network.EndpointSettings{Aliases: ep.Aliases}
@@ -218,6 +201,9 @@ func (s *sdkClient) ContainerInspect(ctx context.Context, name string) (Containe
 		Image:  resp.Config.Image,
 		Labels: resp.Config.Labels,
 		IPs:    map[string]string{},
+	}
+	if resp.HostConfig != nil {
+		out.Memory = resp.HostConfig.Memory
 	}
 	if resp.State != nil {
 		out.Running = resp.State.Running
@@ -329,4 +315,32 @@ func (s *sdkClient) ServerVersion(ctx context.Context) (Version, error) {
 		return Version{}, wrapErr(err)
 	}
 	return Version{Engine: v.Version, API: v.APIVersion}, nil
+}
+
+// hostConfig builds the HostConfig of a created container from its spec:
+// the bind mounts, the shm size, the restart policy and the memory limits
+// (ADR-0023). No PortBindings and PublishAllPorts stays false: nothing is
+// ever published (ADR-0006).
+func hostConfig(spec ContainerSpec) *container.HostConfig {
+	mounts := make([]mount.Mount, 0, len(spec.Mounts))
+	for _, m := range spec.Mounts {
+		mounts = append(mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   m.Source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		})
+	}
+	hc := &container.HostConfig{
+		Mounts:  mounts,
+		ShmSize: spec.ShmSize,
+		Resources: container.Resources{
+			Memory:     spec.Memory,
+			MemorySwap: spec.MemorySwap,
+		},
+	}
+	if spec.Restart != "" {
+		hc.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyMode(spec.Restart)}
+	}
+	return hc
 }

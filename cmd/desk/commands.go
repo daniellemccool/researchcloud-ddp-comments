@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
@@ -187,9 +188,11 @@ func statusText(rows []session.Row) string {
 // operator command runs inside the running desk's locks, through the session
 // manager.
 type ops struct {
-	mgr         *session.Manager
-	cfg         *config.Config
-	platformDir string // <repo>/platforms/<cfg.Platform>
+	mgr           *session.Manager
+	cfg           *config.Config
+	platformDir   string // <repo>/platforms/<cfg.Platform>
+	configuredMax int    // desk_max_running as configured, before the memory cap
+	memorySeats   int    // pairs the box memory allows; 0 = unknown (meminfo unreadable)
 }
 
 // Status returns the one-line-per-row text of the manager's Status.
@@ -198,7 +201,17 @@ func (o *ops) Status(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return statusText(rows), nil
+	return o.seatsLine() + "\n" + statusText(rows), nil
+}
+
+// seatsLine is the first line of Status: the effective running cap beside the
+// configured value and what memory allows (ADR-0023).
+func (o *ops) seatsLine() string {
+	allows := "unknown"
+	if o.memorySeats > 0 {
+		allows = strconv.Itoa(o.memorySeats)
+	}
+	return fmt.Sprintf("seats: %d running at most (configured %d; memory allows %s)", o.cfg.MaxRunning, o.configuredMax, allows)
 }
 
 // Render re-runs the start-up file regeneration: the platform copy plus the

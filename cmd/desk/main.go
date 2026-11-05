@@ -109,6 +109,18 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Cap the running seats by the box's memory (ADR-0023); a read failure
+	// is logged and leaves the configured value.
+	configured, memAllows := cfg.MaxRunning, 0
+	if memTotal, merr := config.ReadMemTotal("/proc/meminfo"); merr != nil {
+		_, _ = fmt.Fprintf(stderr, "desk: memory cap skipped: %v\n", merr)
+	} else {
+		memAllows = config.MemorySeats(memTotal)
+		if n, capped := config.CapByMemory(cfg.MaxRunning, memTotal); capped {
+			_, _ = fmt.Fprintf(stderr, "desk: desk_max_running lowered from %d to %d: memory allows %d pairs\n", cfg.MaxRunning, n, n)
+			cfg.MaxRunning = n
+		}
+	}
 	p, err := platform.Load(filepath.Join(*repo, "platforms", cfg.Platform, "platform.json"))
 	if err != nil {
 		return 0, err
@@ -176,7 +188,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	ctlErr := make(chan error, 1)
 	ctlReady := make(chan struct{}, 1)
 	go func() {
-		ctlErr <- ctl.ServeReady(ctlCtx, socketPath, &ops{mgr: mgr, cfg: cfg, platformDir: platformDir}, ctlReady)
+		ctlErr <- ctl.ServeReady(ctlCtx, socketPath, &ops{mgr: mgr, cfg: cfg, platformDir: platformDir, configuredMax: configured, memorySeats: memAllows}, ctlReady)
 	}()
 	select {
 	case <-ctlReady:

@@ -41,23 +41,27 @@ func Build(cfg *config.Config, user string, index int) Spec {
 	}
 
 	proxy := docker.ContainerSpec{
-		Name:      "desk-proxy-" + user,
-		Image:     cfg.DeskproxyImage,
-		Cmd:       proxyCmd(cfg, user, index),
-		Labels:    withRole(labels, "proxy"),
-		Mounts:    ProxyMounts(cfg, user),
-		Endpoints: proxyEndpoints(cfg, user),
-		Restart:   "unless-stopped",
+		Name:       "desk-proxy-" + user,
+		Image:      cfg.DeskproxyImage,
+		Cmd:        proxyCmd(cfg, user, index),
+		Labels:     withRole(labels, "proxy"),
+		Mounts:     ProxyMounts(cfg, user),
+		Endpoints:  proxyEndpoints(cfg, user),
+		Memory:     config.ProxyMemory,
+		MemorySwap: config.ProxyMemory,
+		Restart:    "unless-stopped",
 	}
 	firefox := docker.ContainerSpec{
-		Name:      "desk-firefox-" + user,
-		Image:     cfg.FirefoxImage,
-		Env:       firefoxEnv(),
-		Labels:    withRole(labels, "firefox"),
-		Mounts:    FirefoxMounts(cfg, user),
-		Endpoints: []docker.Endpoint{{Network: "net-" + user}},
-		ShmSize:   1 << 30,
-		Restart:   "unless-stopped",
+		Name:       "desk-firefox-" + user,
+		Image:      cfg.FirefoxImage,
+		Env:        firefoxEnv(),
+		Labels:     withRole(labels, "firefox"),
+		Mounts:     FirefoxMounts(cfg, user),
+		Endpoints:  []docker.Endpoint{{Network: "net-" + user}},
+		ShmSize:    1 << 30,
+		Memory:     config.FirefoxMemory,
+		MemorySwap: config.FirefoxMemory,
+		Restart:    "unless-stopped",
 	}
 
 	return Spec{

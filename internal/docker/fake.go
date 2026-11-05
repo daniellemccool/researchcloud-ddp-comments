@@ -51,6 +51,7 @@ type fakeContainer struct {
 	exitCode        int
 	exitSet         bool // SetExited pinned the exit code
 	labels          map[string]string
+	memory          int64
 	networks        map[string]string // network name -> IP
 }
 
@@ -148,6 +149,7 @@ func (f *Fake) containerView(c *fakeContainer) Container {
 		Image:    c.image,
 		Running:  c.running,
 		ExitCode: c.exitCode,
+		Memory:   c.memory,
 		Labels:   copyLabels(c.labels),
 		IPs:      map[string]string{},
 	}
@@ -325,6 +327,7 @@ func (f *Fake) ContainerCreate(ctx context.Context, spec ContainerSpec) (string,
 		name:     spec.Name,
 		image:    spec.Image,
 		labels:   copyLabels(spec.Labels),
+		memory:   spec.Memory,
 		networks: map[string]string{},
 	}
 	for _, ep := range spec.Endpoints {

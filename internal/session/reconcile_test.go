@@ -149,3 +149,29 @@ func TestReconcileSkipsEmptyUser(t *testing.T) {
 		t.Errorf("stray network touched: %v", err)
 	}
 }
+
+func TestReconcileStopsUncappedPair(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.runningPairWithFirefoxMemory(t, "alice", "tiktok-1.14.3", 0)
+	if err := f.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.gone(t, "alice")
+	if !strings.Contains(f.logBuf.String(), "limits changed") {
+		t.Errorf("log = %q, want it to contain %q", f.logBuf.String(), "limits changed")
+	}
+}
+
+func TestReconcileAdoptsCappedPair(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	if err := f.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.logBuf.String(), "adopted alice") {
+		t.Errorf("log = %q, want it to contain %q", f.logBuf.String(), "adopted alice")
+	}
+	if strings.Contains(f.logBuf.String(), "limits changed") {
+		t.Errorf("log = %q, a capped pair must not be stopped", f.logBuf.String())
+	}
+}

@@ -120,6 +120,13 @@ func writeReady(t *testing.T, cfg *config.Config, user string) {
 // given generation, without connecting the desk.
 func (f *fixture) runningPair(t *testing.T, user, generation string) {
 	t.Helper()
+	f.runningPairWithFirefoxMemory(t, user, generation, config.FirefoxMemory)
+}
+
+// runningPairWithFirefoxMemory is runningPair with the Firefox created at the
+// given memory limit (the proxy always carries the desk's limit).
+func (f *fixture) runningPairWithFirefoxMemory(t *testing.T, user, generation string, ffMem int64) {
+	t.Helper()
 	ctx := context.Background()
 	shared := map[string]string{"desk.owner": "desk", "desk.user": user, "desk.generation": generation}
 	if _, err := f.fake.NetworkCreate(ctx, "net-"+user, withRole(shared, "net"), nil); err != nil {
@@ -128,6 +135,7 @@ func (f *fixture) runningPair(t *testing.T, user, generation string) {
 	if _, err := f.fake.ContainerCreate(ctx, docker.ContainerSpec{
 		Name:      "desk-proxy-" + user,
 		Labels:    withRole(shared, "proxy"),
+		Memory:    config.ProxyMemory,
 		Endpoints: []docker.Endpoint{{Network: "net-" + user}, {Network: "desk_desk-egress"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -138,6 +146,7 @@ func (f *fixture) runningPair(t *testing.T, user, generation string) {
 	if _, err := f.fake.ContainerCreate(ctx, docker.ContainerSpec{
 		Name:      "desk-firefox-" + user,
 		Labels:    withRole(shared, "firefox"),
+		Memory:    ffMem,
 		Endpoints: []docker.Endpoint{{Network: "net-" + user}},
 	}); err != nil {
 		t.Fatal(err)

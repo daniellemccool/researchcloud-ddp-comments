@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/docker"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/render"
 )
@@ -75,6 +76,12 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			m.logf("reconcile %s: %v", user, perr)
 		case !isLive:
 			m.logf("orphan: %s", strings.Join(p.names(), ", "))
+		case p.complete() && p.firefox.Labels["desk.generation"] == generation && !p.capped():
+			// A pair created before the memory limits existed (or with other
+			// limits) is stopped, not adopted; the next visit restarts it capped
+			// (ADR-0023). The generation cannot carry this: it also names the
+			// template directory.
+			m.stopAndLog(ctx, user, "limits changed")
 		case p.complete() && p.firefox.Labels["desk.generation"] == generation:
 			if err := m.connectSelf(ctx, "net-"+user); err != nil {
 				m.logf("adopt %s: %v", user, err)
@@ -149,6 +156,12 @@ func (m *Manager) stopAndLog(ctx context.Context, user, why string) {
 func (p *pair) complete() bool {
 	return p.proxy != nil && p.firefox != nil && p.net != nil &&
 		p.proxy.Running && p.firefox.Running
+}
+
+// capped reports whether both containers carry exactly the wanted memory
+// limits (ADR-0023).
+func (p *pair) capped() bool {
+	return p.firefox.Memory == config.FirefoxMemory && p.proxy.Memory == config.ProxyMemory
 }
 
 // missingWhy describes why an incomplete pair is stopped.
