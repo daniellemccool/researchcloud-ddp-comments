@@ -271,3 +271,109 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// absentMembers is the poll view: the users in it are absent from the last
+// good CO list.
+type absentMembers map[string]bool
+
+func (a absentMembers) Absent(user string) bool { return a[user] }
+
+func TestMarkUndone(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+		t.Fatalf("alice not ready: %v", st.Steps)
+	}
+	if err := MarkUndone(env.cfg, "alice", "registry"); err != nil {
+		t.Fatalf("MarkUndone: %v", err)
+	}
+	st := Load(env.cfg, "alice")
+	if _, ok := st.Steps["registry"]; ok {
+		t.Errorf("registry step = %q after MarkUndone, want absent", st.Steps["registry"])
+	}
+	for _, step := range Steps[1:] {
+		if st.Steps[step] != "done" {
+			t.Errorf("step %s = %q after MarkUndone, want done", step, st.Steps[step])
+		}
+	}
+	if st.AppliedGeneration != generation {
+		t.Errorf("applied_generation = %q, want %q", st.AppliedGeneration, generation)
+	}
+	if mode := statMode(t, StatePath(env.cfg, "alice")); mode != 0o600 {
+		t.Errorf("provision.json mode = %o, want 600", mode)
+	}
+	// Idempotent: a second call changes nothing and does not fail.
+	if err := MarkUndone(env.cfg, "alice", "registry"); err != nil {
+		t.Errorf("second MarkUndone: %v", err)
+	}
+	// A missing file is a no-op: nothing is created.
+	if err := MarkUndone(env.cfg, "bob", "registry"); err != nil {
+		t.Errorf("MarkUndone without a file: %v", err)
+	}
+	if _, err := os.Stat(StatePath(env.cfg, "bob")); !os.IsNotExist(err) {
+		t.Errorf("MarkUndone created %s: %v", StatePath(env.cfg, "bob"), err)
+	}
+	// An invalid name never reaches a path.
+	if err := MarkUndone(env.cfg, "../alice", "registry"); err == nil {
+		t.Error("MarkUndone(../alice) = nil, want an invalid username error")
+	}
+}
+
+// A re-added collector gets their old seat back: Allocate, Retire (revoke),
+// MarkUndone (revoke), then a visit's Advance re-runs the registry step,
+// which reactivates the retired row with its index.
+func TestReactivateAfterReaddKeepsIndex(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if st := env.prov.Advance(ctx, "carol", false); !st.Ready() {
+		t.Fatalf("carol not ready: %v", st.Steps)
+	}
+	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+		t.Fatalf("alice not ready: %v", st.Steps)
+	}
+	before, err := env.reg.Live()
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := before["alice"].Index
+	if err := env.reg.Retire("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkUndone(env.cfg, "alice", "registry"); err != nil {
+		t.Fatal(err)
+	}
+	env.prov.Members = absentMembers{} // alice is on the list again
+	st := env.prov.Advance(ctx, "alice", false)
+	if !st.Ready() {
+		t.Fatalf("alice not ready after re-add: %v", st.Steps)
+	}
+	live, err := env.reg.Live()
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, ok := live["alice"]
+	if !ok {
+		t.Fatal("alice has no live row after re-add")
+	}
+	if row.Index != index {
+		t.Errorf("alice index = %d after re-add, want %d", row.Index, index)
+	}
+}
+
+// A user absent from the last good list cannot be reactivated by the
+// registry step: it fails with "access removed" and never allocates.
+func TestRegistryStepRefusesAbsentUser(t *testing.T) {
+	env := newTestEnv(t)
+	env.prov.Members = absentMembers{"alice": true}
+	st := env.prov.Advance(context.Background(), "alice", false)
+	if got := st.Steps["registry"]; got != "error: access removed" {
+		t.Errorf("registry step = %q, want %q", got, "error: access removed")
+	}
+	rows, err := env.reg.Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("registry rows = %v, want none (Allocate must not run)", rows)
+	}
+}

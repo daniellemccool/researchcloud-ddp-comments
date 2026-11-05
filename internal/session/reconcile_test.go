@@ -175,3 +175,43 @@ func TestReconcileAdoptsCappedPair(t *testing.T) {
 		t.Errorf("log = %q, a capped pair must not be stopped", f.logBuf.String())
 	}
 }
+
+// A running pair whose registry row is retired is a revoke cut short: serve
+// start finishes it by stopping the pair (ADR-0021, revised).
+func TestReconcileStopsRetiredRunningPair(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	f.retire(t, "alice")
+	if err := f.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.gone(t, "alice")
+	if !strings.Contains(f.logBuf.String(), "stopped alice: retired") {
+		t.Errorf("log = %q, want it to contain %q", f.logBuf.String(), "stopped alice: retired")
+	}
+	if strings.Contains(f.logBuf.String(), "orphan") {
+		t.Errorf("log = %q, a retired row's pair is not an orphan", f.logBuf.String())
+	}
+}
+
+// Owner-labelled objects of a user with no row at all are still logged and
+// left, also beside a retired row of someone else.
+func TestReconcileLeavesNoRowOrphan(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.retire(t, "alice")
+	f.runningPair(t, "mallory", "tiktok-1.14.3")
+	if err := f.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.logBuf.String(), "orphan: desk-firefox-mallory, desk-proxy-mallory, net-mallory") {
+		t.Errorf("log = %q, want the orphan line for mallory", f.logBuf.String())
+	}
+	if !f.m.IsRunning(context.Background(), "mallory") {
+		t.Error("the orphan pair was stopped")
+	}
+	for _, c := range f.fake.Calls {
+		if strings.HasPrefix(c, "ContainerStop") || strings.HasPrefix(c, "ContainerRemove") || strings.HasPrefix(c, "NetworkRemove") {
+			t.Errorf("reconcile removed something: %s", c)
+		}
+	}
+}

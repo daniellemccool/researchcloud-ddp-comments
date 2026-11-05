@@ -26,13 +26,15 @@ func (e *fourcatError) Unwrap() error { return e.err }
 
 // Provisioner advances one collector toward ready. Fourcat is nil when 4CAT
 // is disabled, which skips both fourcat steps. Now is the clock for the
-// step file's "updated" field; nil means time.Now.
+// step file's "updated" field; nil means time.Now. Members is the CO poll's
+// view (ADR-0005); nil means nobody is ever absent.
 type Provisioner struct {
 	Cfg     *config.Config
 	Reg     *registry.Registry
 	Fourcat *fourcat.Client
 	Locks   *locks.Set
 	Now     func() time.Time
+	Members interface{ Absent(user string) bool }
 }
 
 func (p *Provisioner) now() time.Time {
@@ -103,11 +105,16 @@ func (p *Provisioner) runStep(ctx context.Context, step, user string, admin bool
 	return &StepError{Msg: "unknown step " + step}
 }
 
-// stepRegistry allocates the seat index under the global lock, taken inside
-// the user lock Advance already holds.
+// stepRegistry allocates (or reactivates) the seat index under the global
+// lock, taken inside the user lock Advance already holds. A user the last
+// good CO list lacks is refused before Allocate, under those same locks, so a
+// run queued on the user lock behind a revoke cannot reactivate the row.
 func (p *Provisioner) stepRegistry(user string) error {
 	p.Locks.Global.Lock()
 	defer p.Locks.Global.Unlock()
+	if p.Members != nil && p.Members.Absent(user) {
+		return &StepError{Msg: "access removed"}
+	}
 	_, err := p.Reg.Allocate(user)
 	return err
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/fourcat"
@@ -98,12 +99,39 @@ func Load(cfg *config.Config, user string) State {
 	return st
 }
 
-// save rewrites the step file atomically (temp file in the same directory,
-// 0600, rename) after every step. The file is root's: it carries free-form
-// error text.
+// save rewrites the step file atomically after every step (writeState).
 func (p *Provisioner) save(user string, st *State) error {
-	st.Updated = p.now().Unix()
-	path := StatePath(p.Cfg, user)
+	return writeState(p.Cfg, user, st, p.now())
+}
+
+// MarkUndone rewrites user's step file with step removed, so the next Advance
+// re-runs it (a revoke marks "registry" undone, so a later visit reactivates
+// the row). The caller holds Locks.User(user). A missing file is a no-op, and
+// so is a step that is not recorded.
+func MarkUndone(cfg *config.Config, user, step string) error {
+	if !userRe.MatchString(user) {
+		return fmt.Errorf("invalid username: %q", user)
+	}
+	if _, err := os.Stat(StatePath(cfg, user)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	st := Load(cfg, user)
+	if _, ok := st.Steps[step]; !ok {
+		return nil
+	}
+	delete(st.Steps, step)
+	return writeState(cfg, user, &st, time.Now())
+}
+
+// writeState rewrites the step file atomically (temp file in the same
+// directory, 0600, rename), stamping Updated with now. The file is root's:
+// it carries free-form error text.
+func writeState(cfg *config.Config, user string, st *State, now time.Time) error {
+	st.Updated = now.Unix()
+	path := StatePath(cfg, user)
 	dir := filepath.Dir(path)
 	if err := ensureDir(dir, 0o700, 0, 0); err != nil {
 		return err

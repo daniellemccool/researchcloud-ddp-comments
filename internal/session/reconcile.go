@@ -26,8 +26,9 @@ type pair struct {
 // running, controller ruling F71) is adopted — the desk re-joins its network
 // so the screen relay works again; a pair with an exited or missing container
 // or network is stopped; a running pair whose generation changed is stopped;
-// owner-labelled objects without a live registry row are logged as orphans
-// and left untouched. It then regenerates the per-user files for every live
+// the objects of a user whose registry row is retired are stopped (finishing
+// a revoke cut short); owner-labelled objects of a user with no registry row
+// at all are logged as orphans and left untouched. It then regenerates the per-user files for every live
 // row. Reconcile never starts anything and never removes an orphan.
 func (m *Manager) Reconcile(ctx context.Context) error {
 	containers, err := m.Docker.ContainerList(ctx, map[string]string{"desk.owner": render.Owner})
@@ -41,6 +42,17 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	live, err := m.Reg.Live()
 	if err != nil {
 		return err
+	}
+	// Rows tells a retired row from a missing one, which Live cannot.
+	rows, err := m.Reg.Rows()
+	if err != nil {
+		return err
+	}
+	retired := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		if r.Status == "retired" {
+			retired[r.User] = true
+		}
 	}
 
 	// The lists above are only the candidate set; every decision below
@@ -74,6 +86,10 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		case perr != nil:
 			// A foreign object or a failed inspect: touch nothing.
 			m.logf("reconcile %s: %v", user, perr)
+		case !isLive && retired[user]:
+			// Finishing a revoke: the poll retired the row but the stop did
+			// not complete before the desk went down.
+			m.stopAndLog(ctx, user, "retired")
 		case !isLive:
 			m.logf("orphan: %s", strings.Join(p.names(), ", "))
 		case p.complete() && p.firefox.Labels["desk.generation"] == generation && !p.capped():
