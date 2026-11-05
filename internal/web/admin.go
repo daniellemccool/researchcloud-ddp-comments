@@ -17,24 +17,22 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
 )
 
-// maxUploadBytes is the pool upload limit (desk_admin_routes.py MAX_UPLOAD).
+// maxUploadBytes is the pool upload limit.
 const maxUploadBytes = 5 * 1024 * 1024
 
-// adminCSS is the admin page's stylesheet (desk_page.py ADMIN_CSS), verbatim.
+// adminCSS is the admin page's stylesheet, kept verbatim from the prototype.
 const adminCSS = "body{font:14px/1.4 system-ui,sans-serif;margin:2em;max-width:70em;color:#1d2329}" +
 	"h2{margin:1.6em 0 .4em;border-bottom:1px solid #e3e6ea}table{border-collapse:collapse}" +
 	"td,th{padding:4px 8px;border-bottom:1px solid #e3e6ea;text-align:left;vertical-align:top}" +
 	".notice{background:#fff8e6;border:1px solid #e8d9a8;padding:8px 12px;border-radius:6px}" +
 	".warn{color:#b35900}form{display:inline}td form button{margin-right:4px}"
 
-// uploadForm is the pool upload form of the admin overview (desk_page.py
-// admin, lines 142-210), verbatim.
+// uploadForm is the pool upload form of the admin overview, kept verbatim from the prototype.
 const uploadForm = `<form method="post" action="/desk/admin/pool" enctype="multipart/form-data">` +
 	`<label>Add to the pool (CSV with an id column; kind, bucket, note optional): ` +
 	`<input type="file" name="file" accept=".csv,text/csv" required></label> <button>Upload</button></form>`
 
-// adminShell is desk_page.py admin_shell: an admin page around already-built
-// HTML inner; notice is plain text, shown in a box and escaped.
+// adminShell wraps already-built HTML inner in an admin page; notice is plain text, shown in a box and escaped.
 func adminShell(title, inner, notice string, back bool) string {
 	box := ""
 	if notice != "" {
@@ -49,7 +47,7 @@ func adminShell(title, inner, notice string, back bool) string {
 }
 
 // setAdminHeaders sets the framing and no-store headers every admin answer
-// carries (desk_admin_routes.py FRAMING + NO_STORE), including the non-admin
+// carries (framing and no-store), including the non-admin
 // 403s and the /desk/admin → /desk/admin/ redirect.
 func setAdminHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Frame-Options", "DENY")
@@ -58,7 +56,7 @@ func setAdminHeaders(w http.ResponseWriter) {
 }
 
 // adminHandler serves GET /desk/admin/{$} and POST /desk/admin/pool
-// (desk_admin_routes.py handle_admin, plan-2a part only). It is mounted
+// (plan-2a part only). It is mounted
 // admin-only by the gated listener; every response carries the framing and
 // no-store headers.
 type adminHandler struct {
@@ -68,7 +66,7 @@ type adminHandler struct {
 
 	addMu   sync.Mutex // held around pool.Add, whose read-modify-write contract requires it (F75)
 	mu      sync.Mutex
-	notices map[string]string // one-shot notice per user (desk_stub.py set/take_notice)
+	notices map[string]string // one-shot notice per user
 }
 
 // NewAdmin returns the admin page handler over the gated listener's Deps.
@@ -112,7 +110,7 @@ func (a *adminHandler) overviewBody(notice string) string {
 	return adminShell("Desk admin", inner, notice, false)
 }
 
-// poolLine is the Queue line (desk_admin_routes.py overview's pool line):
+// poolLine is the Queue line (the overview's pool line):
 // the unreadable variant, else "<free> of <total> <noun>s unclaimed in the
 // pool." over the pool rows this platform can open, free = not in the log's
 // taken set. The line is already-escaped text.
@@ -144,8 +142,7 @@ func (a *adminHandler) poolLine() string {
 	return fmt.Sprintf("%d of %d %ss unclaimed in the pool.", free, total, html.EscapeString(a.kinds.Default()))
 }
 
-// servePoolUpload is POST /desk/admin/pool (desk_admin_routes.py
-// read_upload + the /desk/admin/pool branch): CSRF, size limits, the
+// servePoolUpload is POST /desk/admin/pool : CSRF, size limits, the
 // multipart file field, then ParseSelection and Add with a one-shot notice.
 func (a *adminHandler) servePoolUpload(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
@@ -232,7 +229,7 @@ func decodeReplace(s string) string {
 	return b.String()
 }
 
-// csrfOK is desk_admin_routes.py csrf_ok: a Sec-Fetch-Site header must say
+// csrfOK is the CSRF check: a Sec-Fetch-Site header must say
 // same-origin; without it, Origin's scheme must be http or https and its
 // host part must equal Host.
 func csrfOK(r *http.Request) bool {
@@ -251,8 +248,8 @@ func csrfOK(r *http.Request) bool {
 	return parts[len(parts)-1] == host && (parts[0] == "http" || parts[0] == "https")
 }
 
-// readUpload returns the bytes of the multipart form's first `file` part
-// (desk_admin_routes.py read_upload), or false when there is none.
+// readUpload returns the bytes of the multipart form's first `file` part,
+// or false when there is none.
 func readUpload(r *http.Request) ([]byte, bool) {
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -278,7 +275,7 @@ func readUpload(r *http.Request) ([]byte, bool) {
 	}
 }
 
-// rejectText is desk_admin_routes.py reject_text: "no rejects", else the
+// rejectText renders the reject summary: "no rejects", else the
 // first 20 "<line>: <why>" pairs plus " (and <k> more)".
 func rejectText(rejects []pool.Reject) string {
 	if len(rejects) == 0 {

@@ -22,7 +22,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
 
-// serveHome is GET /desk/ (desk_stub.py _home, lines 359-379), in order:
+// serveHome is GET /desk/, in order:
 // no release template and no profile → 503 not-ready; the provisioning state
 // decides between the full / setup-failed / not-ready / setting-up messages;
 // once ready, Start decides between busy / start-failed / gone / the page.
@@ -98,7 +98,7 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 const defaultAdvanceTimeout = 2 * time.Minute
 
 // kick runs Prov.Advance in a goroutine unless one is already running for
-// user (desk_stub.py kick). The goroutine's context is not cancelled by the
+// user. The goroutine's context is not cancelled by the
 // request; it carries its own deadline, defaultAdvanceTimeout.
 func (h *handler) kick(user string, admin bool) {
 	if _, loaded := h.provisioning.LoadOrStore(user, true); loaded {
@@ -123,7 +123,7 @@ func (h *handler) say(w http.ResponseWriter, status int, text string, refresh in
 	_, _ = w.Write([]byte(message(text, refresh)))
 }
 
-// servePage renders the collector page (desk_stub.py _page, lines 427-468).
+// servePage renders the collector page.
 func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 	user := id.User
 	evs, err := h.deskLog.Read()
@@ -276,8 +276,8 @@ func (h *handler) problemByCode(code string) (platform.Problem, bool) {
 	return platform.Problem{}, false
 }
 
-// poolRows returns the pool rows this platform can open, in file order
-// (desk_stub.py pool): unknown kinds and id mismatches are dropped.
+// poolRows returns the pool rows this platform can open, in file order:
+// unknown kinds and id mismatches are dropped.
 func (h *handler) poolRows() []pool.Row {
 	rows, err := pool.Read(filepath.Join(h.cfg.DeskRoot, "pool.csv"), h.platform.DefaultKind)
 	if err != nil {
@@ -294,7 +294,7 @@ func (h *handler) poolRows() []pool.Row {
 }
 
 // valid reports whether kind is known and id matches its pattern, anchored
-// (desk_stub.py valid).
+// to the whole id.
 func (h *handler) valid(kind, id string) bool {
 	re, ok := h.kinds.Kind(kind)
 	return ok && re.MatchString(id)

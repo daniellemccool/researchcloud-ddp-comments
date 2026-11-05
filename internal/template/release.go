@@ -2,8 +2,7 @@
 // Firefox profile: it sanitises a copy to an explicit allowlist, verifies the
 // Zeeschuimer store holds no captured data, and writes a deterministic tar
 // with its manifest and sha256 (ADR-0012; profiles come only from a verified
-// release template, ADR-0011). The behavioural reference is the legacy Python
-// tool desk/desklib/template.py, ported function by function.
+// release template, ADR-0011).
 package template
 
 import (

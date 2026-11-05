@@ -9,7 +9,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 )
 
-// policyTmpl is desk/firefox/policies.json byte-for-byte; Policy substitutes
+// policyTmpl is the Firefox enterprise policies document; Policy substitutes
 // the per-pair values into it.
 //
 //go:embed policies.json.tmpl

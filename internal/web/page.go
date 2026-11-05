@@ -10,7 +10,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 )
 
-// This file is the Go port of desk/desk_page.py (lines 1-140): the two-pane
+// This file is the Go page layer: the two-pane
 // desk page, the one-line message pages. The HTML, CSS and JavaScript are
 // verbatim — same ids, classes, texts and fetch calls — only the templating
 // moved to Go: the %%NAME%% slots are substituted with one
@@ -21,7 +21,7 @@ import (
 // everything a user, the pool or the log supplies is escaped with
 // html.EscapeString.
 
-// CSS is the page's stylesheet (desk_page.py CSS).
+// CSS is the page's stylesheet.
 const CSS = `:root{--ink:#1d2329;--muted:#6b7480;--line:#e3e6ea;--bg:#f6f7f9;--accent:#1f6feb;--ok:#1a7f37;--warn:#b35900}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.4 system-ui,sans-serif;color:var(--ink);display:flex;height:100vh;overflow:hidden}
@@ -53,7 +53,7 @@ li[data-state=todo] .mark::before{content:"\25CB";color:var(--muted)}
 footer{padding:10px 14px;border-top:1px solid var(--line);background:#fff8e6;font-size:12px}
 #starting{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:15px}`
 
-// PAGE is the two-pane desk page (desk_page.py PAGE). %%NAME%% slots are
+// PAGE is the two-pane desk page. %%NAME%% slots are
 // substituted by deskPage.
 const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>%%TITLE%%</title>
@@ -107,7 +107,7 @@ function refresh(){const rows=[...document.querySelectorAll('ul.rows li')];const
 async function more(n){await fetch('claim?n='+n,{method:'POST'});location.reload();}
 </script></body></html>`
 
-// MESSAGE is the one-line message page (desk_page.py MESSAGE).
+// MESSAGE is the one-line message page.
 const MESSAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">%%REFRESH%%<title>desk</title></head>
 <body style="font:16px system-ui;margin:3em">%%TEXT%%</body></html>`
 
@@ -123,8 +123,7 @@ func message(text string, refresh int) string {
 	).Replace(MESSAGE)
 }
 
-// problemOptions is the problem <select> of every row (desk_page.py
-// problem_options).
+// problemOptions is the problem <select> of every row.
 func problemOptions(problems []platform.Problem) string {
 	var b strings.Builder
 	b.WriteString(`<option value="">Problem…</option>`)
@@ -134,7 +133,7 @@ func problemOptions(problems []platform.Problem) string {
 	return b.String()
 }
 
-// row renders one queue row (desk_page.py row). msg is already-escaped HTML
+// row renders one queue row. msg is already-escaped HTML
 // (or "").
 func row(kind, itemID, state string, opened bool, title, msg, options string, timer bool) string {
 	cls := ""
@@ -157,7 +156,7 @@ func row(kind, itemID, state string, opened bool, title, msg, options string, ti
 	return b.String()
 }
 
-// progress renders the header progress bar (desk_page.py progress). The
+// progress renders the header progress bar. The
 // percentage rounds half to even, as Python's round does.
 func progress(nDone, n int) string {
 	pct := pyRound(100 * float64(nDone) / float64(n))
@@ -196,7 +195,7 @@ type pageParams struct {
 	FooterHint    *string // nil hides the footer
 }
 
-// deskPage renders the two-pane page (desk_page.py desk). Body and
+// deskPage renders the two-pane page. Body and
 // ProgressHTML are already HTML; FooterHint nil hides the footer.
 func deskPage(p pageParams) string {
 	footer := ""

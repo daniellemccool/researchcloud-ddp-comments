@@ -26,5 +26,5 @@ removes the pair; everything persistent stays on the volume.
 Checks: `scripts/check.sh` runs the layers `adr`, `shell`, `go`, `compose` and `shape`; a missing
 tool is a failure, not a skip. Go tests: `go test ./...`.
 
-The Python under `desk/`, `bin/` and `tests/test_*.py` is the prototype the Go desk was ported
-from; it is retired in the next plan.
+The desk is Go. The Playwright end-to-end tests are parked in `archive/` until plan 3; they are not run,
+not linted and not product. Python is not allowed anywhere outside `archive/`.

@@ -7,11 +7,6 @@ set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 2
 
-# Scripts of the legacy Python tree; plan 3 deletes them. Each file is named
-# explicitly (no glob), and nothing under deploy/ or any new script may ever
-# join this list.
-LEGACY_SHELL=(scripts/e2e.sh scripts/lib.sh scripts/test-all.sh)
-
 GOLANGCI_LINT_VERSION="v2.12.2"
 GO_IMAGE="golang:1.26"
 # Toolchain the native go layer pins; its major.minor must match GO_IMAGE.
@@ -38,9 +33,6 @@ layer_shell() {
 	local files=() f
 	for f in scripts/*.sh deploy/*.sh tests/sh/*.sh; do
 		[ -f "$f" ] || continue
-		case " ${LEGACY_SHELL[*]} " in
-		*" $f "*) continue ;;
-		esac
 		files+=("$f")
 	done
 	if [ "${#files[@]}" -eq 0 ]; then
@@ -118,18 +110,14 @@ layer_compose() {
 # Mirrors ADR-0018 and ADR-0019 for environments without adg.
 layer_shape() {
 	local rc=0 dirs=() d py hits
-	for d in cmd internal deploy platforms; do
-		[ -d "$d" ] && dirs+=("$d")
-	done
-	if [ "${#dirs[@]}" -gt 0 ]; then
-		py="$(find "${dirs[@]}" -name '*.py' -type f)"
-		if [ -n "$py" ]; then
-			echo "python in the product tree (ADR-0019):" >&2
-			echo "$py" >&2
-			rc=1
-		fi
+	# Tracked and untracked files, ignored ones (.venv/) excluded; only
+	# archive/ may hold Python.
+	py="$(git ls-files -co --exclude-standard -- '*.py' | grep -v '^archive/' || true)"
+	if [ -n "$py" ]; then
+		echo "python outside archive/ (ADR-0019):" >&2
+		echo "$py" >&2
+		rc=1
 	fi
-	dirs=()
 	for d in cmd/desk internal; do
 		[ -d "$d" ] && dirs+=("$d")
 	done

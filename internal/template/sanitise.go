@@ -15,7 +15,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 )
 
-// Constants ported from the legacy Python tool (desk/desklib/template.py).
+// Constants kept from the retired Python tool.
 const (
 	xpiID            = "{677bb78c-7168-4aa5-8e9b-32e9f26c6157}"
 	xpiRel           = "extensions/" + xpiID + ".xpi"

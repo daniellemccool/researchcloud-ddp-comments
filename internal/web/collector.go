@@ -25,8 +25,7 @@ func identity(r *http.Request) access.Identity {
 	return r.Context().Value(ctxKey{}).(access.Identity)
 }
 
-// serveStatus is GET /desk/status: {"ready":true|false} from Sessions.Ready
-// (desk_stub.py do_GET).
+// serveStatus is GET /desk/status: {"ready":true|false} from Sessions.Ready.
 func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 	ready := false
 	if h.sessions != nil {
@@ -43,7 +42,7 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// serveClaim is POST /desk/claim (desk_stub.py do_POST): n must be ASCII
+// serveClaim is POST /desk/claim: n must be ASCII
 // digits and one of BatchSizes, the desk must be ready, and Log.Claim must
 // not be busy or empty.
 func (h *handler) serveClaim(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +87,7 @@ func (h *handler) serveClaim(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveOpen is POST /desk/open (desk_stub.py do_POST): the item must be valid
+// serveOpen is POST /desk/open: the item must be valid
 // and among this user's claims; OpenURL runs, the event is appended, 204 on
 // rc 0 else 500. A failed append is a 500: the Python raised and the client
 // never saw success.
@@ -146,7 +145,7 @@ func (h *handler) serveOpen(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveProblem is POST /desk/problem (desk_stub.py do_POST): the code is
+// serveProblem is POST /desk/problem: the code is
 // matched as given then upper-cased, the note is whitespace-collapsed and cut
 // to 300 runes; unknown codes and missing required notes are 400. A failed
 // append is a 500, as in serveOpen.

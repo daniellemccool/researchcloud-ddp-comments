@@ -1,10 +1,7 @@
 package render
 
 import (
-	"bytes"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -99,17 +96,5 @@ func TestPolicyLocksOfflineStatusOff(t *testing.T) {
 	}
 	if len(got) != 2 || got["Value"] != false || got["Status"] != "locked" {
 		t.Errorf("network.manage-offline-status = %v, want {Value:false Status:locked}", got)
-	}
-}
-
-// The embedded template is desk/firefox/policies.json byte for byte, as
-// policy.go's comment claims; a change to one without the other fails here.
-func TestPolicyTemplateMatchesDeskCopy(t *testing.T) {
-	desk, err := os.ReadFile(filepath.Join("..", "..", "desk", "firefox", "policies.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal([]byte(policyTmpl), desk) {
-		t.Errorf("internal/render/policies.json.tmpl (%d bytes) differs from desk/firefox/policies.json (%d bytes)", len(policyTmpl), len(desk))
 	}
 }
