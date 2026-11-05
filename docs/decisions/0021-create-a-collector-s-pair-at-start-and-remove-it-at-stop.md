@@ -19,8 +19,8 @@ A collector's network and two containers exist only while the session runs: `sta
 ## Guidance
 
 - Every pair object carries `desk.owner=desk`, `desk.user`, `desk.role` and `desk.generation`, never a `com.docker.compose.*` label, and the desk refuses to touch an object without its owner label or with another user's.
-- A leftover of the same name that is not running is removed before start; a running one is adopted.
-- `desk serve` reconciles by listing the owner label: running pairs are adopted and the desk re-joins their networks, exited pairs are stopped, owner-labelled objects without a live registry row are logged and left.
+- A leftover of the same name that is not running is removed before start; a running one is adopted, except where the memory-cap rule narrows this: `Reconcile` stops a running pair whose containers lack the spec's memory limits ("limits changed") instead of adopting it.
+- `desk serve` reconciles by listing the owner label: running pairs are adopted and the desk re-joins their networks, exited pairs are stopped, a running pair whose registry row is retired is stopped (finishing a revoke; the CO poll does the same through `RevokeAbsent`), and owner-labelled objects of a user with no registry row at all are logged and left.
 - The check is `internal/arch/pair_test.go` over `render.Spec` plus `internal/session` tests over the fake client's recorded call sequence.
 
 ## Why

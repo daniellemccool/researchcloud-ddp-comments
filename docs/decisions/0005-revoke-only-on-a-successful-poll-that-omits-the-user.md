@@ -3,21 +3,26 @@ status: accepted
 date: "2026-10-30"
 category: Access
 applies_to:
-    - internal/coapi/**/*.go
+    - internal/coapi/client.go
+    - internal/coapi/poll.go
     - internal/coapi/poll_test.go
+    - internal/session/revoke.go
 priority: default
 ---
 # Revoke only on a successful poll that omits the user
 
 ## Decision
 
-The desk polls the CO member API every minute and revokes a user only when a successful poll returns a member list without that user or without their role; a failed poll, and a successful poll with no members at all, changes nothing and raises an alarm on the admin page.
+The desk polls the CO member API every minute and revokes a user only when a successful poll returns a member list without that user; a failed poll, and a successful poll with no members at all, changes nothing and shows as an alarm on the admin overview and in `desk status`.
 
 ## Guidance
 
-- Transport errors, non-200 responses, unparsable bodies and an empty list all mean "no change" in `internal/coapi`; `internal/coapi/poll_test.go` holds each case.
-- Revocation stops the user's pair, closes every websocket relayed for or to them, retires the registry row, and for a demoted admin clears the 4CAT admin tag and rotates their credentials.
-- The last good list is kept and served while the API is down, with the outage visible to admins.
+- Transport errors, non-200 responses, unparsable bodies and an empty list all mean "no change" in `internal/coapi`; `internal/coapi/poll_test.go` holds each case, and only a good list reaches `session.Manager.RevokeAbsent`.
+- `Manager.Revoke` works under the user's lock in a fixed order: retire the registry row (under Global), mark the `registry` provisioning step undone, close the user's relayed screens, stop the pair, and close the screens again whatever the stop returned. Retire and the step file come before any Docker call, so a crash or Docker error leaves a retired row that the next poll (a retired row with a running container, or with `registry` still done) or `Reconcile` finishes; never reorder them after the stop.
+- Reactivation needs the poll's agreement: the registry provisioning step, the screen relay and the home page all refuse a user the last good list lacks, so a queued provisioning run or a noVNC reconnect cannot undo a revoke; a re-added member waits for the next good poll.
+- Membership only: a member present without the collector role is left to the gate, which refuses their next request. Demotion actions (clearing the 4CAT admin tag, rotating credentials) are plan 2b-2. Profile, captures, token, password and the 4CAT account survive a revoke.
+- The last good list is kept while the API is down; the status line reads `CO poll: last good HH:MM, N failures` and is prefixed `ALARM:` after 5 consecutive failures or while no poll has succeeded since start.
+- The 2026-11-05 probe found the endpoint returns one unpaginated list whose usernames equal the `REMOTE_USER` the gate sends; a paginated or renamed response needs a new probe before revocation relies on it.
 
 ## Why
 

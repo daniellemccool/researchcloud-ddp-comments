@@ -7,6 +7,8 @@ applies_to:
     - internal/docker/**/*.go
     - internal/config/**/memory*.go
     - internal/arch/pair_test.go
+    - internal/session/reconcile.go
+    - cmd/desk/main.go
 priority: invariant
 ---
 
