@@ -257,7 +257,7 @@ func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 }
 
 // problems returns the platform's problem codes with {contact} in the labels
-// replaced (desklib.platform.problems).
+// replaced.
 func (h *handler) problems() []platform.Problem {
 	out := make([]platform.Problem, len(h.platform.Problems))
 	for i, p := range h.platform.Problems {
