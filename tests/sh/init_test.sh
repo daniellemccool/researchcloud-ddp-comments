@@ -60,6 +60,7 @@ a_err_has() {
 	*) a_fail "stderr lacks [$1]: $ERR" ;;
 	esac
 }
+a_err_lacks() { case $ERR in *"$1"*) a_fail "stderr has [$1]: $ERR" ;; esac }
 a_out_has() {
 	case $OUT in
 	*"$1"*) ;;
@@ -381,6 +382,8 @@ case_role_held_by_nobody() {
 	run_init
 	a_rc 2
 	a_err_has "desk_collector_role"
+	a_err_has "(seen: src_co_admin)"
+	a_err_lacks "dmccool"
 }
 
 case_admin_role_held_by_nobody() {
@@ -389,6 +392,16 @@ case_admin_role_held_by_nobody() {
 	run_init
 	a_rc 2
 	a_err_has "desk_admin_role"
+	a_err_has "(seen: src_co_students)"
+	a_err_lacks "dmccool"
+}
+
+case_roles_all_empty() {
+	jq 'map(.roles = [])' "$FIX/members.json" >"$SYSROOT/members.json"
+	export DESK_CO_MEMBERS_FILE=$SYSROOT/members.json
+	run_init
+	a_rc 2
+	a_err_has "desk_collector_role: not held by any CO member (seen: none)"
 }
 
 case_two_volumes() {
@@ -1132,6 +1145,7 @@ run_case trailing-lf-value case_trailing_lf_value
 run_case quote-in-contact case_quote_in_contact
 run_case two-failures case_two_failures
 run_case role-held-by-nobody case_role_held_by_nobody
+run_case roles-all-empty case_roles_all_empty
 run_case admin-role-held-by-nobody case_admin_role_held_by_nobody
 run_case two-volumes case_two_volumes
 run_case storage-path-with-space case_storage_path_with_space

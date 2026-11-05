@@ -419,12 +419,17 @@ role_held() {
 	jq -e --arg r "$1" '[.[] | .roles[]?] | any(. == $r)' "$MEMBERS_FILE" >/dev/null 2>&1
 }
 
+roles_seen() {
+	seen=$(jq -r '[.[] | .roles[]? | select(type=="string" and startswith("src_co_")) | gsub("[^A-Za-z0-9_-]";"")] | unique | join(", ")' "$MEMBERS_FILE" 2>/dev/null)
+	printf '%s' "${seen:-none}"
+}
+
 check_roles() {
 	for k in desk_collector_role desk_admin_role; do
 		v=$(param "$k")
 		if printf '%s' "$v" | grep -Eq '^src_co_[A-Za-z0-9_-]+$' && ! printf '%s' "$v" | grep -q '<'; then
 			if ! role_held "$v"; then
-				param_err "$k" "not held by any CO member"
+				param_err "$k" "not held by any CO member (seen: $(roles_seen))"
 			fi
 		fi
 	done
