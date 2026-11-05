@@ -23,12 +23,14 @@ type Poller struct {
 }
 
 // Poll fetches once. On success it stores the list and time and zeroes the
-// failures; on failure it counts one and keeps the last list.
+// failures; on failure it counts one and keeps the last list. A Fetch that
+// returns no members without an error is a failure too (ADR-0005: an empty
+// list changes nothing).
 func (p *Poller) Poll(ctx context.Context) (map[string]bool, bool) {
 	members, err := p.Fetch(ctx)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err != nil {
+	if err != nil || len(members) == 0 {
 		p.failures++
 		return nil, false
 	}

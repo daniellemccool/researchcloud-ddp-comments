@@ -41,21 +41,42 @@ func TestPollFailureKeepsLastList(t *testing.T) {
 	}
 }
 
+// An empty list changes nothing whether Fetch reports it as ErrEmpty or
+// returns zero members with a nil error: it is a failed poll.
 func TestPollEmptyListChangesNothing(t *testing.T) {
-	n := 0
-	p := &Poller{Now: fixedNow, Fetch: func(context.Context) ([]Member, error) {
-		n++
-		if n == 1 {
-			return []Member{{Username: "alice"}}, nil
-		}
-		return nil, ErrEmpty
-	}}
-	p.Poll(context.Background())
-	if _, ok := p.Poll(context.Background()); ok {
-		t.Fatal("empty list reported ok")
+	cases := []struct {
+		name  string
+		fetch func() ([]Member, error)
+	}{
+		{"zero members nil error", func() ([]Member, error) { return []Member{}, nil }},
+		{"nil members nil error", func() ([]Member, error) { return nil, nil }},
+		{"ErrEmpty", func() ([]Member, error) { return nil, ErrEmpty }},
 	}
-	if p.Absent("alice") {
-		t.Fatal("empty list made alice absent")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := 0
+			p := &Poller{Now: fixedNow, Fetch: func(context.Context) ([]Member, error) {
+				n++
+				if n == 1 {
+					return []Member{{Username: "alice"}}, nil
+				}
+				return tc.fetch()
+			}}
+			p.Poll(context.Background())
+			present, ok := p.Poll(context.Background())
+			if ok || present != nil {
+				t.Fatalf("empty list: Poll = %v, %v; want nil, false", present, ok)
+			}
+			if p.Absent("alice") {
+				t.Fatal("empty list made alice absent")
+			}
+			if !p.Absent("bob") {
+				t.Fatal("empty list dropped the last good list")
+			}
+			if p.Failures() != 1 {
+				t.Fatalf("failures = %d, want 1", p.Failures())
+			}
+		})
 	}
 }
 

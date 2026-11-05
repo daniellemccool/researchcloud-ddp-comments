@@ -57,21 +57,27 @@ func (m *Manager) revoke(ctx context.Context, user string, closeScreens func(str
 // retired row whose user still has a running container (anyRunning) or whose
 // provision.json still marks registry done — a revoke cut short, or a row
 // retired by hand. Each is re-checked under the user lock before Revoke, so
-// a user re-added and reactivated since the selection keeps their pair. It
-// returns the users whose revoke completed, sorted; errors are logged per
-// user and the user is selected again on the next poll.
+// a user re-added and reactivated since the selection keeps their pair. An
+// empty present selects no live row (ADR-0005: an empty list changes
+// nothing); retired rows are still finished. It returns the users whose
+// revoke completed, sorted; errors are logged per user and the user is
+// selected again on the next poll.
 func (m *Manager) RevokeAbsent(ctx context.Context, present map[string]bool, closeScreens func(string) int) (revoked []string) {
 	rows, err := m.Reg.Rows()
 	if err != nil {
 		m.logf("revoke: registry: %v", err)
 		return nil
 	}
+	emptyList := len(present) == 0
+	if emptyList {
+		m.logf("revoke: CO list empty; nothing changes for live rows")
+	}
 	var running map[string]bool
 	var users []string
 	for _, r := range rows {
 		switch r.Status {
 		case "live":
-			if !present[r.User] {
+			if !emptyList && !present[r.User] {
 				users = append(users, r.User)
 			}
 		case "retired":

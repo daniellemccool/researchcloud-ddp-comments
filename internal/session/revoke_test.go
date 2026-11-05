@@ -182,6 +182,39 @@ func TestRevokeAbsentFinishesCutShortRevoke(t *testing.T) {
 	}
 }
 
+// An empty present set never revokes a live row (ADR-0005: an empty list
+// changes nothing), even with a running pair; a retired row with registry
+// still done is finished all the same.
+func TestRevokeAbsentEmptyPresentRevokesNoLiveRow(t *testing.T) {
+	f := newFixture(t, 4, "alice", "bob")
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	f.retire(t, "bob")
+	sc := &screenCloser{}
+	for _, present := range []map[string]bool{nil, {}} {
+		got := f.m.RevokeAbsent(context.Background(), present, sc.close)
+		if len(got) > 1 || (len(got) == 1 && got[0] != "bob") {
+			t.Errorf("RevokeAbsent(%v) = %v; want no live user revoked", present, got)
+		}
+	}
+	if got := f.rowStatus(t, "alice"); got != "live" {
+		t.Errorf("alice row = %q, want live", got)
+	}
+	if !f.m.IsRunning(context.Background(), "alice") {
+		t.Error("alice's pair was stopped by an empty list")
+	}
+	if !f.registryDone("alice") {
+		t.Error("alice's registry step marked undone by an empty list")
+	}
+	if f.registryDone("bob") {
+		t.Error("bob's cut-short revoke was not finished")
+	}
+	for _, u := range sc.calls {
+		if u == "alice" {
+			t.Error("closeScreens(alice) called on an empty list")
+		}
+	}
+}
+
 // Selection: live rows absent from the list, plus retired rows with anything
 // running; a present live user and a finished retired user are left alone.
 func TestRevokeAbsentSelectsLiveAndRetiredRunning(t *testing.T) {
