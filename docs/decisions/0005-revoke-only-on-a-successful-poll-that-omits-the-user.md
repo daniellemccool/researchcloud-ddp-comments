@@ -3,10 +3,12 @@ status: accepted
 date: "2026-10-30"
 category: Access
 applies_to:
-    - internal/coapi/client.go
-    - internal/coapi/poll.go
+    - internal/coapi/**/*.go
     - internal/coapi/poll_test.go
     - internal/session/revoke.go
+    - internal/provision/steps.go
+    - internal/web/home.go
+    - cmd/desk/main.go
 priority: default
 ---
 # Revoke only on a successful poll that omits the user
@@ -17,8 +19,8 @@ The desk polls the CO member API every minute and revokes a user only when a suc
 
 ## Guidance
 
-- Transport errors, non-200 responses, unparsable bodies and an empty list all mean "no change" in `internal/coapi`; `internal/coapi/poll_test.go` holds each case, and only a good list reaches `session.Manager.RevokeAbsent`.
-- `Manager.Revoke` works under the user's lock in a fixed order: retire the registry row (under Global), mark the `registry` provisioning step undone, close the user's relayed screens, stop the pair, and close the screens again whatever the stop returned. Retire and the step file come before any Docker call, so a crash or Docker error leaves a retired row that the next poll (a retired row with a running container, or with `registry` still done) or `Reconcile` finishes; never reorder them after the stop.
+- Transport errors, non-200 responses, unparsable bodies and an empty list all mean "no change" in `internal/coapi`; `internal/coapi/poll_test.go` holds each case, and only a good list reaches `session.Manager.RevokeAbsent`. An empty list is refused twice: `Poller.Poll` counts a fetch with no members as a failure even without an error, and `RevokeAbsent` selects no live row when the present set is empty.
+- `Manager.Revoke` works under the user's lock in a fixed order: retire the registry row (under Global), mark the `registry` provisioning step undone, close the user's relayed screens, stop the pair, and close the screens again whatever the stop returned. Retire and the step file come before any Docker call; a failed Retire leaves a live row that the next poll selects again, and a crash or Docker error after Retire leaves a retired row that the next poll (a retired row with a running container, or with `registry` still done) or `Reconcile` finishes; never reorder them after the stop.
 - Reactivation needs the poll's agreement: the registry provisioning step, the screen relay and the home page all refuse a user the last good list lacks, so a queued provisioning run or a noVNC reconnect cannot undo a revoke; a re-added member waits for the next good poll.
 - Membership only: a member present without the collector role is left to the gate, which refuses their next request. Demotion actions (clearing the 4CAT admin tag, rotating credentials) are plan 2b-2. Profile, captures, token, password and the 4CAT account survive a revoke.
 - The last good list is kept while the API is down; the status line reads `CO poll: last good HH:MM, N failures` and is prefixed `ALARM:` after 5 consecutive failures or while no poll has succeeded since start.
