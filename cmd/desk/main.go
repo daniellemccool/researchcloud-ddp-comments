@@ -192,6 +192,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		GateSecret:    cfg.GateSecret,
 	}
 	logPath := filepath.Join(cfg.DeskRoot, "state", "access.ndjson")
+	// One activity tracker for the whole desk: the relay records open
+	// screens in it and can close a user's screens through it.
+	activity := web.NewActivity(time.Now)
 	deps := web.Deps{
 		Cfg:          cfg,
 		Access:       ac,
@@ -201,7 +204,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		Sessions:     mgr,
 		Log:          dlog,
 		FourcatProxy: fourcatProxy(cfg),
-		Relay:        web.NewRelay(mgr),
+		Relay:        web.NewRelay(mgr, activity),
 	}
 	deps.Admin = web.NewAdmin(deps)
 	gated := web.New(deps)

@@ -30,8 +30,9 @@ const vncPrefix = "/desk/vnc"
 // drops straight into Deps.Relay); tests replace its Dial field to route the
 // proxied connections to in-memory backends.
 type Relay struct {
-	running runningChecker
-	proxy   *httputil.ReverseProxy
+	running  runningChecker
+	activity *Activity
+	proxy    *httputil.ReverseProxy
 
 	// Dial is the transport's dial function; nil means a plain net.Dialer.
 	// Tests set it to observe or redirect the dialled host.
@@ -41,8 +42,8 @@ type Relay struct {
 // NewRelay returns the screen relay. A request whose owner's pair is not
 // running gets 409 "screen not running"; a dial failure gets 502 from the
 // proxy's ErrorHandler.
-func NewRelay(s runningChecker) *Relay {
-	r := &Relay{running: s}
+func NewRelay(s runningChecker, a *Activity) *Relay {
+	r := &Relay{running: s, activity: a}
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if r.Dial != nil {
@@ -92,11 +93,38 @@ func badGateway(name string) func(http.ResponseWriter, *http.Request, error) {
 }
 
 // ServeHTTP relays the request to the identity's own Firefox container.
+//
+// A websocket upgrade is a screen: it runs under a cancellable context whose
+// cancel is registered under the identity's user in the activity tracker,
+// so CloseUser can end it (httputil.ReverseProxy closes an upgraded
+// connection when the request context is done; the transport dials with a
+// context that is never cancelled, so the dial seam cannot carry the close).
+// Plain requests (noVNC's assets) are not screens and are not tracked.
 func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	id := identity(req)
 	if !r.running.IsRunning(req.Context(), id.User) {
 		plain(w, http.StatusConflict, "screen not running")
 		return
 	}
+	if isWebsocketUpgrade(req) {
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		closed := r.activity.openScreen(id.User, cancel)
+		defer closed()
+		req = req.WithContext(ctx)
+	}
 	r.proxy.ServeHTTP(w, req)
+}
+
+// isWebsocketUpgrade reports whether req asks to upgrade to a websocket: one
+// of its Upgrade tokens is "websocket", in any case.
+func isWebsocketUpgrade(req *http.Request) bool {
+	for _, v := range req.Header.Values("Upgrade") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "websocket") {
+				return true
+			}
+		}
+	}
+	return false
 }

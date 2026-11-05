@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
@@ -118,7 +119,7 @@ func assertNoIdentityHeaders(t *testing.T, hs []http.Header) {
 
 func newTestRelay(t *testing.T, running map[string]bool, backends map[string]string) (*Relay, *dialRecorder) {
 	t.Helper()
-	r := NewRelay(fakeRunning{running: running})
+	r := NewRelay(fakeRunning{running: running}, NewActivity(time.Now))
 	d := &dialRecorder{backend: backends}
 	r.Dial = d.dial
 	return r, d
@@ -346,7 +347,7 @@ func TestRelay409WhenNotRunning(t *testing.T) {
 }
 
 func TestRelay502OnDialFailure(t *testing.T) {
-	r := NewRelay(fakeRunning{running: map[string]bool{"alice": true}})
+	r := NewRelay(fakeRunning{running: map[string]bool{"alice": true}}, NewActivity(time.Now))
 	r.Dial = func(context.Context, string, string) (net.Conn, error) {
 		return nil, errors.New("connection refused")
 	}
@@ -384,5 +385,203 @@ func TestRelayDropsCookieAndAuthorization(t *testing.T) {
 		if v := hs[0].Values(name); len(v) != 0 {
 			t.Errorf("backend saw %s = %q, want none", name, v)
 		}
+	}
+}
+
+// wsPipeBackend is an in-memory noVNC server behind the Dial seam: every
+// dial gets one end of a net.Pipe, served by a goroutine that answers plain
+// requests with keep-alive and a websocket upgrade with 101, after which it
+// echoes until the relay closes the connection.
+type wsPipeBackend struct {
+	mu    sync.Mutex
+	hosts []string
+}
+
+func (b *wsPipeBackend) dial(_ context.Context, _, addr string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.hosts = append(b.hosts, host)
+	b.mu.Unlock()
+	client, server := net.Pipe()
+	go b.serve(server, host)
+	return client, nil
+}
+
+func (b *wsPipeBackend) serve(c net.Conn, host string) {
+	defer func() { _ = c.Close() }()
+	br := bufio.NewReader(c)
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+		if strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+			_, _ = io.WriteString(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			_, _ = io.Copy(c, br)
+			return
+		}
+		body := host + " screen"
+		_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+	}
+}
+
+// pipeRelay is a relay whose screens are wsPipeBackends and whose tracker
+// runs on clock, plus one gated test server per user wrapping that relay.
+func pipeRelay(t *testing.T, clock func() time.Time, users ...string) (*Relay, map[string]string) {
+	t.Helper()
+	running := map[string]bool{}
+	for _, u := range users {
+		running[u] = true
+	}
+	r := NewRelay(fakeRunning{running: running}, NewActivity(clock))
+	r.Dial = (&wsPipeBackend{}).dial
+	addrs := map[string]string{}
+	for _, u := range users {
+		id := access.Identity{User: u, Collector: true}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			r.ServeHTTP(w, withIdentity(req, id))
+		}))
+		t.Cleanup(srv.Close)
+		addrs[u] = srv.Listener.Addr().String()
+	}
+	return r, addrs
+}
+
+// openScreenConn opens a websocket screen through the relay at addr and
+// returns the upgraded connection once the 101 head has been read.
+func openScreenConn(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_, err = fmt.Fprintf(conn, "GET /desk/vnc/websockify HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: WebSocket\r\n\r\n", addr)
+	if err != nil {
+		t.Fatalf("write upgrade: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !strings.Contains(line, "101") {
+		t.Fatalf("status line %q, want 101", line)
+	}
+	for {
+		l, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read head: %v", err)
+		}
+		if l == "\r\n" {
+			return conn, br
+		}
+	}
+}
+
+// assertScreenOpen proves the upgraded connection still carries frames.
+func assertScreenOpen(t *testing.T, conn net.Conn, br *bufio.Reader) {
+	t.Helper()
+	frame := []byte("still-here")
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+	echo := make([]byte, len(frame))
+	if _, err := io.ReadFull(br, echo); err != nil {
+		t.Fatalf("read echo: %v (screen closed?)", err)
+	}
+}
+
+// assertScreenEOF fails unless the connection reads EOF within 2 s.
+func assertScreenEOF(t *testing.T, conn net.Conn, br *bufio.Reader) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err := br.ReadByte()
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("read after close = %v, want EOF within 2s", err)
+	}
+}
+
+// waitOpen waits up to 2 s for user's open-screen count to reach want.
+func waitOpen(t *testing.T, a *Activity, user string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, open, _ := activitySnapshot(a, user)
+		if open == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s open screens = %d, want %d", user, open, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCloseUserEndsOpenScreen(t *testing.T) {
+	relay, addrs := pipeRelay(t, time.Now, "alice")
+	conn, br := openScreenConn(t, addrs["alice"])
+	assertScreenOpen(t, conn, br)
+	if n := relay.activity.CloseUser("alice"); n != 1 {
+		t.Fatalf("CloseUser(alice) = %d, want 1", n)
+	}
+	assertScreenEOF(t, conn, br)
+	waitOpen(t, relay.activity, "alice", 0)
+}
+
+func TestCloseUserLeavesOtherUsers(t *testing.T) {
+	relay, addrs := pipeRelay(t, time.Now, "alice", "bob")
+	aConn, aBR := openScreenConn(t, addrs["alice"])
+	bConn, bBR := openScreenConn(t, addrs["bob"])
+	if n := relay.activity.CloseUser("alice"); n != 1 {
+		t.Fatalf("CloseUser(alice) = %d, want 1", n)
+	}
+	assertScreenEOF(t, aConn, aBR)
+	assertScreenOpen(t, bConn, bBR)
+	if _, open, _ := activitySnapshot(relay.activity, "bob"); open != 1 {
+		t.Errorf("bob open screens = %d, want 1", open)
+	}
+}
+
+func TestOnlyUpgradesCountAsScreens(t *testing.T) {
+	c := newFakeClock()
+	relay, addrs := pipeRelay(t, c.now, "alice")
+
+	// A plain asset GET over a kept-alive client connection is not a screen,
+	// neither while the request runs nor while the connection idles.
+	client := &http.Client{Transport: &http.Transport{}}
+	t.Cleanup(client.CloseIdleConnections)
+	for i := 0; i < 2; i++ {
+		resp, err := client.Get("http://" + addrs["alice"] + "/desk/vnc/vnc.html")
+		if err != nil {
+			t.Fatalf("plain GET: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("plain GET status = %d, want 200", resp.StatusCode)
+		}
+	}
+	if _, open, _ := activitySnapshot(relay.activity, "alice"); open != 0 {
+		t.Fatalf("open screens after plain GETs = %d, want 0", open)
+	}
+
+	// An upgrade is a screen; its close lowers the count and stamps the close.
+	conn, br := openScreenConn(t, addrs["alice"])
+	assertScreenOpen(t, conn, br)
+	waitOpen(t, relay.activity, "alice", 1)
+	c.advance(time.Hour)
+	closedAt := c.now()
+	_ = conn.Close()
+	waitOpen(t, relay.activity, "alice", 0)
+	if _, _, last := activitySnapshot(relay.activity, "alice"); !last.Equal(closedAt) {
+		t.Errorf("lastScreenClose = %v, want %v", last, closedAt)
 	}
 }
