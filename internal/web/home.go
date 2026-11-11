@@ -276,6 +276,7 @@ func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 		OpenHelp:      len(view.Claims) == 0,
 		FooterHint:    footer,
 		IdleMinutes:   h.cfg.IdleSeconds / 60,
+		Contact:       h.cfg.Contact,
 	})))
 }
 

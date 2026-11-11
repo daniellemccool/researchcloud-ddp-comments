@@ -52,8 +52,9 @@ li[data-state=todo] .mark::before{content:"\25CB";color:var(--muted)}
 .hint{font-size:12px;color:var(--muted);margin:6px 2px}
 footer{padding:10px 14px;border-top:1px solid var(--line);background:#fff8e6;font-size:12px}
 #starting{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:15px}
-#stopped{position:fixed;top:0;left:0;right:0;z-index:10;padding:14px;text-align:center;font-size:15px;font-weight:600;background:#fff8e6;color:var(--warn);border-bottom:1px solid var(--line)}
-#stopped[hidden]{display:none}`
+#stopped,#denied{position:fixed;top:0;left:0;right:0;z-index:10;padding:14px;text-align:center;font-size:15px;font-weight:600;background:#fff8e6;color:var(--warn);border-bottom:1px solid var(--line)}
+#stopped[hidden]{display:none}
+#denied[hidden]{display:none}`
 
 // PAGE is the two-pane desk page. %%NAME%% slots are
 // substituted by deskPage.
@@ -75,6 +76,7 @@ const PAGE = `<!doctype html>
 %%FOOTER%%</aside>
 <div id="starting">Starting your browser…</div>
 <div id="stopped" hidden>Your desk was stopped after %%IDLE_MINUTES%% minutes without activity. Reload to continue.</div>
+<div id="denied" hidden>You are signed out, or your access to the desk was removed. Reload this page. If it keeps failing, contact %%CONTACT%%.</div>
 <iframe id="screen" style="flex:1 1 auto;height:100vh;border:0;min-width:0;display:none" allow="clipboard-read; clipboard-write"></iframe>
 <script>
 const SECONDS=%%SECONDS%%,NOTE_CODES=%%NOTE_CODES%%;let timer=null,wasReady=false,sawInput=false,stopped=false;
@@ -87,9 +89,16 @@ function listen(d){INPUT_EVENTS.forEach(e=>d.addEventListener(e,()=>{sawInput=tr
 listen(document);
 document.getElementById('screen').addEventListener('load',function(){try{if(this.contentDocument)listen(this.contentDocument);}catch(e){}});
 function showStopped(){stopped=true;document.getElementById('stopped').hidden=false;}
-setInterval(async()=>{if(stopped)return;
- try{if(sawInput){sawInput=false;const r=await fetch('active',{method:'POST'});if(r.ok&&!(await r.json()).running)showStopped();return;}
-  const r=await fetch('status');if(r.ok){if((await r.json()).ready)wasReady=true;else if(wasReady)showStopped();}}catch(e){}},60000);
+function showDenied(){stopped=true;document.getElementById('denied').hidden=false;}
+function refused(r){return r.status===401||r.status===403||r.type==='opaqueredirect';}
+setInterval(async()=>{if(stopped)return;const hadInput=sawInput;sawInput=false;
+ try{const r=hadInput?await fetch('active',{method:'POST',redirect:'manual'}):await fetch('status',{redirect:'manual'});
+  if(refused(r)){showDenied();return;}
+  if(!r.ok){if(hadInput)sawInput=true;return;}
+  const j=await r.json();
+  if(hadInput){if(!j.running)showStopped();}
+  else if(j.ready)wasReady=true;else if(wasReady)showStopped();
+ }catch(e){if(hadInput)sawInput=true;}},60000);
 function q(l){return 'id='+encodeURIComponent(l.dataset.id)+'&kind='+encodeURIComponent(l.dataset.kind);}
 function setMsg(l,text,warn){const m=l.querySelector('.msg');m.textContent=text;m.className='msg'+(warn?' warn':'');}
 function startTimer(l){if(timer)clearInterval(timer.h);document.querySelectorAll('.timer').forEach(t=>t.textContent='');
@@ -205,6 +214,7 @@ type pageParams struct {
 	OpenHelp      bool
 	FooterHint    *string // nil hides the footer
 	IdleMinutes   int     // N of the stopped banner, desk_idle_seconds/60 rounded down, at least 1
+	Contact       string  // desk_contact, escaped by deskPage
 }
 
 // deskPage renders the two-pane page. Body and
@@ -247,5 +257,6 @@ func deskPage(p pageParams) string {
 		"%%SECONDS%%", strconv.Itoa(p.Seconds),
 		"%%NOTE_CODES%%", noteCodes,
 		"%%IDLE_MINUTES%%", strconv.Itoa(max(p.IdleMinutes, 1)),
+		"%%CONTACT%%", html.EscapeString(p.Contact),
 	).Replace(PAGE)
 }

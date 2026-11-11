@@ -148,7 +148,7 @@ func TestDeskPageAdminLinkAndNoFooter(t *testing.T) {
 func TestPageHeartbeatScript(t *testing.T) {
 	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15})
 	for _, want := range []string{
-		`fetch('active',{method:'POST'})`,
+		`fetch('active',{method:'POST',redirect:'manual'})`,
 		"'pointerdown'", "'pointermove'", "'keydown'", "'wheel'", "'touchstart'",
 		`id="stopped" hidden`,
 		"Your desk was stopped after 15 minutes without activity. Reload to continue.",
@@ -168,5 +168,42 @@ func TestPageReattachesListenersOnIframeLoad(t *testing.T) {
 	}
 	if !strings.Contains(out[i:], "contentDocument") {
 		t.Error("the load handler does not attach the listeners to the iframe's contentDocument")
+	}
+}
+
+// A refused check-in (401, 403, or a redirect to the SRC login, which needs
+// redirect:'manual' to be seen at all) shows the denied banner; the contact
+// in it is escaped.
+func TestPageDeniedBanner(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15, Contact: `help <desk> & "co"`})
+	for _, want := range []string{
+		`id="denied" hidden`,
+		"You are signed out, or your access to the desk was removed. Reload this page. If it keeps failing, contact help &lt;desk&gt; &amp; &#34;co&#34;.",
+		`fetch('active',{method:'POST',redirect:'manual'})`,
+		`fetch('status',{redirect:'manual'})`,
+		"r.status===401", "r.status===403", "r.type==='opaqueredirect'",
+		"function showDenied()",
+		"#denied[hidden]{display:none}",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Contains(out, "<desk>") {
+		t.Error("the contact is not escaped in the denied banner")
+	}
+}
+
+// Input seen before a check-in that fails for a moment (a non-ok answer or a
+// thrown fetch) is reported at the next check-in instead of being dropped.
+func TestPageKeepsInputAfterFailedCheckIn(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15})
+	i := strings.Index(out, "setInterval(")
+	if i < 0 {
+		t.Fatal("page has no check-in interval")
+	}
+	tick := out[i:]
+	if n := strings.Count(tick, "if(hadInput)sawInput=true;"); n != 2 {
+		t.Errorf("input is restored in %d places of the check-in, want 2 (non-ok answer and thrown fetch)", n)
 	}
 }

@@ -272,3 +272,16 @@ func TestHomeForgetsBeforeStart(t *testing.T) {
 		t.Error("alice still idle when Start ran; serveHome must Forget before Start")
 	}
 }
+
+// The desk page carries desk_contact into the denied banner.
+func TestHomePassesContactToPage(t *testing.T) {
+	e := readyPageEnv(t, false)
+	rec := e.get(t, "alice", collectorRole, "/desk/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("home = %d, want 200", rec.Code)
+	}
+	want := "If it keeps failing, contact " + testContact + "."
+	if b := rec.Body.String(); !strings.Contains(b, want) {
+		t.Errorf("page lacks %q", want)
+	}
+}
