@@ -32,7 +32,7 @@ none; both are N/A for the platform-sourced parameters.
 
 | Parameter | Source | Default | Overwritable | Required | Item action |
 |---|---|---|---|---|---|
-| `desk_collector_role` | Fixed | `src_no_ext_apps` | yes | yes | interactive |
+| `desk_collector_role` | Fixed | `src_co_<fill-me-in>` | yes | yes | interactive |
 | `desk_admin_role` | Fixed | `src_co_admin` | yes | no | keep |
 | `desk_platform` | Fixed | `tiktok` | yes | no | interactive |
 | `desk_contact` | Fixed | `<fill-me-in>` | yes | yes | interactive |
@@ -55,13 +55,15 @@ declares one.
 
 Notes on the values:
 
-- `desk_collector_role` and `desk_admin_role` must match
-  `^(src_co_[A-Za-z0-9_-]+|src_no_ext_apps)$` and each be held by at least one CO
-  member. The collector default is SRC's own `src_no_ext_apps` group, because a
-  CO's own `src_co_` group may never reach SRC (the D3I CO, 2026-11-05); a CO
-  whose own collector group does reach SRC (as `src_co_students` did on
-  OnlineHate) can name it instead. A failed role check lists the `src_*` role
-  names the CO API returned.
+- `desk_collector_role` and `desk_admin_role` must match `^src_co_[A-Za-z0-9_-]+$`
+  and each be held by at least one CO member. The collector default is the
+  placeholder so an unedited launch fails loudly. A failed role check lists the
+  `src_*` role names the CO API returned.
+- The collector role is a group the CO makes for its collectors, not SRC's
+  `src_no_ext_apps` group. That group restricts which catalog items its members
+  can start in the SRC portal and says nothing about who collects, so it is not
+  accepted as a role. Putting the collectors in it as well is advisable: they
+  can then start nothing in the CO beyond the items allowed for it.
 - `desk_contact` appears in page text; no quotes.
 - `desk_idle_seconds` is how long a collector's pair may go without page input or
   without an open screen before the desk stops it; `0` turns the idle stop off.
