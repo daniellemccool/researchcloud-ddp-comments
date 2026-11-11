@@ -168,14 +168,15 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	co := &coapi.Client{Endpoint: cfg.COEndpoint, Token: cfg.COToken}
 	poller := &coapi.Poller{Fetch: co.Fetch, Now: time.Now}
 	prov := &provision.Provisioner{Cfg: cfg, Reg: reg, Fourcat: fc, Locks: lockSet, Members: poller}
-	dlog := &desklog.Log{Path: filepath.Join(cfg.DeskRoot, "state", "desk-log.ndjson"), DefaultKind: p.DefaultKind}
+	logger := log.New(stderr, "desk: ", log.LstdFlags)
+	dlog := &desklog.Log{Path: filepath.Join(cfg.DeskRoot, "state", "desk-log.ndjson"), DefaultKind: p.DefaultKind, Warn: logger.Printf}
 	mgr := &session.Manager{
 		Cfg:    cfg,
 		Docker: dc,
 		Reg:    reg,
 		Locks:  lockSet,
 		SelfID: selfID,
-		Log:    log.New(stderr, "desk: ", log.LstdFlags),
+		Log:    logger,
 	}
 
 	// Adopt the pairs that survived a desk restart; errors are logged, not

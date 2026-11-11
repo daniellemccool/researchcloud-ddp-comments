@@ -84,7 +84,7 @@ func (l *Log) Taken(evs []Event) map[Key]bool {
 func (l *Log) Claim(user string, n int, rows []pool.Row) ([]Key, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	evs, err := l.Read()
+	evs, err := l.read()
 	if err != nil {
 		return nil, err
 	}

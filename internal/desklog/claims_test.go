@@ -1,8 +1,11 @@
 package desklog
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -283,5 +286,31 @@ func TestViewIgnoresStopEvents(t *testing.T) {
 	}
 	if _, err := l.Claim("alice", 5, videoRows(3)); !errors.Is(err, ErrBusy) {
 		t.Fatalf("Claim after stop events = %v, want ErrBusy", err)
+	}
+}
+
+// A claim after an unfinished last line succeeds: the fragment is not read
+// as a bad line, and it is cut before the claim is written, so every line of
+// the file parses afterwards.
+func TestClaimAfterUnfinishedTail(t *testing.T) {
+	l := newTestLog(t)
+	writeLog(t, l.Path, `{"t":1,"user":"alice","action":"claim","kind":"video","id":"1","batch":1,"code":""}`+"\n"+`{"t":2,"us`)
+	keys, err := l.Claim("bob", 1, videoRows(3))
+	if err != nil {
+		t.Fatalf("Claim after an unfinished tail: %v", err)
+	}
+	wantKeys(t, keys, "2")
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("file has %d lines, want 2 (alice's claim and bob's): %q", len(lines), data)
+	}
+	for i, line := range lines {
+		if !json.Valid([]byte(line)) {
+			t.Errorf("line %d is not JSON: %q", i+1, line)
+		}
 	}
 }
