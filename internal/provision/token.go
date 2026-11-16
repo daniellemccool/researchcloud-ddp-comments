@@ -152,7 +152,7 @@ func readPassword(cfg *config.Config, user string) (string, error) {
 	return pw, nil
 }
 
-// WriteToken writes the collector's 4CAT login token (ADR-0009) to
+// WriteToken writes the collector's 4CAT API token (ADR-0009) to
 // <DeskRoot>/secrets/4cat-tokens/<user>/4cat-token: the directory is uid 1000
 // 0750, the file uid 1000 0600, published by temp-file-and-rename so a
 // rotation is seen at once.

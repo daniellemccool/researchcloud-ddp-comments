@@ -541,3 +541,136 @@ func TestNewPassword(t *testing.T) {
 		}
 	}
 }
+
+const hexToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// tokenServer stands in for 4CAT's login and token routes: /login/ sets
+// remember_token=tok-abc for password pw-alice; /api/request-token/ answers
+// with answer (status 200, JSON) when the request carries that cookie, or
+// with the status in refuse (a 302 to /login/ for 302) when refuse is set.
+// sawCookie records the Cookie header of the token request.
+func tokenServer(t *testing.T, answer string, refuse int, sawCookie *string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/":
+			_ = r.ParseForm()
+			if r.PostForm.Get("password") == "pw-alice" {
+				w.Header().Add("Set-Cookie", "remember_token=tok-abc; Path=/")
+				w.Header().Set("Location", "/")
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/api/request-token/":
+			if sawCookie != nil {
+				*sawCookie = r.Header.Get("Cookie")
+			}
+			if refuse == http.StatusFound {
+				http.Redirect(w, r, "/login/", http.StatusFound)
+				return
+			}
+			if refuse != 0 {
+				w.WriteHeader(refuse)
+				return
+			}
+			if r.Header.Get("Cookie") != "remember_token=tok-abc" {
+				http.Redirect(w, r, "/login/", http.StatusFound)
+				return
+			}
+			_, _ = w.Write([]byte(answer))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRequestTokenObject(t *testing.T) {
+	ctx := context.Background()
+	var cookie string
+	srv := tokenServer(t, `{"name":"alice","token":"`+hexToken+`","expires":1}`, 0, &cookie)
+	f := newFakeWith4CAT(t)
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: "UPDATE 1\n"}
+	c := &Client{Docker: f, Backend: backendName, DB: dbName, FrontendURL: srv.URL}
+
+	tok, err := c.RequestToken(ctx, "alice", "pw-alice")
+	if err != nil || tok != hexToken {
+		t.Fatalf("RequestToken: token matches %v, err %v; want the 64-hex token", tok == hexToken, err)
+	}
+	if cookie != "remember_token=tok-abc" {
+		t.Errorf("token request did not carry the login cookie")
+	}
+	want := `UPDATE access_tokens SET expires = 0 WHERE name = 'alice'`
+	if len(f.Execs) != 1 || f.Execs[0].Container != dbName || f.Execs[0].Cmd[len(f.Execs[0].Cmd)-1] != want {
+		t.Errorf("execs = %v, want one psql in the DB container with %q", f.Execs, want)
+	}
+}
+
+func TestRequestTokenBareString(t *testing.T) {
+	srv := tokenServer(t, `"`+hexToken+`"`, 0, nil)
+	f := newFakeWith4CAT(t)
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: "UPDATE 1\n"}
+	c := &Client{Docker: f, Backend: backendName, DB: dbName, FrontendURL: srv.URL}
+	tok, err := c.RequestToken(context.Background(), "alice", "pw-alice")
+	if err != nil || tok != hexToken {
+		t.Fatalf("RequestToken: token matches %v, err %v; want the 64-hex token", tok == hexToken, err)
+	}
+}
+
+func TestRequestTokenRejectsOddAnswer(t *testing.T) {
+	for _, answer := range []string{`{"token":"short"}`, `[]`, `<html><body>login secret-body</body></html>`,
+		`{"token":"` + strings.ToUpper(hexToken) + `"}`} {
+		srv := tokenServer(t, answer, 0, nil)
+		f := newFakeWith4CAT(t)
+		c := &Client{Docker: f, Backend: backendName, DB: dbName, FrontendURL: srv.URL}
+		tok, err := c.RequestToken(context.Background(), "alice", "pw-alice")
+		if err == nil || err.Error() != "unexpected token answer" || tok != "" {
+			t.Errorf("answer %.20q: err = %v, token empty %v; want \"unexpected token answer\"", answer, err, tok == "")
+		}
+		if len(f.Execs) != 0 {
+			t.Errorf("answer %.20q: SQL ran on an odd answer", answer)
+		}
+	}
+}
+
+func TestRequestTokenRedirectIsRefusal(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusUnauthorized, http.StatusForbidden} {
+		srv := tokenServer(t, "", status, nil)
+		f := newFakeWith4CAT(t)
+		c := &Client{Docker: f, Backend: backendName, DB: dbName, FrontendURL: srv.URL}
+		_, err := c.RequestToken(context.Background(), "alice", "pw-alice")
+		if err == nil || err.Error() != "token request refused for alice" {
+			t.Errorf("status %d: err = %v, want \"token request refused for alice\"", status, err)
+		}
+		if len(f.Execs) != 0 {
+			t.Errorf("status %d: SQL ran after a refusal", status)
+		}
+	}
+}
+
+func TestRequestTokenNoExpiryMustHitOneRow(t *testing.T) {
+	srv := tokenServer(t, `"`+hexToken+`"`, 0, nil)
+	f := newFakeWith4CAT(t)
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: "UPDATE 0\n"}
+	c := &Client{Docker: f, Backend: backendName, DB: dbName, FrontendURL: srv.URL}
+	tok, err := c.RequestToken(context.Background(), "alice", "pw-alice")
+	if err == nil || tok != "" {
+		t.Errorf("UPDATE 0: err = %v, token empty %v; want an error and no token", err, tok == "")
+	}
+}
+
+func TestRequestTokenBadUsername(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	t.Cleanup(srv.Close)
+	f := newFakeWith4CAT(t)
+	c := &Client{Docker: f, Backend: backendName, DB: dbName, FrontendURL: srv.URL}
+	if _, err := c.RequestToken(context.Background(), "a'b", "pw"); err == nil || !strings.Contains(err.Error(), "invalid username") {
+		t.Errorf("err = %v, want invalid username", err)
+	}
+	if hits != 0 || len(f.Execs) != 0 {
+		t.Errorf("HTTP hits %d, execs %d; want none", hits, len(f.Execs))
+	}
+}

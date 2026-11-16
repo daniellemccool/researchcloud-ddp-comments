@@ -80,7 +80,7 @@ func TestUsageExitCodes(t *testing.T) {
 func TestStatusFormat(t *testing.T) {
 	done := provision.State{Steps: map[string]string{
 		"registry": "done", "dirs": "done", "template": "done",
-		"fourcat_account": "done", "fourcat_token": "done", "render": "done",
+		"fourcat_account": "done", "fourcat_apitoken": "done", "render": "done",
 	}}
 	rows := []session.Row{
 		{User: "alice", Index: 1, Running: true, State: done},

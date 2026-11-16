@@ -2,6 +2,8 @@ package provision
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,6 +44,7 @@ type testEnv struct {
 	accountExists bool               // the users table already has the account
 	psqlExit      int                // when non-zero, psql exits with this status
 	onCreate      func(cmd []string) // when set, called as create_user.py runs
+	refuseToken   bool               // /api/request-token/ answers 302 to /login/
 	logins        int                // /login/ calls seen
 	sqls          []string
 }
@@ -70,7 +73,8 @@ func (d *fourcatDocker) Exec(ctx context.Context, container string, cmd []string
 				return docker.Exec{ExitCode: 0, Stdout: "1\n"}, nil
 			}
 			return docker.Exec{ExitCode: 0, Stdout: ""}, nil
-		case strings.HasPrefix(sql, "UPDATE users SET tags"):
+		case strings.HasPrefix(sql, "UPDATE users SET tags"),
+			strings.HasPrefix(sql, "UPDATE access_tokens SET expires = 0"):
 			return docker.Exec{ExitCode: 0, Stdout: "UPDATE 1\n"}, nil
 		}
 	}
@@ -203,9 +207,25 @@ func (e *testEnv) serve4CAT(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusUnauthorized)
+	case "/api/request-token/":
+		e.mu.Lock()
+		refuse := e.refuseToken
+		e.mu.Unlock()
+		user := strings.TrimPrefix(r.Header.Get("Cookie"), "remember_token=tok-")
+		if refuse || user == r.Header.Get("Cookie") {
+			http.Redirect(w, r, "/login/", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte(`"` + fakeToken(user) + `"`))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// fakeToken is the API token the fake 4CAT hands user: 64 hex characters.
+func fakeToken(user string) string {
+	sum := sha256.Sum256([]byte("token-" + user))
+	return hex.EncodeToString(sum[:])
 }
 
 // creates returns how many create_user.py execs the fake recorded.

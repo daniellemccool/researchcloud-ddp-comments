@@ -2,8 +2,9 @@
 // bundled 4CAT: it creates accounts by running 4CAT's own helper script
 // inside the backend container, tags admins by updating the users table
 // through psql in the database container, detects whether an admin has
-// completed 4CAT's first-run setup, and obtains a login token by posting the
-// login form to the frontend over the compose network (ADR-0009). All
+// completed 4CAT's first-run setup, and obtains a collector's API token by
+// logging in and asking 4CAT's own token route over the compose network
+// (ADR-0009). All
 // container access goes through internal/docker; the only HTTP client is the
 // one on Client, which never follows redirects.
 package fourcat
@@ -12,6 +13,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -211,16 +213,22 @@ func (c *Client) SetAdmin(ctx context.Context, user string, admin bool) error {
 	if err != nil {
 		return err
 	}
+	if lastLine(out) != "UPDATE 1" {
+		return fmt.Errorf("no 4CAT account for %s", user)
+	}
+	return nil
+}
+
+// lastLine returns the last non-empty line of psql's output, trimmed: the
+// command tag ("UPDATE 1", "DELETE 0") of the statement.
+func lastLine(out string) string {
 	last := ""
 	for _, line := range strings.Split(out, "\n") {
 		if trimmed := strings.TrimSpace(line); trimmed != "" {
 			last = trimmed
 		}
 	}
-	if last != "UPDATE 1" {
-		return fmt.Errorf("no 4CAT account for %s", user)
-	}
-	return nil
+	return last
 }
 
 // LoginToken posts the login form to the 4CAT frontend and returns the first
@@ -252,6 +260,82 @@ func (c *Client) LoginToken(ctx context.Context, user, password string) (string,
 		return "", &LoginError{User: user}
 	}
 	return "", fmt.Errorf("unexpected login response status %d", resp.StatusCode)
+}
+
+// tokenRe is the shape of a 4CAT v1.57 API token: 64 lowercase hex characters.
+var tokenRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// RequestToken returns user's 4CAT API token, the credential both proxies
+// send as the Authentication header (ADR-0009). It logs in with password,
+// asks GET <FrontendURL>/api/request-token/ with the login cookie (which
+// lives only for this call; redirects are never followed), and accepts a JSON
+// object with a string "token" or a bare JSON string, which must match
+// ^[0-9a-f]{64}$. It then sets the token's expiry to 0 ("never") through
+// psql and requires "UPDATE 1", so the sign-in and uploads do not stop a year
+// after the first visit. A 3xx, 401 or 403 answer is "token request refused
+// for <user>"; any other answer that is not a token is "unexpected token
+// answer". No error ever holds the body, the cookie or the token.
+func (c *Client) RequestToken(ctx context.Context, user, password string) (string, error) {
+	if err := checkUser(user); err != nil {
+		return "", err
+	}
+	cookie, err := c.LoginToken(ctx, user, password)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimSuffix(c.FrontendURL, "/")+"/api/request-token/", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Cookie", "remember_token="+cookie)
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("4CAT unreachable: %T", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch {
+	case resp.StatusCode >= 300 && resp.StatusCode < 400,
+		resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		return "", fmt.Errorf("token request refused for %s", user)
+	case resp.StatusCode != http.StatusOK:
+		return "", errors.New("unexpected token answer")
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return "", fmt.Errorf("4CAT unreachable: %T", err)
+	}
+	token, ok := parseToken(body)
+	if !ok {
+		return "", errors.New("unexpected token answer")
+	}
+	out, err := c.psql(ctx, `UPDATE access_tokens SET expires = 0 WHERE name = '`+user+`'`)
+	if err != nil {
+		return "", err
+	}
+	if lastLine(out) != "UPDATE 1" {
+		return "", fmt.Errorf("no 4CAT API token row for %s", user)
+	}
+	return token, nil
+}
+
+// parseToken reads a token answer: a JSON object with a string "token", or a
+// bare JSON string; the value must match tokenRe.
+func parseToken(body []byte) (string, bool) {
+	var token string
+	if err := json.Unmarshal(body, &token); err != nil {
+		var obj struct {
+			Token *string `json:"token"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil || obj.Token == nil {
+			return "", false
+		}
+		token = *obj.Token
+	}
+	if !tokenRe.MatchString(token) {
+		return "", false
+	}
+	return token, true
 }
 
 // NewPassword returns a fresh random password: 24 bytes from crypto/rand,

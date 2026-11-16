@@ -97,8 +97,8 @@ func (p *Provisioner) runStep(ctx context.Context, step, user string, admin bool
 		return p.stepTemplate(user)
 	case "fourcat_account":
 		return p.stepFourcatAccount(ctx, user, admin)
-	case "fourcat_token":
-		return p.stepFourcatToken(ctx, user)
+	case "fourcat_apitoken":
+		return p.stepFourcatAPIToken(ctx, user)
 	case "render":
 		return p.stepRender(user)
 	}
@@ -236,9 +236,10 @@ func (p *Provisioner) stepFourcatAccount(ctx context.Context, user string, admin
 	return nil
 }
 
-// stepFourcatToken logs in with the stored password and writes the login
-// token for the proxy. Skipped when 4CAT is disabled.
-func (p *Provisioner) stepFourcatToken(ctx context.Context, user string) error {
+// stepFourcatAPIToken asks 4CAT for the collector's API token with the
+// stored password and writes it for the proxies (ADR-0009); the login cookie
+// is never stored. Skipped when 4CAT is disabled.
+func (p *Provisioner) stepFourcatAPIToken(ctx context.Context, user string) error {
 	if p.Fourcat == nil {
 		return nil
 	}
@@ -246,7 +247,7 @@ func (p *Provisioner) stepFourcatToken(ctx context.Context, user string) error {
 	if err != nil {
 		return err
 	}
-	token, err := p.Fourcat.LoginToken(ctx, user, pw)
+	token, err := p.Fourcat.RequestToken(ctx, user, pw)
 	if err != nil {
 		return &fourcatError{err}
 	}

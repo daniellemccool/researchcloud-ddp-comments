@@ -205,10 +205,19 @@ func (b *boundary) handle(proxy *goproxy.ProxyHttpServer, req *http.Request, ctx
 	return denyResponse(req)
 }
 
+// clientCredentials are the request headers a browser could use to act in
+// 4CAT as someone else or with a standing it does not have; forward removes
+// every one before it adds the collector's own Authentication (ADR-0009).
+var clientCredentials = []string{
+	"Cookie", "Authentication", "Authorization", "X-4CAT-Config-Via-Proxy", "X-4CAT-Config-Tag",
+}
+
 // forward sends an allowed 4CAT request to the upstream with Host
-// fourcat.desk and the client's Cookie replaced by the collector's token. The
-// response, redirects included, goes back to the browser untouched. Anything
-// that goes wrong is a refusal; the token is never in an error body or a log.
+// fourcat.desk, the client's credentials and standing headers removed and
+// the collector's API token as the Authentication header. The access-token
+// query parameter is dropped too. The response, redirects included, goes back
+// to the browser untouched but for Set-Cookie. Anything that goes wrong is a
+// refusal; the token is never in an error body or a log.
 func (b *boundary) forward(req *http.Request) *http.Response {
 	tok, err := b.token.current()
 	if err != nil {
@@ -219,12 +228,14 @@ func (b *boundary) forward(req *http.Request) *http.Response {
 		Scheme:   b.upstream.Scheme,
 		Host:     b.upstream.Host,
 		Path:     req.URL.Path,
-		RawQuery: req.URL.RawQuery,
+		RawQuery: withoutAccessToken(req.URL.RawQuery),
 	}
 	out.Host = fourcatHost
 	out.RequestURI = ""
-	out.Header.Del("Cookie")
-	out.Header.Set("Cookie", "remember_token="+tok)
+	for _, h := range clientCredentials {
+		out.Header.Del(h)
+	}
+	out.Header.Set("Authentication", tok)
 	// goproxy's RemoveProxyHeaders does not run on this path, and an upgrade
 	// must never reach 4CAT: drop the hop-by-hop headers here.
 	for _, h := range []string{
@@ -249,4 +260,22 @@ func (b *boundary) forward(req *http.Request) *http.Response {
 	resp.Header.Del("Set-Cookie")
 	resp.Header.Del("Set-Cookie2")
 	return resp
+}
+
+// withoutAccessToken drops every access-token pair from a raw query, pair by
+// pair, so the other pairs (the poll's key) reach 4CAT byte for byte. A pair's
+// name is unescaped before the comparison, so access%2Dtoken goes as well.
+func withoutAccessToken(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	kept := make([]string, 0, 2)
+	for _, pair := range strings.Split(raw, "&") {
+		name, _, _ := strings.Cut(pair, "=")
+		if n, err := url.QueryUnescape(name); err == nil && n == "access-token" {
+			continue
+		}
+		kept = append(kept, pair)
+	}
+	return strings.Join(kept, "&")
 }

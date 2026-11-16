@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -65,8 +66,8 @@ func TestStepsRunInOrderAndPersist(t *testing.T) {
 	if got := readFile(t, filepath.Join(root, "state", "firefox", "alice", "profile", "prefs.js")); got == "" {
 		t.Error("profile/prefs.js was not copied from the release template")
 	}
-	if got := readFile(t, filepath.Join(root, "secrets", "4cat-tokens", "alice", "4cat-token")); got != "tok-alice" {
-		t.Errorf("4cat-token = %q, want %q", got, "tok-alice")
+	if got := readFile(t, filepath.Join(root, "secrets", "4cat-tokens", "alice", "4cat-token")); got != fakeToken("alice") {
+		t.Error("4cat-token does not hold the API token 4CAT handed out")
 	}
 	for _, p := range []string{
 		filepath.Join(root, "firefox", "alice", "policies.json"),
@@ -91,8 +92,8 @@ func TestErrorStopsAndRetriesThatStep(t *testing.T) {
 	if st.Ready() {
 		t.Fatal("ready despite a refused login")
 	}
-	if got := st.Steps["fourcat_token"]; got != "error: login refused for alice" {
-		t.Errorf("fourcat_token = %q, want %q", got, "error: login refused for alice")
+	if got := st.Steps["fourcat_apitoken"]; got != "error: login refused for alice" {
+		t.Errorf("fourcat_apitoken = %q, want %q", got, "error: login refused for alice")
 	}
 	if _, ok := st.Steps["render"]; ok {
 		t.Errorf("render step recorded %q after the token step failed", st.Steps["render"])
@@ -100,8 +101,8 @@ func TestErrorStopsAndRetriesThatStep(t *testing.T) {
 	if st.Steps["fourcat_account"] != "done" {
 		t.Errorf("fourcat_account = %q, want done", st.Steps["fourcat_account"])
 	}
-	if st.Current() != "fourcat_token" {
-		t.Errorf("Current() = %q, want fourcat_token", st.Current())
+	if st.Current() != "fourcat_apitoken" {
+		t.Errorf("Current() = %q, want fourcat_apitoken", st.Current())
 	}
 	if st.Error() != "error: login refused for alice" {
 		t.Errorf("Error() = %q", st.Error())
@@ -441,6 +442,66 @@ func TestAdvanceConcurrentSameUser(t *testing.T) {
 	}
 }
 
+// TestOldTokenStepRunsAgainUnderNewName: a person set up before this release
+// has fourcat_token done and the login cookie in the token file; the renamed
+// step runs once and replaces the cookie with the API token.
+func TestOldTokenStepRunsAgainUnderNewName(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+		t.Fatalf("not ready: %v", st.Steps)
+	}
+	// Rewrite the step file and the token file as the old release left them.
+	old := map[string]string{}
+	for _, step := range []string{"registry", "dirs", "template", "fourcat_account", "fourcat_token", "render"} {
+		old[step] = "done"
+	}
+	data, err := json.Marshal(map[string]any{"steps": old, "applied_generation": generation, "updated": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(StatePath(env.cfg, "alice"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(env.root, "secrets", "4cat-tokens", "alice", "4cat-token")
+	if err := os.WriteFile(tokenPath, []byte("alice|abc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logins := env.loginCount()
+
+	st := env.prov.Advance(ctx, "alice", false)
+	if !st.Ready() {
+		t.Fatalf("not ready after the rename: %v", st.Steps)
+	}
+	if got := readFile(t, tokenPath); got != fakeToken("alice") {
+		t.Error("token file still holds the old cookie, want the API token")
+	}
+	loaded := Load(env.cfg, "alice")
+	if loaded.Steps["fourcat_apitoken"] != "done" {
+		t.Errorf("fourcat_apitoken = %q, want done", loaded.Steps["fourcat_apitoken"])
+	}
+	if _, ok := loaded.Steps["fourcat_token"]; ok {
+		t.Error("the old step name is still in the step file")
+	}
+	if got := env.loginCount() - logins; got != 1 {
+		t.Errorf("logins = %d, want exactly 1 (the token step ran once)", got)
+	}
+}
+
+// TestTokenRequestRefusedLeavesNoFile: when 4CAT refuses the token request,
+// the step records the refusal and writes no token file.
+func TestTokenRequestRefusedLeavesNoFile(t *testing.T) {
+	env := newTestEnv(t)
+	env.refuseToken = true
+	st := env.prov.Advance(context.Background(), "alice", false)
+	if got := st.Steps["fourcat_apitoken"]; got != "error: token request refused for alice" {
+		t.Errorf("fourcat_apitoken = %q, want the refusal", got)
+	}
+	if _, err := os.Stat(filepath.Join(env.root, "secrets", "4cat-tokens", "alice", "4cat-token")); !os.IsNotExist(err) {
+		t.Errorf("token file written after a refusal (err = %v)", err)
+	}
+}
+
 func TestFourcatDisabledSkipsSteps(t *testing.T) {
 	env := newTestEnv(t)
 	env.prov.Fourcat = nil
@@ -449,8 +510,8 @@ func TestFourcatDisabledSkipsSteps(t *testing.T) {
 	if !st.Ready() {
 		t.Fatalf("not ready: %v", st.Steps)
 	}
-	if st.Steps["fourcat_account"] != "done" || st.Steps["fourcat_token"] != "done" {
-		t.Errorf("fourcat steps = %q, %q; want both done", st.Steps["fourcat_account"], st.Steps["fourcat_token"])
+	if st.Steps["fourcat_account"] != "done" || st.Steps["fourcat_apitoken"] != "done" {
+		t.Errorf("fourcat steps = %q, %q; want both done", st.Steps["fourcat_account"], st.Steps["fourcat_apitoken"])
 	}
 	if n := len(env.fake.Execs); n != 0 {
 		t.Errorf("docker execs = %d, want 0 with 4CAT disabled", n)

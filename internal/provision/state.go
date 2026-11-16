@@ -17,7 +17,9 @@ import (
 )
 
 // Steps are the first-visit steps in their fixed order.
-var Steps = []string{"registry", "dirs", "template", "fourcat_account", "fourcat_token", "render"}
+// fourcat_apitoken replaced fourcat_token (the stored login cookie); Load
+// drops the old name, so the new step runs once for people set up before.
+var Steps = []string{"registry", "dirs", "template", "fourcat_account", "fourcat_apitoken", "render"}
 
 // RegistryFull is the recorded value of a registry step that found every seat
 // taken: exactly "error: registry full".

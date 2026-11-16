@@ -1,6 +1,6 @@
 // Package provision advances a collector's first visit toward "ready" in
 // idempotent steps recorded in state/users/<user>/provision.json (ADR-0014):
-// registry, dirs, template, fourcat_account, fourcat_token, render. A crash
+// registry, dirs, template, fourcat_account, fourcat_apitoken, render. A crash
 // or an error leaves a file that says exactly where to resume, and a second
 // visit, a double-click or a desk restart never repeats a done step. Starting
 // the containers is not a step: the page asks the session manager once the

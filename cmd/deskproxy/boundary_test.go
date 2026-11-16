@@ -270,14 +270,18 @@ func assertDenied(t *testing.T, resp *http.Response, body string) {
 	}
 }
 
-func TestCookieReplaced(t *testing.T) {
-	var cookies []string
-	var host, ae, other, gotBody, path string
+// TestTokenHeaderReplacesClientCredentials: the upstream sees exactly one
+// Authentication header, the token file's, and none of the credentials or
+// standing headers the browser sent; the access-token query parameter is
+// dropped pair by pair, every other pair kept byte for byte (ADR-0009).
+func TestTokenHeaderReplacesClientCredentials(t *testing.T) {
+	var seen http.Header
+	var host, gotBody, path string
 	var hits atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		cookies = r.Header.Values("Cookie")
-		host, ae, other, path = r.Host, r.Header.Get("Accept-Encoding"), r.Header.Get("X-Other"), r.URL.RequestURI()
+		seen = r.Header.Clone()
+		host, path = r.Host, r.URL.RequestURI()
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
@@ -289,16 +293,28 @@ func TestCookieReplaced(t *testing.T) {
 	defer up.Close()
 
 	rig := newRig(t, up.URL, strp("abc\n"), nil)
-	resp, body := rig.do(t, "POST", "http://fourcat.desk/api/import-dataset/", map[string]string{
-		"Cookie": "x=y", "X-Other": "kept", "Accept-Encoding": "gzip, br",
-	}, "payload")
+	browser := map[string]string{
+		"Cookie": "x=y", "Authentication": "evil", "Authorization": "evil",
+		"X-4CAT-Config-Via-Proxy": "s", "X-4CAT-Config-Tag": "techadmin",
+		"X-Other": "kept", "Accept-Encoding": "gzip, br",
+	}
+	resp, body := rig.do(t, "POST", "http://fourcat.desk/api/import-dataset/", browser, "payload")
 
 	if resp.StatusCode != 201 || body != `{"ok":true}` || resp.Header.Get("Content-Type") != "application/json" {
 		t.Errorf("response %d %q %v", resp.StatusCode, body, resp.Header)
 	}
-	if len(cookies) != 1 || cookies[0] != "remember_token=abc" {
-		t.Errorf("upstream saw Cookie %q, want exactly remember_token=abc", cookies)
+	checkCredentials := func(what string) {
+		t.Helper()
+		if a := seen.Values("Authentication"); len(a) != 1 || a[0] != "abc" {
+			t.Errorf("%s: upstream saw %d Authentication headers, want exactly the token file's", what, len(a))
+		}
+		for _, h := range []string{"Cookie", "Authorization", "X-4CAT-Config-Via-Proxy", "X-4CAT-Config-Tag"} {
+			if v := seen.Values(h); len(v) != 0 {
+				t.Errorf("%s: upstream saw %s %q, want none", what, h, v)
+			}
+		}
 	}
+	checkCredentials("upload")
 	if sc := resp.Header.Values("Set-Cookie"); len(sc) != 0 {
 		t.Errorf("browser received Set-Cookie %q", sc)
 	}
@@ -308,21 +324,31 @@ func TestCookieReplaced(t *testing.T) {
 	if host != "fourcat.desk" {
 		t.Errorf("upstream Host %q, want fourcat.desk", host)
 	}
-	if other != "kept" || ae != "gzip, br" || gotBody != "payload" || path != "/api/import-dataset/" {
-		t.Errorf("headers/body/path not passed through: other=%q ae=%q body=%q path=%q", other, ae, gotBody, path)
+	if seen.Get("X-Other") != "kept" || seen.Get("Accept-Encoding") != "gzip, br" || gotBody != "payload" || path != "/api/import-dataset/" {
+		t.Errorf("headers/body/path not passed through: other=%q ae=%q body=%q path=%q",
+			seen.Get("X-Other"), seen.Get("Accept-Encoding"), gotBody, path)
 	}
 
-	// The poll route carries its query through.
-	resp, _ = rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k1", nil, "")
-	if resp.StatusCode != 201 || path != "/api/check-query/?key=k1" || len(cookies) != 1 || cookies[0] != "remember_token=abc" {
-		t.Errorf("poll: %d path=%q cookies=%q", resp.StatusCode, path, cookies)
+	// The poll route keeps its key and loses the access-token parameter, in
+	// any spelling of its name.
+	for raw, want := range map[string]string{
+		"/api/check-query/?key=k1":                                  "/api/check-query/?key=k1",
+		"/api/check-query/?key=k1&access-token=evil":                "/api/check-query/?key=k1",
+		"/api/check-query/?access-token=evil&key=a%2Bb":             "/api/check-query/?key=a%2Bb",
+		"/api/check-query/?key=k1&access%2Dtoken=evil&access-token": "/api/check-query/?key=k1",
+	} {
+		resp, _ = rig.do(t, "GET", "http://fourcat.desk"+raw, browser, "")
+		if resp.StatusCode != 201 || path != want {
+			t.Errorf("poll %s: %d path=%q, want %q", raw, resp.StatusCode, path, want)
+		}
+		checkCredentials("poll " + raw)
 	}
 
 	if strings.Contains(rig.logs.String(), "abc") {
 		t.Errorf("token leaked into the log: %s", rig.logs.String())
 	}
-	if n := strings.Count(rig.logs.String(), "\n"); n != 2 {
-		t.Errorf("want one log line per request (2), got %d: %q", n, rig.logs.String())
+	if n := strings.Count(rig.logs.String(), "\n"); n != 5 {
+		t.Errorf("want one log line per request (5), got %d: %q", n, rig.logs.String())
 	}
 }
 
@@ -445,19 +471,19 @@ func TestForwardDropsUpgradeAndRefuses1xx(t *testing.T) {
 func TestTokenRotatesBetweenRequests(t *testing.T) {
 	var got string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Get("Cookie")
+		got = r.Header.Get("Authentication")
 	}))
 	defer up.Close()
 	rig := newRig(t, up.URL, strp("one"), nil)
 	rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k", nil, "")
-	if got != "remember_token=one" {
+	if got != "one" {
 		t.Fatalf("got %q", got)
 	}
 	if err := os.WriteFile(rig.token, []byte("two"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rig.do(t, "GET", "http://fourcat.desk/api/check-query/?key=k", nil, "")
-	if got != "remember_token=two" {
+	if got != "two" {
 		t.Fatalf("after rotation got %q", got)
 	}
 	if os.Geteuid() != 0 {

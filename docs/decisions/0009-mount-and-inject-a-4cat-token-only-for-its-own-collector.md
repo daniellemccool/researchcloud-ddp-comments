@@ -14,13 +14,16 @@ priority: invariant
 
 ## Decision
 
-Each collector's 4CAT token lives in `secrets/4cat-tokens/<user>/4cat-token` (directory uid 1000 0750, file uid 1000 0600) and the **directory** is bind-mounted read-only only into that collector's proxy at `/token`, so a rotation by rename reaches the running proxy; the proxy replaces any client-supplied `Cookie` on an allowed 4CAT request with `remember_token=<that token>`. No other container, page or log ever sees a token.
+Each collector's 4CAT credential is their own 4CAT API token in `secrets/4cat-tokens/<user>/4cat-token`, whose directory is bind-mounted read-only only into that collector's proxy at `/token`; the proxy sends it as the `Authentication` header after removing every credential and standing header the browser sent. No other container, page or log ever sees a token.
 
 ## Guidance
 
-- Rendering a pair mounts exactly one token directory, the owner's (`internal/render/mounts.go`, enforced by `internal/render/mounts_test.go`); the proxy reads the file on every allowed request so rotation needs no restart (`cmd/deskproxy/token_test.go`).
-- The proxy never forwards a client cookie to 4CAT, never logs the token, and answers 403 when the token file is missing rather than forwarding unauthenticated.
-- Rotation and demotion rewrite the file under the user lock in `internal/provision/token.go`; the admin page's "rotate token" is the same code path as the operator command.
+- The proxy removes `Cookie`, `Authentication`, `Authorization`, `X-4CAT-Config-Via-Proxy`, `X-4CAT-Config-Tag` and the `access-token` query parameter from every allowed request before it adds the token (`clientCredentials` in `cmd/deskproxy/boundary.go`).
+- The token directory is uid 1000 0750 and the file uid 1000 0600; the directory, not the file, is mounted, so a rotation by rename reaches the running proxy.
+- Rendering a pair mounts exactly one token directory, the owner's (`internal/render/mounts.go`, enforced by `internal/render/mounts_test.go`); the proxy reads the file on every allowed request so rotation needs no restart (`cmd/deskproxy/token_test.go`), and `TestTokenHeaderReplacesClientCredentials` in `cmd/deskproxy/boundary_test.go` holds the stripping, including `access-token` dropped pair by pair so the poll's `key` reaches 4CAT unchanged.
+- The proxy never forwards a client credential to 4CAT, never sends a standing header, never passes 4CAT's `Set-Cookie` to the browser, never logs the token, and answers 403 when the token file is missing rather than forwarding unauthenticated.
+- The token is requested through 4CAT's own route (`/api/request-token/`, with a login cookie that lives only for that call and is never stored) in the provisioning step `fourcat_apitoken`, and its expiry is set to 0 ("never") in 4CAT's `access_tokens` table right after; anything but a 64-character hex token is an error and writes no file.
+- The token file is rewritten only under the user lock in `internal/provision/token.go`.
 
 ## Why
 
