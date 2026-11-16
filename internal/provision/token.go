@@ -2,7 +2,6 @@ package provision
 
 import (
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,43 +21,70 @@ func PasswordPath(cfg *config.Config, user string) string {
 	return filepath.Join(cfg.DeskRoot, "secrets", "4cat-passwords", user)
 }
 
-// EnsurePassword returns the collector's stored 4CAT password, creating the
-// file exclusively (0600) with a fresh random password when none exists.
-// createdNow reports whether this call created it. An existing empty file is
-// an error: the password is never reset silently.
-func EnsurePassword(cfg *config.Config, user string) (pw string, createdNow bool, err error) {
-	path := PasswordPath(cfg, user)
-	for attempt := 0; attempt < 2; attempt++ {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			pw = strings.TrimSpace(string(data))
-			if pw == "" {
-				return "", false, &StepError{Msg: "4CAT password file is empty"}
-			}
-			return pw, false, nil
+// pendingPasswordPath returns <DeskRoot>/secrets/4cat-passwords/.pending-<user>,
+// where a fresh password waits until the desk has checked that no 4CAT
+// account of that name exists (M9): a crash before that check leaves only
+// this name, so a later run never mistakes someone else's account for ours.
+func pendingPasswordPath(cfg *config.Config, user string) string {
+	return filepath.Join(cfg.DeskRoot, "secrets", "4cat-passwords", ".pending-"+user)
+}
+
+// PreparePassword returns the collector's stored 4CAT password (pending
+// false) when the final file exists, removing any pending copy. Otherwise it writes a fresh random
+// password under the pending name (0600, replacing any leftover) and returns
+// it with pending true; only CommitPassword gives it its real name. An
+// existing empty final file is an error: the password is never reset silently.
+func PreparePassword(cfg *config.Config, user string) (pw string, pending bool, err error) {
+	data, err := os.ReadFile(PasswordPath(cfg, user))
+	if err == nil {
+		pw = strings.TrimSpace(string(data))
+		if pw == "" {
+			return "", false, &StepError{Msg: "4CAT password file is empty"}
 		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return "", false, err
-		}
-		pw = fourcat.NewPassword()
-		if err := writeExclusive(path, []byte(pw), 0o600); err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				continue // lost a race: read the winner's file
-			}
-			return "", false, err
-		}
-		return pw, true, nil
+		// A crash inside CommitPassword leaves a copy under the pending name.
+		DiscardPassword(cfg, user)
+		return pw, false, nil
 	}
-	return "", false, &StepError{Msg: "4CAT password file unreadable"}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	pw = fourcat.NewPassword()
+	if err := publish(pendingPasswordPath(cfg, user), []byte(pw), 0o600, os.Rename); err != nil {
+		return "", false, err
+	}
+	return pw, true, nil
+}
+
+// CommitPassword gives the pending password its real name by hard-linking it
+// to PasswordPath, then removes the pending name. An existing final file is
+// an error (fs.ErrExist) and is left as it is.
+func CommitPassword(cfg *config.Config, user string) error {
+	pending := pendingPasswordPath(cfg, user)
+	if err := os.Link(pending, PasswordPath(cfg, user)); err != nil {
+		return err
+	}
+	return os.Remove(pending)
+}
+
+// DiscardPassword removes the pending password, if any.
+func DiscardPassword(cfg *config.Config, user string) {
+	_ = os.Remove(pendingPasswordPath(cfg, user))
 }
 
 // writeExclusive publishes data at path the way the Python's
-// _write(exclusive=True) does: a complete 0600 temp file in the same
-// directory, fsynced and closed, is hard-linked over path, so the final file
-// never exists empty — a failed write or a crash leaves only the temp file.
-// A lost race (fs.ErrExist from the link) means another writer won; the temp
-// is removed either way.
+// _write(exclusive=True) does: a complete temp file is hard-linked over path,
+// so the final file never exists empty. A lost race (fs.ErrExist from the
+// link) means another writer won.
 func writeExclusive(path string, data []byte, mode os.FileMode) error {
+	return publish(path, data, mode, os.Link)
+}
+
+// publish writes data to a complete 0600 .pw-* temp file in path's directory,
+// fsynced and closed, and then puts it at path with place (os.Link: never
+// over an existing file; os.Rename: replacing one). The file at path never
+// exists empty; a failed write or a crash leaves only the temp file, which is
+// removed either way.
+func publish(path string, data []byte, mode os.FileMode, place func(oldpath, newpath string) error) error {
 	dir := filepath.Dir(path)
 	if err := ensureDir(dir, 0o700, 0, 0); err != nil {
 		return err
@@ -69,7 +95,7 @@ func writeExclusive(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	tmp := f.Name()
-	defer func() { _ = os.Remove(tmp) }() // no-op once the link succeeded
+	defer func() { _ = os.Remove(tmp) }() // no-op once a rename succeeded
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return err
@@ -85,7 +111,7 @@ func writeExclusive(path string, data []byte, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Link(tmp, path)
+	return place(tmp, path)
 }
 
 // sweepTemp removes leftover .pw-* temp files older than staleTempMaxAge in

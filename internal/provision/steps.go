@@ -201,21 +201,29 @@ func (p *Provisioner) stepFourcatAccount(ctx context.Context, user string, admin
 	if pending {
 		return fourcat.ErrSetupPending
 	}
-	pw, createdNow, err := EnsurePassword(p.Cfg, user)
+	// M9: a fresh password waits under its pending name until the check
+	// below has found no account of that name, so a crash in between never
+	// leaves a stored password that a retry would take for ours.
+	pw, pending, err := PreparePassword(p.Cfg, user)
 	if err != nil {
 		return err
 	}
 	exists, err := p.Fourcat.AccountExists(ctx, user)
 	if err != nil {
-		if createdNow {
-			// A retry must not mistake someone else's account for ours.
-			_ = os.Remove(PasswordPath(p.Cfg, user))
+		if pending {
+			DiscardPassword(p.Cfg, user)
 		}
 		return &fourcatError{err}
 	}
-	if exists && createdNow {
-		_ = os.Remove(PasswordPath(p.Cfg, user))
+	if exists && pending {
+		DiscardPassword(p.Cfg, user)
 		return fourcat.ErrNeedsAdopt
+	}
+	if pending {
+		// The secret is stored before the call that creates what it protects.
+		if err := CommitPassword(p.Cfg, user); err != nil {
+			return err
+		}
 	}
 	if !exists {
 		if err := p.Fourcat.CreateAccount(ctx, user, pw, admin); err != nil {

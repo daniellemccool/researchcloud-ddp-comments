@@ -36,12 +36,13 @@ type testEnv struct {
 	prov *Provisioner
 
 	mu            sync.Mutex
-	pending       bool // the frontend still serves "Complete 4CAT Setup"
-	refuse        bool // /login/ answers 401
-	hijackLogin   bool // /login/ drops the connection (transport failure)
-	accountExists bool // the users table already has the account
-	psqlExit      int  // when non-zero, psql exits with this status
-	logins        int  // /login/ calls seen
+	pending       bool               // the frontend still serves "Complete 4CAT Setup"
+	refuse        bool               // /login/ answers 401
+	hijackLogin   bool               // /login/ drops the connection (transport failure)
+	accountExists bool               // the users table already has the account
+	psqlExit      int                // when non-zero, psql exits with this status
+	onCreate      func(cmd []string) // when set, called as create_user.py runs
+	logins        int                // /login/ calls seen
 	sqls          []string
 }
 
@@ -71,6 +72,14 @@ func (d *fourcatDocker) Exec(ctx context.Context, container string, cmd []string
 			return docker.Exec{ExitCode: 0, Stdout: ""}, nil
 		case strings.HasPrefix(sql, "UPDATE users SET tags"):
 			return docker.Exec{ExitCode: 0, Stdout: "UPDATE 1\n"}, nil
+		}
+	}
+	if len(cmd) > 0 && cmd[0] == "python3" {
+		d.env.mu.Lock()
+		hook := d.env.onCreate
+		d.env.mu.Unlock()
+		if hook != nil {
+			hook(cmd)
 		}
 	}
 	return d.Fake.Exec(ctx, container, cmd, env, stdin)

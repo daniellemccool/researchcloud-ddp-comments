@@ -208,10 +208,113 @@ func TestNeedsAdoptRemovesFreshPassword(t *testing.T) {
 		t.Errorf("fourcat_account = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(PasswordPath(env.cfg, "alice")); !os.IsNotExist(err) {
-		t.Errorf("fresh password file left behind (err = %v)", err)
+		t.Errorf("password file under its real name (err = %v)", err)
+	}
+	if _, err := os.Stat(pendingPasswordPath(env.cfg, "alice")); !os.IsNotExist(err) {
+		t.Errorf("pending password file left behind (err = %v)", err)
 	}
 	if n := env.creates(); n != 0 {
 		t.Errorf("create_user.py execs = %d, want 0 (existing account is never reset)", n)
+	}
+}
+
+// TestCrashedPasswordStepStillNeedsAdopt (M9): a run that crashed after
+// writing the fresh password but before the account check leaves only the
+// pending name, so the next run still finds someone else's account and asks
+// for adoption instead of taking it over.
+func TestCrashedPasswordStepStillNeedsAdopt(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	writeFile(t, pendingPasswordPath(env.cfg, "alice"), "left-by-a-crash")
+	env.setFlags(false, false, false, true) // the account exists
+
+	st := env.prov.Advance(ctx, "alice", false)
+	want := "error: " + fourcat.ErrNeedsAdopt.Error()
+	if got := st.Steps["fourcat_account"]; got != want {
+		t.Errorf("fourcat_account = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(PasswordPath(env.cfg, "alice")); !os.IsNotExist(err) {
+		t.Errorf("password file under its real name (err = %v)", err)
+	}
+	if _, err := os.Stat(pendingPasswordPath(env.cfg, "alice")); !os.IsNotExist(err) {
+		t.Errorf("pending password file left behind (err = %v)", err)
+	}
+	if n := env.creates(); n != 0 {
+		t.Errorf("create_user.py execs = %d, want 0", n)
+	}
+	for _, sql := range env.sqlLog() {
+		if strings.Contains(sql, "tags") {
+			t.Errorf("SQL touching tags ran: %q", sql)
+		}
+	}
+}
+
+// TestPasswordCommittedBeforeCreate: the password has its real name before
+// create_user.py runs (a secret is stored before the call that creates what
+// it protects), and it is the password passed to create_user.py.
+func TestPasswordCommittedBeforeCreate(t *testing.T) {
+	env := newTestEnv(t)
+	var atCreate string
+	var passed string
+	env.onCreate = func(cmd []string) {
+		data, err := os.ReadFile(PasswordPath(env.cfg, "alice"))
+		if err == nil {
+			atCreate = string(data)
+		}
+		for i, a := range cmd {
+			if a == "-p" && i+1 < len(cmd) {
+				passed = cmd[i+1]
+			}
+		}
+	}
+	st := env.prov.Advance(context.Background(), "alice", false)
+	if !st.Ready() {
+		t.Fatalf("not ready: %v", st.Steps)
+	}
+	if atCreate == "" || atCreate != passed {
+		t.Errorf("at create: password file empty %v, equal to the one passed %v; want a stored password equal to it", atCreate == "", atCreate == passed)
+	}
+	if _, err := os.Stat(pendingPasswordPath(env.cfg, "alice")); !os.IsNotExist(err) {
+		t.Errorf("pending password file left behind (err = %v)", err)
+	}
+}
+
+// TestCommittedPasswordWithoutAccountCreatesIt: a stored password whose
+// account was never made (a crash between commit and create) is used to make it.
+func TestCommittedPasswordWithoutAccountCreatesIt(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, PasswordPath(env.cfg, "alice"), "stored-pw")
+	var passed string
+	env.onCreate = func(cmd []string) {
+		for i, a := range cmd {
+			if a == "-p" && i+1 < len(cmd) {
+				passed = cmd[i+1]
+			}
+		}
+	}
+	st := env.prov.Advance(context.Background(), "alice", false)
+	if got := st.Steps["fourcat_account"]; got != "done" {
+		t.Fatalf("fourcat_account = %q, want done", got)
+	}
+	if passed != "stored-pw" {
+		t.Error("create_user.py did not get the stored password")
+	}
+}
+
+// TestAccountCheckFailureDiscardsPending: when 4CAT cannot say whether the
+// account exists, the fresh password is dropped under both names.
+func TestAccountCheckFailureDiscardsPending(t *testing.T) {
+	env := newTestEnv(t)
+	env.setPsqlExit(1)
+	st := env.prov.Advance(context.Background(), "alice", false)
+	if got := st.Steps["fourcat_account"]; !strings.HasPrefix(got, "error: ") {
+		t.Fatalf("fourcat_account = %q, want an error", got)
+	}
+	if _, err := os.Stat(PasswordPath(env.cfg, "alice")); !os.IsNotExist(err) {
+		t.Errorf("password file under its real name (err = %v)", err)
+	}
+	if _, err := os.Stat(pendingPasswordPath(env.cfg, "alice")); !os.IsNotExist(err) {
+		t.Errorf("pending password file left behind (err = %v)", err)
 	}
 }
 
