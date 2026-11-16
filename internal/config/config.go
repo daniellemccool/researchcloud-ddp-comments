@@ -27,6 +27,7 @@ type Config struct {
 	FQDN               string
 	CollectorRole      string
 	AdminRole          string
+	TechAdminRole      string // desk_techadmin_role, DefaultTechAdminRole when absent
 	Contact            string
 	Platform           string
 	HideMedia          bool
@@ -53,38 +54,40 @@ type Config struct {
 	COToken            string // from <DeskRoot>/secrets/co_token, trimmed
 }
 
-// rawConfig mirrors the 26 keys of desk.json exactly; DisallowUnknownFields
-// rejects anything else.
+// rawConfig mirrors the 27 keys of desk.json exactly (26 required and the
+// optional desk_techadmin_role); DisallowUnknownFields rejects anything else.
 type rawConfig struct {
-	DeskCollectorRole  string `json:"desk_collector_role"`
-	DeskAdminRole      string `json:"desk_admin_role"`
-	DeskPlatform       string `json:"desk_platform"`
-	DeskContact        string `json:"desk_contact"`
-	DeskHideMedia      string `json:"desk_hide_media"`
-	DeskBatchSizes     string `json:"desk_batch_sizes"`
-	DeskIdleSeconds    string `json:"desk_idle_seconds"`
-	DeskTimerMinutes   string `json:"desk_timer_minutes"`
-	DeskMaxSessions    string `json:"desk_max_sessions"`
-	DeskMaxRunning     string `json:"desk_max_running"`
-	DeskStoragePath    string `json:"desk_storage_path"`
-	FourcatEnabled     string `json:"fourcat_enabled"`
-	FourcatImage       string `json:"fourcat_image"`
-	FirefoxImage       string `json:"firefox_image"`
-	DeskImage          string `json:"desk_image"`
-	DeskproxyImage     string `json:"deskproxy_image"`
-	ZeeschuimerVersion string `json:"zeeschuimer_version"`
-	TemplateSHA256     string `json:"template_sha256"`
-	COID               string `json:"co_id"`
-	COName             string `json:"co_name"`
-	COUserAPIEndpoint  string `json:"co_user_api_endpoint"`
-	WorkspaceFQDN      string `json:"workspace_fqdn"`
-	DeskRoot           string `json:"desk_root"`
-	LayoutVersion      int    `json:"layout_version"`
-	PackageVersion     string `json:"package_version"`
-	AppliedAt          string `json:"applied_at"`
+	DeskCollectorRole  string  `json:"desk_collector_role"`
+	DeskAdminRole      string  `json:"desk_admin_role"`
+	DeskTechAdminRole  *string `json:"desk_techadmin_role"`
+	DeskPlatform       string  `json:"desk_platform"`
+	DeskContact        string  `json:"desk_contact"`
+	DeskHideMedia      string  `json:"desk_hide_media"`
+	DeskBatchSizes     string  `json:"desk_batch_sizes"`
+	DeskIdleSeconds    string  `json:"desk_idle_seconds"`
+	DeskTimerMinutes   string  `json:"desk_timer_minutes"`
+	DeskMaxSessions    string  `json:"desk_max_sessions"`
+	DeskMaxRunning     string  `json:"desk_max_running"`
+	DeskStoragePath    string  `json:"desk_storage_path"`
+	FourcatEnabled     string  `json:"fourcat_enabled"`
+	FourcatImage       string  `json:"fourcat_image"`
+	FirefoxImage       string  `json:"firefox_image"`
+	DeskImage          string  `json:"desk_image"`
+	DeskproxyImage     string  `json:"deskproxy_image"`
+	ZeeschuimerVersion string  `json:"zeeschuimer_version"`
+	TemplateSHA256     string  `json:"template_sha256"`
+	COID               string  `json:"co_id"`
+	COName             string  `json:"co_name"`
+	COUserAPIEndpoint  string  `json:"co_user_api_endpoint"`
+	WorkspaceFQDN      string  `json:"workspace_fqdn"`
+	DeskRoot           string  `json:"desk_root"`
+	LayoutVersion      int     `json:"layout_version"`
+	PackageVersion     string  `json:"package_version"`
+	AppliedAt          string  `json:"applied_at"`
 }
 
-// knownKeys are the 26 keys desk.json must hold, no others.
+// knownKeys are the 26 keys desk.json must hold; desk_techadmin_role is the
+// one optional key, and nothing else is allowed.
 var knownKeys = []string{
 	"desk_collector_role", "desk_admin_role", "desk_platform", "desk_contact",
 	"desk_hide_media", "desk_batch_sizes", "desk_idle_seconds", "desk_timer_minutes",
@@ -93,6 +96,10 @@ var knownKeys = []string{
 	"template_sha256", "co_id", "co_name", "co_user_api_endpoint", "workspace_fqdn",
 	"desk_root", "layout_version", "package_version", "applied_at",
 }
+
+// DefaultTechAdminRole is the Tech Admin role of a desk.json without
+// desk_techadmin_role: SRC's developer group, which every CO has.
+const DefaultTechAdminRole = "src_co_developer"
 
 var (
 	intRe      = regexp.MustCompile(`^[0-9]+$`)
@@ -135,6 +142,9 @@ func Load(path string) (*Config, error) {
 		if string(v) == "null" {
 			return nil, fmt.Errorf("desk.json %s: key %q is null", path, k)
 		}
+	}
+	if v, ok := keys["desk_techadmin_role"]; ok && string(v) == "null" {
+		return nil, fmt.Errorf("desk.json %s: key %q is null", path, "desk_techadmin_role")
 	}
 	if raw.LayoutVersion != 1 {
 		return nil, fmt.Errorf("desk.json %s: layout_version: must be 1, got %d", path, raw.LayoutVersion)
@@ -181,6 +191,12 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 	if err != nil {
 		return nil, fail("desk_admin_role", "%v", err)
 	}
+	techAdminRole := DefaultTechAdminRole
+	if raw.DeskTechAdminRole != nil {
+		if techAdminRole, err = checkRole(*raw.DeskTechAdminRole); err != nil {
+			return nil, fail("desk_techadmin_role", "%v", err)
+		}
+	}
 	if raw.DeskContact == "" {
 		return nil, fail("desk_contact", "must not be empty")
 	}
@@ -224,6 +240,7 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 		FQDN:               raw.WorkspaceFQDN,
 		CollectorRole:      collectorRole,
 		AdminRole:          adminRole,
+		TechAdminRole:      techAdminRole,
 		Contact:            raw.DeskContact,
 		Platform:           raw.DeskPlatform,
 		HideMedia:          hideMedia,

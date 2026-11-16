@@ -208,6 +208,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	ac := access.Config{
 		CollectorRole: cfg.CollectorRole,
 		AdminRole:     cfg.AdminRole,
+		TechAdminRole: cfg.TechAdminRole,
 		GateSecret:    cfg.GateSecret,
 	}
 	logPath := filepath.Join(cfg.DeskRoot, "state", "access.ndjson")

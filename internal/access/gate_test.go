@@ -12,10 +12,12 @@ const (
 	testGate          = "0123456789abcdef0123456789abcdef"
 	testCollectorRole = "src_co_students"
 	testAdminRole     = "src_co_admin"
+	testTechAdminRole = "src_co_developer"
 )
 
 func testConfig() Config {
-	return Config{CollectorRole: testCollectorRole, AdminRole: testAdminRole, GateSecret: testGate}
+	return Config{CollectorRole: testCollectorRole, AdminRole: testAdminRole,
+		TechAdminRole: testTechAdminRole, GateSecret: testGate}
 }
 
 func newRequest(user, roles, gate string) *http.Request {
@@ -110,5 +112,39 @@ func TestCollectorOnly(t *testing.T) {
 	}
 	if len(id.Roles) != 1 || id.Roles[0] != testCollectorRole {
 		t.Errorf("Roles = %v, want [%s]", id.Roles, testCollectorRole)
+	}
+}
+
+// TestTechAdminOnly: the Tech Admin role makes a Tech Admin and nothing else.
+func TestTechAdminOnly(t *testing.T) {
+	r := newRequest("dmccool2", testTechAdminRole, testGate)
+	id, err := FromRequest(r, testConfig())
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !id.TechAdmin || id.Collector || id.Admin {
+		t.Errorf("TechAdmin=%v Collector=%v Admin=%v, want only TechAdmin", id.TechAdmin, id.Collector, id.Admin)
+	}
+	r = newRequest("dmccool2", testAdminRole, testGate)
+	if id, _ := FromRequest(r, testConfig()); id.TechAdmin {
+		t.Error("the admin role made a Tech Admin")
+	}
+	r = newRequest("dmccool2", testTechAdminRole+"s", testGate)
+	if id, _ := FromRequest(r, testConfig()); id.TechAdmin {
+		t.Error("a longer group name made a Tech Admin")
+	}
+}
+
+// TestSameRoleForTwoStandings: one group configured for admin and Tech Admin
+// gives both standings (and the collector one, as every admin).
+func TestSameRoleForTwoStandings(t *testing.T) {
+	c := testConfig()
+	c.TechAdminRole = testAdminRole
+	id, err := FromRequest(newRequest("dmccool", testAdminRole, testGate), c)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !id.Admin || !id.Collector || !id.TechAdmin {
+		t.Errorf("Admin=%v Collector=%v TechAdmin=%v, want all true", id.Admin, id.Collector, id.TechAdmin)
 	}
 }

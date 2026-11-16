@@ -19,6 +19,7 @@ const (
 	testGate      = "gate-secret-for-tests"
 	collectorRole = "src_co_students"
 	adminRole     = "src_co_admin"
+	techAdminRole = "src_co_developer"
 	testContact   = "desk-admin@example.org"
 )
 
@@ -41,7 +42,7 @@ func newTestServer(t *testing.T) (*http.Server, string) {
 		Platform:      "tiktok",
 	}
 	logPath := filepath.Join(root, "state", "access.ndjson")
-	ac := access.Config{CollectorRole: collectorRole, AdminRole: adminRole, GateSecret: testGate}
+	ac := access.Config{CollectorRole: collectorRole, AdminRole: adminRole, TechAdminRole: techAdminRole, GateSecret: testGate}
 	// Prov and Sessions stay nil here, as in cmd/desk until a later task wires them.
 	return New(Deps{
 		Cfg:      cfg,
@@ -249,5 +250,27 @@ func TestEmptyRolesLoggedOnce(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], `"user":"dmccool2"`) || !strings.Contains(lines[0], `"roles":[]`) {
 		t.Errorf("line %q lacks the user or an empty roles array", lines[0])
+	}
+}
+
+// TestAccessLogNamesTechAdmin: the access log line says whether the identity
+// is a Tech Admin.
+func TestAccessLogNamesTechAdmin(t *testing.T) {
+	srv, logPath := newTestServer(t)
+	do(t, srv, "techie", techAdminRole, testGate, "/fourcat/")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log: %v", err)
+	}
+	var e struct {
+		Collector bool  `json:"collector"`
+		Admin     bool  `json:"admin"`
+		TechAdmin *bool `json:"techadmin"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &e); err != nil {
+		t.Fatalf("log %q: %v", data, err)
+	}
+	if e.TechAdmin == nil || !*e.TechAdmin || e.Collector || e.Admin {
+		t.Errorf("log line %s, want techadmin true and nothing else", data)
 	}
 }

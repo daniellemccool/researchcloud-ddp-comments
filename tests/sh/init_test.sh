@@ -225,7 +225,7 @@ case_ok_fresh() {
 	local d
 	d=$(desk)
 	a_file "$d/desk.json"
-	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "26"
+	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "27"
 	a_eq "desk.json co_user_api_endpoint" "$(jq -r .co_user_api_endpoint "$d/desk.json")" \
 		"$(jq -r .co_user_api_endpoint "$FIX/workspace.json")"
 	a_eq "layout_version" "$(jq -r '.layout_version' "$d/desk.json")" "1"
@@ -290,7 +290,7 @@ case_python_repr_params() {
 	local d k
 	d=$(desk)
 	a_file "$d/desk.json"
-	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "26"
+	a_eq "desk.json key count" "$(jq 'keys | length' "$d/desk.json")" "27"
 	while IFS= read -r k; do
 		a_eq "desk.json $k" \
 			"$(jq -r --arg k "$k" '.[$k]' "$d/desk.json")" \
@@ -536,6 +536,40 @@ case_volume_df_unreadable() {
 	a_nothing_written
 }
 
+case_techadmin_default() {
+	# The parameter set has no desk_techadmin_role and no member holds the
+	# default; it is written as src_co_developer and the launch succeeds.
+	run_init
+	a_rc 0
+	a_eq "desk_techadmin_role" "$(jq -r .desk_techadmin_role "$(desk)/desk.json")" "src_co_developer"
+}
+
+case_techadmin_custom() {
+	PLUGIN_PARAMETERS=$(jq -c '.desk_techadmin_role = "ops_team"' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	run_init
+	a_rc 0
+	a_eq "desk_techadmin_role" "$(jq -r .desk_techadmin_role "$(desk)/desk.json")" "ops_team"
+}
+
+case_techadmin_placeholder() {
+	PLUGIN_PARAMETERS=$(jq -c '.desk_techadmin_role = "src_co_<x>"' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	run_init
+	a_rc 2
+	a_err_has "desk_techadmin_role"
+	a_nothing_written
+}
+
+case_techadmin_empty() {
+	PLUGIN_PARAMETERS=$(jq -c '.desk_techadmin_role = ""' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	run_init
+	a_rc 2
+	a_err_has "desk_techadmin_role"
+	a_nothing_written
+}
+
 case_two_volumes() {
 	mkdir -p "$SYSROOT/data/vol2"
 	run_init
@@ -727,7 +761,9 @@ case_update_ok() {
 		"$(sha256sum "$FIX/template.tar" | cut -d' ' -f1)" \
 		jlesage/firefox:v26.09.1
 	# An older 25-key desk.json: update must add the endpoint from workspace.json.
-	jq "del(.co_user_api_endpoint)" "$d/desk.json" >"$d/desk.json.old25"
+	# It has no desk_techadmin_role either; update does not add one (the desk
+	# reads a missing key as src_co_developer).
+	jq "del(.co_user_api_endpoint, .desk_techadmin_role)" "$d/desk.json" >"$d/desk.json.old25"
 	mv "$d/desk.json.old25" "$d/desk.json"
 	a_eq "old desk.json has 25 keys" "$(jq "keys | length" "$d/desk.json")" "25"
 	export DESK_RELEASE_TARBALL=$SYSROOT/release.tar.gz
@@ -1299,6 +1335,10 @@ run_case volume-reattach-floor case_volume_reattach_floor
 run_case volume-reattach-too-small case_volume_reattach_too_small
 run_case volume-free-reads-df case_volume_free_reads_df
 run_case volume-df-unreadable case_volume_df_unreadable
+run_case techadmin-default case_techadmin_default
+run_case techadmin-custom case_techadmin_custom
+run_case techadmin-placeholder case_techadmin_placeholder
+run_case techadmin-empty case_techadmin_empty
 run_case two-volumes case_two_volumes
 run_case storage-path-with-space case_storage_path_with_space
 run_case too-many-digits case_too_many_digits

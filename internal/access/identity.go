@@ -28,13 +28,17 @@ type Identity struct {
 	Roles     []string
 	Collector bool
 	Admin     bool
+	// TechAdmin is the Tech Admin standing (4CAT's users, settings and
+	// extensions); it implies neither Collector nor Admin.
+	TechAdmin bool
 }
 
-// Config carries the values FromRequest needs: the two roles that make a
-// collector or an admin, and the gate secret the proxy was given.
+// Config carries the values FromRequest needs: the three roles that make a
+// collector, an admin or a Tech Admin, and the gate secret the proxy was given.
 type Config struct {
 	CollectorRole string
 	AdminRole     string
+	TechAdminRole string
 	GateSecret    string
 }
 
@@ -53,7 +57,7 @@ var (
 // is wrong has its other headers ignored entirely. Then the RAW username
 // value is validated (no trimming: " dmccool2 " is not a valid name), then
 // the roles are split into whole ';'-separated segments.
-// Admin implies Collector.
+// Admin implies Collector; TechAdmin implies nothing else.
 func FromRequest(r *http.Request, c Config) (Identity, error) {
 	if !gateOK(r, c.GateSecret) {
 		return Identity{}, ErrGate
@@ -71,6 +75,7 @@ func FromRequest(r *http.Request, c Config) (Identity, error) {
 		Roles:     splitRoles(rolesHeader),
 		Collector: IsRole(rolesHeader, c.CollectorRole),
 		Admin:     IsRole(rolesHeader, c.AdminRole),
+		TechAdmin: IsRole(rolesHeader, c.TechAdminRole),
 	}
 	if id.Admin {
 		id.Collector = true

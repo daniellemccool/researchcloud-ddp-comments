@@ -281,10 +281,10 @@ func (h *handler) serveVNC(w http.ResponseWriter, r *http.Request) {
 	h.relay.ServeHTTP(w, r)
 }
 
-// serveFourcat is /fourcat/: admins only; with the Deps FourcatProxy handler
-// still nil the route is 404 (a later task supplies it).
+// serveFourcat is /fourcat/: admins and Tech Admins only; with the Deps
+// FourcatProxy handler still nil the route is 404.
 func (h *handler) serveFourcat(w http.ResponseWriter, r *http.Request) {
-	if !identity(r).Admin {
+	if id := identity(r); !id.Admin && !id.TechAdmin {
 		h.forbidden(w)
 		return
 	}

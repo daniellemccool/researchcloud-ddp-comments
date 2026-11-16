@@ -33,7 +33,7 @@ func newTestServerWith(t *testing.T, fill func(*Deps)) *http.Server {
 	}
 	d := Deps{
 		Cfg:      cfg,
-		Access:   access.Config{CollectorRole: collectorRole, AdminRole: adminRole, GateSecret: testGate},
+		Access:   access.Config{CollectorRole: collectorRole, AdminRole: adminRole, TechAdminRole: techAdminRole, GateSecret: testGate},
 		Platform: plat,
 		LogPath:  filepath.Join(root, "state", "access.ndjson"),
 		Log:      &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: plat.DefaultKind},
@@ -182,5 +182,62 @@ func TestFourcatProxyPlainBadGateway(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
 		t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", ct)
+	}
+}
+
+// TestTechAdminOnlyReachesOnlyFourcat: a Tech Admin who is neither collector
+// nor admin gets the 403 page on every path outside /fourcat/ (the admin,
+// screen and claim handlers do not check the collector role themselves) and
+// reaches the 4CAT proxy.
+func TestTechAdminOnlyReachesOnlyFourcat(t *testing.T) {
+	var mu sync.Mutex
+	reached := map[string]int{}
+	stub := func(name string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			reached[name]++
+			mu.Unlock()
+			_, _ = w.Write([]byte(name))
+		})
+	}
+	srv := newTestServerWith(t, func(d *Deps) {
+		d.FourcatProxy = stub("fourcat")
+		d.Relay = stub("relay")
+		d.Admin = stub("admin")
+	})
+	same := map[string]string{"Origin": "https://desk.example.org", "Sec-Fetch-Site": "same-origin"}
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/desk/"},
+		{http.MethodGet, "/desk/admin/"},
+		{http.MethodGet, "/desk/vnc/"},
+		{http.MethodPost, "/desk/claim"},
+	} {
+		rec := doReq(t, srv, c.method, "techie", techAdminRole, c.path, nil, same)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s: status = %d, want 403", c.method, c.path, rec.Code)
+		}
+		if b := rec.Body.String(); !strings.Contains(b, testContact) {
+			t.Errorf("%s %s: body %q lacks the contact", c.method, c.path, b)
+		}
+	}
+	// A path that only starts with /fourcat/ is cleaned by the mux into a
+	// redirect; it never reaches another handler.
+	rec := doReq(t, srv, http.MethodGet, "techie", techAdminRole, "/fourcat/../desk/admin/", nil, same)
+	if rec.Code == http.StatusOK {
+		t.Errorf("/fourcat/../desk/admin/: status 200 body %q, want no handler reached", rec.Body.String())
+	}
+	// /fourcat without the slash gets the mux's redirect, as it does for an admin.
+	rec = doReq(t, srv, http.MethodGet, "techie", techAdminRole, "/fourcat", nil, same)
+	if rec.Code < 300 || rec.Code > 399 || rec.Header().Get("Location") != "/fourcat/" {
+		t.Errorf("/fourcat: status %d Location %q, want a redirect to /fourcat/", rec.Code, rec.Header().Get("Location"))
+	}
+	rec = doReq(t, srv, http.MethodGet, "techie", techAdminRole, "/fourcat/", nil, same)
+	if rec.Code != http.StatusOK || rec.Body.String() != "fourcat" {
+		t.Errorf("/fourcat/: status %d body %q, want the proxy", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if reached["relay"] != 0 || reached["admin"] != 0 || reached["fourcat"] != 1 {
+		t.Errorf("handlers reached %v, want only fourcat once", reached)
 	}
 }

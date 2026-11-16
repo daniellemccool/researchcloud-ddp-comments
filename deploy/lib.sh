@@ -43,10 +43,15 @@ PIN_ZSV=
 PIN_TEMPLATE_SHA256=
 PIN_RELEASE=
 
-PARAM_NAMES="desk_collector_role desk_admin_role desk_platform desk_contact
+PARAM_NAMES="desk_collector_role desk_admin_role desk_techadmin_role desk_platform desk_contact
 desk_hide_media desk_batch_sizes desk_idle_seconds desk_timer_minutes
 desk_max_sessions desk_max_running desk_storage_path fourcat_enabled
 co_id co_name workspace_fqdn"
+
+# desk_techadmin_role is optional: parse_plugin_parameters defaults it, so a
+# component made before the parameter existed keeps working. Nobody needs to
+# hold it, so check_roles never checks it.
+DEFAULT_TECHADMIN_ROLE=src_co_developer
 
 RETIRED_PARAMS="fourcat_image desk_image deskproxy_image zeeschuimer_version template_sha256"
 
@@ -122,6 +127,7 @@ parse_plugin_parameters() {
 	fi
 	if printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
 		PARAMS_JSON=$raw
+		default_optional_params
 		return 0
 	fi
 	case $raw in
@@ -130,11 +136,20 @@ parse_plugin_parameters() {
 		swapped=$(printf '%s' "$raw" | sed "s/'/\"/g")
 		if printf '%s' "$swapped" | jq -e 'type == "object"' >/dev/null 2>&1; then
 			PARAMS_JSON=$swapped
+			default_optional_params
 			return 0
 		fi
 		;;
 	esac
 	die "PLUGIN_PARAMETERS: not a JSON object"
+}
+
+# default_optional_params adds desk_techadmin_role with its default when the
+# parameter set lacks the key; a present value, even an empty one, is kept
+# for validate_params to judge.
+default_optional_params() {
+	PARAMS_JSON=$(printf '%s' "$PARAMS_JSON" |
+		jq -c --arg d "$DEFAULT_TECHADMIN_ROLE" 'if has("desk_techadmin_role") then . else .desk_techadmin_role = $d end')
 }
 
 validate_params() {
@@ -180,7 +195,7 @@ validate_params() {
 		fi
 		v=$(param "$k")
 		case $k in
-		desk_collector_role | desk_admin_role)
+		desk_collector_role | desk_admin_role | desk_techadmin_role)
 			if ! printf '%s' "$v" | grep -Eq '^[A-Za-z0-9_-]+$'; then
 				param_err "$k" "must match ^[A-Za-z0-9_-]+$"
 			fi
@@ -545,7 +560,7 @@ write_desk_json() {
 		set -- "$@" --arg "$k" "$(param "$k")"
 	done
 	# The five retired names are still recorded, from the release's pins, so
-	# the key set is the 26 keys the Go side knows.
+	# the key set is the 27 keys the Go side knows.
 	jq -n "$@" \
 		--arg fourcat_image "$PIN_FOURCAT_IMAGE" \
 		--arg firefox_image "$PIN_FIREFOX_IMAGE" \

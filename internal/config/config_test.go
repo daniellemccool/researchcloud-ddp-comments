@@ -335,3 +335,32 @@ func TestRoleAnyName(t *testing.T) {
 		}
 	}
 }
+
+// TestTechAdminRoleDefault: desk_techadmin_role is optional; a desk.json
+// without it (made before this release) means src_co_developer, a present
+// value follows the role rule, and an empty or null one is refused.
+func TestTechAdminRoleDefault(t *testing.T) {
+	dir := writeDeskRoot(t, nil, true)
+	cfg, err := Load(filepath.Join(dir, "desk.json"))
+	if err != nil {
+		t.Fatalf("Load without the key: %v", err)
+	}
+	if cfg.TechAdminRole != "src_co_developer" {
+		t.Errorf("TechAdminRole = %q, want the default src_co_developer", cfg.TechAdminRole)
+	}
+	dir = writeDeskRoot(t, func(m map[string]any) { m["desk_techadmin_role"] = "ops_team" }, true)
+	cfg, err = Load(filepath.Join(dir, "desk.json"))
+	if err != nil {
+		t.Fatalf("Load with ops_team: %v", err)
+	}
+	if cfg.TechAdminRole != "ops_team" {
+		t.Errorf("TechAdminRole = %q, want ops_team", cfg.TechAdminRole)
+	}
+	for _, v := range []any{"a;b", "", nil} {
+		dir := writeDeskRoot(t, func(m map[string]any) { m["desk_techadmin_role"] = v }, true)
+		if _, err := Load(filepath.Join(dir, "desk.json")); err == nil ||
+			!strings.Contains(err.Error(), "desk_techadmin_role") {
+			t.Errorf("desk_techadmin_role %#v: err = %v, want one naming the key", v, err)
+		}
+	}
+}

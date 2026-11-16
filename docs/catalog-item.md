@@ -34,6 +34,7 @@ none; both are N/A for the platform-sourced parameters.
 |---|---|---|---|---|---|
 | `desk_collector_role` | Fixed | `src_co_<fill-me-in>` | yes | yes | interactive |
 | `desk_admin_role` | Fixed | `src_co_admin` | yes | no | keep |
+| `desk_techadmin_role` | Fixed | `src_co_developer` | yes | no | keep |
 | `desk_platform` | Fixed | `tiktok` | yes | no | interactive |
 | `desk_contact` | Fixed | `<fill-me-in>` | yes | yes | interactive |
 | `desk_hide_media` | Fixed | `true` | yes | no | keep |
@@ -60,6 +61,11 @@ Notes on the values:
   member. The collector default is the placeholder so an unedited launch fails
   loudly. A failed role check lists every role name the CO API returned, each in
   quotes, so a stray space or an unexpected prefix shows.
+- `desk_techadmin_role` (Tech Admin) follows the same name rule but need not be
+  held by anyone; a workspace launched without it uses `src_co_developer`. A Tech
+  Admin is signed in to 4CAT and may manage its users, settings, tags and
+  extensions; they see no collector page unless they also hold the collector or
+  admin role, and nobody can restart or upgrade 4CAT from the web.
 - The collector role should be a group the CO makes for its collectors, not
   SRC's `src_no_ext_apps` group. That group restricts which catalog items its
   members can start in the SRC portal and says nothing about who collects, so
