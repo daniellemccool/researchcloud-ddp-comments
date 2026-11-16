@@ -305,11 +305,13 @@ case_placeholder_role() {
 }
 
 case_uppercase_role() {
+	# Capitals pass the name rule; the run fails only because nobody holds it.
 	PLUGIN_PARAMETERS=$(jq -c '.desk_collector_role = "Src_co_students"' "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
 	run_init
 	a_rc 2
-	a_err_has "desk_collector_role"
+	a_err_has "desk_collector_role: not held by any CO member"
+	a_err_lacks "must match"
 	a_nothing_written
 }
 
@@ -377,7 +379,7 @@ case_two_failures() {
 }
 
 case_role_held_by_nobody() {
-	# Every src_ role the CO API returned is listed, not only src_co_ ones.
+	# Every role the CO API returned is listed, quoted, whatever its prefix.
 	jq 'map(if .username == "dmccool" then .roles = ["src_co_admin", "src_ws_admin", "rsc_developers"]
 	      elif .username == "dmccool2" then .roles = []
 	      else . end)' "$FIX/members.json" >"$SYSROOT/members.json"
@@ -385,7 +387,7 @@ case_role_held_by_nobody() {
 	run_init
 	a_rc 2
 	a_err_has "desk_collector_role"
-	a_err_has "(seen: src_co_admin, src_ws_admin)"
+	a_err_has '(seen: "rsc_developers", "src_co_admin", "src_ws_admin")'
 	a_err_lacks "dmccool"
 }
 
@@ -395,7 +397,7 @@ case_admin_role_held_by_nobody() {
 	run_init
 	a_rc 2
 	a_err_has "desk_admin_role"
-	a_err_has "(seen: src_co_students)"
+	a_err_has '(seen: "src_co_students")'
 	a_err_lacks "dmccool"
 }
 
@@ -405,6 +407,68 @@ case_roles_all_empty() {
 	run_init
 	a_rc 2
 	a_err_has "desk_collector_role: not held by any CO member (seen: none)"
+}
+
+case_role_stray_space() {
+	jq 'map(if .username == "dmccool" then .roles = ["src_co_admin"]
+	      elif .username == "dmccool2" then .roles = ["src_co_students "]
+	      else . end)' "$FIX/members.json" >"$SYSROOT/members.json"
+	export DESK_CO_MEMBERS_FILE=$SYSROOT/members.json
+	run_init
+	a_rc 2
+	a_err_has "desk_collector_role: not held by any CO member"
+	a_err_has '"src_co_students "'
+}
+
+case_role_any_name() {
+	PLUGIN_PARAMETERS=$(jq -c '.desk_collector_role = "collectors"' "$FIX/params-ok.json")
+	export PLUGIN_PARAMETERS
+	jq 'map(if .username == "dmccool2" then .roles = ["collectors"] else . end)' \
+		"$FIX/members.json" >"$SYSROOT/members.json"
+	export DESK_CO_MEMBERS_FILE=$SYSROOT/members.json
+	run_init
+	a_rc 0
+}
+
+case_role_bad_chars() {
+	local v
+	for v in "a;b" "two words"; do
+		PLUGIN_PARAMETERS=$(jq -c --arg v "$v" '.desk_admin_role = $v' "$FIX/params-ok.json")
+		export PLUGIN_PARAMETERS
+		run_init
+		a_rc 2
+		a_err_has 'desk_admin_role: must match ^[A-Za-z0-9_-]+$'
+		a_nothing_written
+	done
+}
+
+case_member_not_an_object() {
+	jq '. + ["stray"]' "$FIX/members.json" >"$SYSROOT/members.json"
+	export DESK_CO_MEMBERS_FILE=$SYSROOT/members.json
+	run_init
+	a_rc 0
+}
+
+case_member_not_an_object_role_missing() {
+	jq 'map(.roles |= map(select(. != "src_co_students"))) + ["stray"]' \
+		"$FIX/members.json" >"$SYSROOT/members.json"
+	export DESK_CO_MEMBERS_FILE=$SYSROOT/members.json
+	run_init
+	a_rc 2
+	a_err_has 'desk_collector_role: not held by any CO member (seen: "src_co_admin")'
+}
+
+case_role_not_a_string() {
+	# A malformed role element is skipped, so nothing but role names is printed.
+	jq 'map(if .username == "dmccool" then .roles = ["src_co_admin", {"username": "dmccool"}, 1, null]
+	      elif .username == "dmccool2" then .roles = []
+	      else . end)' "$FIX/members.json" >"$SYSROOT/members.json"
+	export DESK_CO_MEMBERS_FILE=$SYSROOT/members.json
+	run_init
+	a_rc 2
+	a_err_has 'desk_collector_role: not held by any CO member (seen: "src_co_admin")'
+	a_err_lacks "username"
+	a_err_lacks "dmccool"
 }
 
 case_two_volumes() {
@@ -1157,6 +1221,12 @@ run_case two-failures case_two_failures
 run_case role-held-by-nobody case_role_held_by_nobody
 run_case roles-all-empty case_roles_all_empty
 run_case admin-role-held-by-nobody case_admin_role_held_by_nobody
+run_case role-stray-space case_role_stray_space
+run_case role-any-name case_role_any_name
+run_case role-bad-chars case_role_bad_chars
+run_case member-not-an-object case_member_not_an_object
+run_case member-not-an-object-role-missing case_member_not_an_object_role_missing
+run_case role-not-a-string case_role_not_a_string
 run_case two-volumes case_two_volumes
 run_case storage-path-with-space case_storage_path_with_space
 run_case too-many-digits case_too_many_digits

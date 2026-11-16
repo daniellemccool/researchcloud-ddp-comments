@@ -55,15 +55,17 @@ declares one.
 
 Notes on the values:
 
-- `desk_collector_role` and `desk_admin_role` must match `^src_co_[A-Za-z0-9_-]+$`
-  and each be held by at least one CO member. The collector default is the
-  placeholder so an unedited launch fails loudly. A failed role check lists the
-  `src_*` role names the CO API returned.
-- The collector role is a group the CO makes for its collectors, not SRC's
-  `src_no_ext_apps` group. That group restricts which catalog items its members
-  can start in the SRC portal and says nothing about who collects, so it is not
-  accepted as a role. Putting the collectors in it as well is advisable: they
-  can then start nothing in the CO beyond the items allowed for it.
+- `desk_collector_role` and `desk_admin_role` must match `^[A-Za-z0-9_-]+$`
+  (letters, digits, `_` and `-`, any prefix) and each be held by at least one CO
+  member. The collector default is the placeholder so an unedited launch fails
+  loudly. A failed role check lists every role name the CO API returned, each in
+  quotes, so a stray space or an unexpected prefix shows.
+- The collector role should be a group the CO makes for its collectors, not
+  SRC's `src_no_ext_apps` group. That group restricts which catalog items its
+  members can start in the SRC portal and says nothing about who collects, so
+  using it as a role is advised against (init no longer refuses it). Putting the
+  collectors in it as well is advisable: they can then start nothing in the CO
+  beyond the items allowed for it.
 - `desk_contact` appears in page text; no quotes.
 - `desk_idle_seconds` is how long a collector's pair may go without page input or
   without an open screen before the desk stops it; `0` turns the idle stop off.

@@ -176,8 +176,8 @@ validate_params() {
 		v=$(param "$k")
 		case $k in
 		desk_collector_role | desk_admin_role)
-			if ! printf '%s' "$v" | grep -Eq '^src_co_[A-Za-z0-9_-]+$'; then
-				param_err "$k" "must match ^src_co_[A-Za-z0-9_-]+$"
+			if ! printf '%s' "$v" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+				param_err "$k" "must match ^[A-Za-z0-9_-]+$"
 			fi
 			case $v in
 			*"<"*) param_err "$k" "must not contain a placeholder" ;;
@@ -415,19 +415,26 @@ load_members() {
 	return 0
 }
 
+# MEMBER_ROLES is the jq filter for every string role of every member entry
+# that is an object with an array of roles; any other entry or element is
+# skipped, not an error, so only role names are ever printed.
+MEMBER_ROLES='[.[] | select(type == "object" and (.roles | type) == "array") | .roles[] | select(type == "string")]'
+
 role_held() {
-	jq -e --arg r "$1" '[.[] | .roles[]?] | any(. == $r)' "$MEMBERS_FILE" >/dev/null 2>&1
+	jq -e --arg r "$1" "$MEMBER_ROLES | any(. == \$r)" "$MEMBERS_FILE" >/dev/null 2>&1
 }
 
+# roles_seen prints every role the CO list returned, quoted as JSON strings,
+# distinct and sorted, or "none". Usernames are never printed.
 roles_seen() {
-	seen=$(jq -r '[.[] | .roles[]? | select(type=="string" and startswith("src_")) | gsub("[^A-Za-z0-9_-]";"")] | unique | join(", ")' "$MEMBERS_FILE" 2>/dev/null)
+	seen=$(jq -r "$MEMBER_ROLES | map(tojson) | unique | join(\", \")" "$MEMBERS_FILE" 2>/dev/null) || seen=""
 	printf '%s' "${seen:-none}"
 }
 
 check_roles() {
 	for k in desk_collector_role desk_admin_role; do
 		v=$(param "$k")
-		if printf '%s' "$v" | grep -Eq '^src_co_[A-Za-z0-9_-]+$' && ! printf '%s' "$v" | grep -q '<'; then
+		if printf '%s' "$v" | grep -Eq '^[A-Za-z0-9_-]+$'; then
 			if ! role_held "$v"; then
 				param_err "$k" "not held by any CO member (seen: $(roles_seen))"
 			fi

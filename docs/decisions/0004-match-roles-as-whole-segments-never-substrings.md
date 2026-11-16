@@ -16,7 +16,7 @@ The roles header is split on `;` and a role matches only when a whole segment eq
 ## Guidance
 
 - Compare segments with equality in `internal/access`; `internal/access/roles_test.go` holds the cases, including a longer group name that extends ours.
-- Role names come from `desk.json`, validated at load against `^src_co_[A-Za-z0-9_-]+$`.
+- Role names come from `desk.json`, validated at load against `^[A-Za-z0-9_-]+$` (any prefix; the same rule as init's).
 - A member with neither role gets the 403 page naming the contact, never a collector page.
 
 ## Why

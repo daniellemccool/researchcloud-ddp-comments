@@ -311,3 +311,27 @@ func TestLoadMissingEndpointKey(t *testing.T) {
 		t.Fatalf("err = %v, want one naming co_user_api_endpoint", err)
 	}
 }
+
+// TestRoleAnyName: a role parameter accepts any name of letters, digits, _
+// and -, matching the shell layer's ^[A-Za-z0-9_-]+$; a placeholder, an empty
+// value, a space or a semicolon is refused.
+func TestRoleAnyName(t *testing.T) {
+	for _, v := range []string{"collectors", "rsc_developers", "src_no_ext_apps", "Src_co_students"} {
+		dir := writeDeskRoot(t, func(m map[string]any) { m["desk_collector_role"] = v }, true)
+		cfg, err := Load(filepath.Join(dir, "desk.json"))
+		if err != nil {
+			t.Fatalf("Load with role %q: %v, want success", v, err)
+		}
+		if cfg.CollectorRole != v {
+			t.Fatalf("CollectorRole = %q, want %q", cfg.CollectorRole, v)
+		}
+	}
+	for _, v := range []string{"", "a;b", "two words", "src_co_<fill-me-in>"} {
+		dir := writeDeskRoot(t, func(m map[string]any) { m["desk_admin_role"] = v }, true)
+		_, err := Load(filepath.Join(dir, "desk.json"))
+		if err == nil || !strings.Contains(err.Error(), "desk_admin_role") ||
+			!strings.Contains(err.Error(), "must match ^[A-Za-z0-9_-]+$") {
+			t.Fatalf("role %q: err = %v, want one naming desk_admin_role and the rule", v, err)
+		}
+	}
+}

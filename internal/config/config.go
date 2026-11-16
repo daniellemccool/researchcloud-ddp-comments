@@ -97,7 +97,7 @@ var knownKeys = []string{
 var (
 	intRe      = regexp.MustCompile(`^[0-9]+$`)
 	batchRe    = regexp.MustCompile(`^[0-9]+(,[0-9]+)*$`)
-	roleRe     = regexp.MustCompile(`^src_co_[A-Za-z0-9_-]+$`)
+	roleRe     = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	platformRe = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 )
 
@@ -251,7 +251,7 @@ func convert(path string, raw *rawConfig) (*Config, error) {
 
 func checkRole(v string) (string, error) {
 	if !roleRe.MatchString(v) {
-		return "", fmt.Errorf("must match ^src_co_[A-Za-z0-9_-]+$, got %q", v)
+		return "", fmt.Errorf("must match ^[A-Za-z0-9_-]+$, got %q", v)
 	}
 	return v, nil
 }
