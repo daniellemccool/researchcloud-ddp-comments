@@ -81,7 +81,7 @@ const PAGE = `<!doctype html>
 <script>
 const SECONDS=%%SECONDS%%,NOTE_CODES=%%NOTE_CODES%%;let timer=null,wasReady=false,sawInput=false,stopped=false;
 async function waitScreen(){try{const r=await fetch('status');if(r.ok&&(await r.json()).ready){
- const f=document.getElementById('screen');f.src='/desk/vnc/';f.style.display='';
+ const f=document.getElementById('screen');f.src='/desk/vnc/?resize=remote';f.style.display='';
  wasReady=true;document.getElementById('starting').style.display='none';return;}}catch(e){}setTimeout(waitScreen,2000);}
 waitScreen();
 const INPUT_EVENTS=['pointerdown','pointermove','keydown','wheel','touchstart'];

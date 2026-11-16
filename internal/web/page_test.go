@@ -96,11 +96,14 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 		`<p>%%USER%% stays literal</p>`, // one pass: substituted text is never rescanned
 		"<footer>Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>",
 		`fetch('status')`,
-		`f.src='/desk/vnc/'`,
+		`f.src='/desk/vnc/?resize=remote'`, // the remote browser follows the frame's size
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("page lacks %q", want)
 		}
+	}
+	if strings.Contains(out, `f.src='/desk/vnc/'`) {
+		t.Errorf("the screen frame loads without resize=remote")
 	}
 	if strings.Contains(out, "<p>alice stays literal</p>") {
 		t.Errorf("the body's %%USER%% was substituted; want one pass only")
