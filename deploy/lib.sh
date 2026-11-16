@@ -13,6 +13,11 @@ CO_TOKEN=
 CO_ENDPOINT=
 MEMBERS_FILE=
 VOLUME=
+# Volume floors checked before the layout is written: free space in KB on a
+# fresh launch and on a reattach (the data is already there), and free inodes.
+VOLUME_FLOOR_FRESH_KB=5242880
+VOLUME_FLOOR_REATTACH_KB=512000
+VOLUME_FLOOR_INODES=10000
 backup=
 dj=
 dj_keep=
@@ -676,6 +681,47 @@ write_wrapper() {
 	chmod 0755 "$SYSROOT/usr/local/bin/desk"
 }
 
+# volume_free prints "<available KB> <free inodes>" for $VOLUME from GNU df's
+# named columns (so a source name with a space cannot shift them), or the two
+# numbers in DESK_TEST_DF when that is set (tests). The second field is "-"
+# for a filesystem that reports no inode numbers, and a field df could not
+# give is "?".
+volume_free() {
+	if [ -n "${DESK_TEST_DF:-}" ]; then
+		printf '%s\n' "$DESK_TEST_DF"
+		return 0
+	fi
+	vf_line=$(df -k --output=avail,itotal,iavail "$VOLUME" 2>/dev/null |
+		awk 'NR == 2 { if ($2 == "-" || $2 == 0 || $3 == "-") print $1, "-"; else print $1, $3 }')
+	printf '%s\n' "${vf_line:-? ?}"
+}
+
+# check_volume_space stops init with one line when $VOLUME has less free
+# space or fewer free inodes than the floor for $MODE.
+check_volume_space() {
+	read -r cv_kb cv_inodes <<VOLUME_FREE
+$(volume_free)
+VOLUME_FREE
+	case ${cv_kb:-} in
+	'' | *[!0-9]*) die "volume $VOLUME: cannot read free space" ;;
+	esac
+	case ${cv_inodes:-} in
+	-) ;;
+	'' | *[!0-9]*) die "volume $VOLUME: cannot read free space" ;;
+	esac
+	if [ "$MODE" = reattach ]; then
+		cv_floor=$VOLUME_FLOOR_REATTACH_KB
+	else
+		cv_floor=$VOLUME_FLOOR_FRESH_KB
+	fi
+	if [ "$cv_kb" -lt "$cv_floor" ]; then
+		die "volume $VOLUME: $((cv_kb / 1024)) MB free, need at least $((cv_floor / 1024)) MB"
+	fi
+	if [ "$cv_inodes" != - ] && [ "$cv_inodes" -lt "$VOLUME_FLOOR_INODES" ]; then
+		die "volume $VOLUME: $cv_inodes inodes free, need at least $VOLUME_FLOOR_INODES"
+	fi
+}
+
 platform_mode() {
 	parse_plugin_parameters
 	validate_params
@@ -709,6 +755,7 @@ platform_mode() {
 	else
 		MODE=fresh
 	fi
+	check_volume_space
 	# The template artifact is fetched and its sha256 verified before any file
 	# is written, so a mismatch refuses the launch with nothing on disk.
 	fetch_template

@@ -90,6 +90,9 @@ run_case() {
 	export DESK_TEMPLATE_FILE=$FIX/template.tar DESK_CO_MEMBERS_FILE=$FIX/members.json
 	PLUGIN_PARAMETERS=$(cat "$FIX/params-ok.json")
 	export PLUGIN_PARAMETERS
+	# Free KB and free inodes for the volume check, so no case depends on the
+	# test machine's disk; the volume cases set their own.
+	export DESK_TEST_DF="99999999 99999999"
 	make_installed_copy "$SYSROOT/repo"
 	local errfile rc
 	errfile=$(mktemp)
@@ -469,6 +472,68 @@ case_role_not_a_string() {
 	a_err_has 'desk_collector_role: not held by any CO member (seen: "src_co_admin")'
 	a_err_lacks "username"
 	a_err_lacks "dmccool"
+}
+
+case_volume_too_small() {
+	export DESK_TEST_DF="300000 500000"
+	run_init
+	a_rc 2
+	a_err_has "init: volume $SYSROOT/data/vol1: 292 MB free, need at least 5120 MB"
+	a_nothing_written
+}
+
+case_volume_few_inodes() {
+	export DESK_TEST_DF="9000000 500"
+	run_init
+	a_rc 2
+	a_err_has "init: volume $SYSROOT/data/vol1: 500 inodes free, need at least 10000"
+	a_nothing_written
+}
+
+case_volume_no_inode_numbers() {
+	# A filesystem that reports no inode numbers skips the inode floor.
+	export DESK_TEST_DF="9000000 -"
+	run_init
+	a_rc 0
+}
+
+case_volume_reattach_floor() {
+	run_init
+	a_rc 0
+	export DESK_TEST_DF="600000 500000"
+	run_init
+	a_rc 0
+	a_out_has "reattach"
+}
+
+case_volume_reattach_too_small() {
+	run_init
+	a_rc 0
+	export DESK_TEST_DF="100000 500000"
+	run_init
+	a_rc 2
+	a_err_has "init: volume $SYSROOT/data/vol1: 97 MB free, need at least 500 MB"
+}
+
+case_volume_free_reads_df() {
+	local out kb inodes rest
+	# shellcheck disable=SC2016 # $1 and $2 are the inner shell's arguments
+	out=$(env -u DESK_TEST_DF sh -c '. "$1/deploy/lib.sh"; VOLUME=$2; volume_free' sh "$REPO_ROOT" "$SYSROOT/data/vol1")
+	read -r kb inodes rest <<<"$out"
+	if [ -z "$inodes" ] || [ -n "$rest" ]; then
+		a_fail "volume_free printed [$out], want two fields"
+	fi
+	case $kb in
+	'' | *[!0-9]*) a_fail "volume_free first field [$kb] is not all digits" ;;
+	esac
+}
+
+case_volume_df_unreadable() {
+	export DESK_TEST_DF="x y"
+	run_init
+	a_rc 2
+	a_err_has "init: volume $SYSROOT/data/vol1: cannot read free space"
+	a_nothing_written
 }
 
 case_two_volumes() {
@@ -1227,6 +1292,13 @@ run_case role-bad-chars case_role_bad_chars
 run_case member-not-an-object case_member_not_an_object
 run_case member-not-an-object-role-missing case_member_not_an_object_role_missing
 run_case role-not-a-string case_role_not_a_string
+run_case volume-too-small case_volume_too_small
+run_case volume-few-inodes case_volume_few_inodes
+run_case volume-no-inode-numbers case_volume_no_inode_numbers
+run_case volume-reattach-floor case_volume_reattach_floor
+run_case volume-reattach-too-small case_volume_reattach_too_small
+run_case volume-free-reads-df case_volume_free_reads_df
+run_case volume-df-unreadable case_volume_df_unreadable
 run_case two-volumes case_two_volumes
 run_case storage-path-with-space case_storage_path_with_space
 run_case too-many-digits case_too_many_digits
