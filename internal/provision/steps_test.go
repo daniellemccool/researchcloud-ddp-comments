@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -562,5 +563,102 @@ func TestReturnAfterRevokeGetsNewToken(t *testing.T) {
 	}
 	if got := readFile(t, filepath.Join(env.root, "secrets", "4cat-tokens", "alice", "4cat-token")); got != fakeToken("alice") {
 		t.Error("token file does not hold the new token")
+	}
+}
+
+// TestAdvanceFourcatTakesNoSeat: an admin who opens 4CAT first gets the 4CAT
+// account and token without a registry seat; a later Advance allocates the
+// seat and does not redo the two steps.
+func TestAdvanceFourcatTakesNoSeat(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	st := env.prov.AdvanceFourcat(ctx, "alice")
+	if st.Steps["fourcat_account"] != "done" || st.Steps["fourcat_apitoken"] != "done" {
+		t.Fatalf("steps = %v, want both 4CAT steps done", st.Steps)
+	}
+	if st.Steps["registry"] == "done" {
+		t.Error("registry done after AdvanceFourcat")
+	}
+	if rows, err := env.reg.Rows(); err != nil || len(rows) != 0 {
+		t.Errorf("registry rows = %v, %v; want none", rows, err)
+	}
+	if got := readFile(t, filepath.Join(env.root, "secrets", "4cat-tokens", "alice", "4cat-token")); got != fakeToken("alice") {
+		t.Error("token file does not hold the API token")
+	}
+	if loaded := Load(env.cfg, "alice"); loaded.Steps["fourcat_apitoken"] != "done" {
+		t.Errorf("step file = %v, want fourcat_apitoken done", loaded.Steps)
+	}
+	logins := env.loginCount()
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
+		t.Fatalf("Advance after AdvanceFourcat not ready: %v", st.Steps)
+	}
+	if live, err := env.reg.Live(); err != nil || live["alice"].Index != 1 {
+		t.Errorf("Live() = %v, %v; want alice at index 1", live, err)
+	}
+	if n := env.creates(); n != 1 {
+		t.Errorf("create_user.py execs = %d, want 1", n)
+	}
+	if got := env.loginCount() - logins; got != 0 {
+		t.Errorf("logins during Advance = %d, want 0 (the token step was done)", got)
+	}
+}
+
+// TestAdvanceFourcatRefusesAbsentUser: a person the last good CO list lacks
+// gets neither step; the refusal lands on the first step not done.
+func TestAdvanceFourcatRefusesAbsentUser(t *testing.T) {
+	env := newTestEnv(t)
+	env.prov.Members = absentMembers{"alice": true}
+	st := env.prov.AdvanceFourcat(context.Background(), "alice")
+	if got := st.Steps["fourcat_account"]; got != "error: access removed" {
+		t.Errorf("fourcat_account = %q, want error: access removed", got)
+	}
+	if n := env.creates(); n != 0 || env.loginCount() != 0 {
+		t.Errorf("creates %d, logins %d; want none", n, env.loginCount())
+	}
+	// With the account already done, the refusal lands on the token step
+	// and the account's done mark stays.
+	env2 := newTestEnv(t)
+	if st := env2.prov.AdvanceFourcat(context.Background(), "bob"); st.Steps["fourcat_apitoken"] != "done" {
+		t.Fatalf("setup: %v", st.Steps)
+	}
+	if err := MarkUndone(env2.cfg, "bob", "fourcat_apitoken"); err != nil {
+		t.Fatal(err)
+	}
+	env2.prov.Members = absentMembers{"bob": true}
+	st = env2.prov.AdvanceFourcat(context.Background(), "bob")
+	if st.Steps["fourcat_account"] != "done" || st.Steps["fourcat_apitoken"] != "error: access removed" {
+		t.Errorf("steps = %v, want account done and token refused", st.Steps)
+	}
+}
+
+// TestAPITokenNeedsStepDone: the token is read only when the step file marks
+// fourcat_apitoken done and the file holds 64 hex characters.
+func TestAPITokenNeedsStepDone(t *testing.T) {
+	env := newTestEnv(t)
+	tokenPath := filepath.Join(env.root, "secrets", "4cat-tokens", "alice", "4cat-token")
+	if _, err := APIToken(env.cfg, "alice"); !errors.Is(err, ErrNoToken) {
+		t.Errorf("nothing at all: err = %v, want ErrNoToken", err)
+	}
+	// The old release: the cookie in the file, the old step done.
+	data, _ := json.Marshal(map[string]any{"steps": map[string]string{"fourcat_token": "done"}})
+	writeFile(t, StatePath(env.cfg, "alice"), string(data))
+	writeFile(t, tokenPath, "alice|abc")
+	if _, err := APIToken(env.cfg, "alice"); !errors.Is(err, ErrNoToken) {
+		t.Errorf("old cookie: err = %v, want ErrNoToken", err)
+	}
+	// A real token with the new step done.
+	if st := env.prov.AdvanceFourcat(context.Background(), "alice"); st.Steps["fourcat_apitoken"] != "done" {
+		t.Fatalf("setup: %v", st.Steps)
+	}
+	tok, err := APIToken(env.cfg, "alice")
+	if err != nil || tok != fakeToken("alice") {
+		t.Errorf("APIToken: matches %v, err %v; want the token", tok == fakeToken("alice"), err)
+	}
+	// The same file with the step undone (a revoke in progress).
+	if err := MarkUndone(env.cfg, "alice", "fourcat_apitoken"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := APIToken(env.cfg, "alice"); !errors.Is(err, ErrNoToken) {
+		t.Errorf("step undone: err = %v, want ErrNoToken", err)
 	}
 }

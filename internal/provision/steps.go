@@ -63,7 +63,51 @@ func (p *Provisioner) Advance(ctx context.Context, user string) State {
 	// A crashed run may have left the template staging dir behind; clear it
 	// before resuming, even when the template step is already done.
 	_ = os.RemoveAll(filepath.Join(p.Cfg.DeskRoot, "state", "firefox", user, ".template.tmp"))
-	for _, step := range Steps {
+	return p.run(ctx, user, Steps, st)
+}
+
+// errAccessRemoved refuses a person the last good CO list lacks.
+var errAccessRemoved = &StepError{Msg: "access removed"}
+
+// fourcatSteps are the steps AdvanceFourcat runs: a 4CAT account and token
+// without a collector seat.
+var fourcatSteps = []string{"fourcat_account", "fourcat_apitoken"}
+
+// AdvanceFourcat gives an admin or Tech Admin who opens 4CAT before /desk/
+// their 4CAT account and token, under the user lock and in the same step
+// file as Advance, without touching the registry: no seat is taken. A person
+// the last good CO list lacks is refused before either step, recorded as
+// "error: access removed" on the first of the two that is not done, so a done
+// step is never overwritten.
+func (p *Provisioner) AdvanceFourcat(ctx context.Context, user string) State {
+	if !userRe.MatchString(user) {
+		return State{Steps: map[string]string{fourcatSteps[0]: "error: invalid username"}}
+	}
+	userLock := p.Locks.User(user)
+	userLock.Lock()
+	defer userLock.Unlock()
+
+	st := Load(p.Cfg, user)
+	if st.Steps == nil {
+		st.Steps = map[string]string{}
+	}
+	if p.Members != nil && p.Members.Absent(user) {
+		for _, step := range fourcatSteps {
+			if st.Steps[step] != "done" {
+				st.Steps[step] = "error: " + describe(errAccessRemoved)
+				_ = p.save(user, &st)
+				break
+			}
+		}
+		return st
+	}
+	return p.run(ctx, user, fourcatSteps, st)
+}
+
+// run runs every step of steps that st does not mark done, in order, saving
+// after each; it stops at the first failing step and records its error.
+func (p *Provisioner) run(ctx context.Context, user string, steps []string, st State) State {
+	for _, step := range steps {
 		if st.Steps[step] == "done" {
 			continue
 		}
@@ -113,7 +157,7 @@ func (p *Provisioner) stepRegistry(user string) error {
 	p.Locks.Global.Lock()
 	defer p.Locks.Global.Unlock()
 	if p.Members != nil && p.Members.Absent(user) {
-		return &StepError{Msg: "access removed"}
+		return errAccessRemoved
 	}
 	_, err := p.Reg.Allocate(user)
 	return err

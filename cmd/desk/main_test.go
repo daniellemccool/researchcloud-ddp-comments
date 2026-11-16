@@ -17,6 +17,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/ctl"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/docker"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/fourcat"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/locks"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
@@ -142,13 +143,14 @@ func TestOpsStopValidatesUser(t *testing.T) {
 	}
 }
 
-// The admin 4CAT proxy is mounted only when 4CAT is enabled; disabled, the
-// handler is a nil interface so /fourcat/ answers 404 (review M6).
+// The 4CAT proxy is mounted only when 4CAT is enabled; disabled, the handler
+// is a nil interface so /fourcat/ answers 404 (review M6).
 func TestFourcatProxyMountedOnlyWhenEnabled(t *testing.T) {
-	if h := fourcatProxy(&config.Config{FQDN: "desk.example.org"}); h != nil {
+	if h := fourcatProxy(&config.Config{FQDN: "desk.example.org"}, nil, nil); h != nil {
 		t.Errorf("fourcatProxy(disabled) = %#v, want nil", h)
 	}
-	if h := fourcatProxy(&config.Config{FQDN: "desk.example.org", FourcatEnabled: true}); h == nil {
+	cfg := &config.Config{FQDN: "desk.example.org", FourcatEnabled: true}
+	if h := fourcatProxy(cfg, &fourcat.Study{}, &provision.Provisioner{}); h == nil {
 		t.Error("fourcatProxy(enabled) = nil, want the proxy")
 	}
 }

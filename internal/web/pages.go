@@ -10,13 +10,15 @@ import (
 //go:embed templates
 var templatesFS embed.FS
 
-// pageData is the shared template data. Contact, User and Platform are
-// escaped by html/template.
+// pageData is the shared template data. Contact, User, Platform and Detail
+// are escaped by html/template. Detail is a step's recorded error, shown by
+// notready.html; it holds no secret by contract.
 type pageData struct {
 	Title    string
 	Contact  string
 	User     string
 	Platform string
+	Detail   string
 }
 
 // pages holds the parsed HTML templates (no JavaScript, plain HTML).

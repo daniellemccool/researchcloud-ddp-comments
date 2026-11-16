@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -197,4 +198,36 @@ func MadeAccounts(cfg *config.Config) ([]string, error) {
 		}
 	}
 	return users, nil
+}
+
+// ErrNoToken means the person has no usable API token yet: the step file
+// does not mark fourcat_apitoken done, or the token file is missing or does
+// not hold a token (a login cookie left by an older release).
+var ErrNoToken = errors.New("no 4CAT API token")
+
+var apiTokenRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// APIToken returns the person's 4CAT API token for the /fourcat/ proxy, read
+// on every call: only when the step file marks fourcat_apitoken done and the
+// token file holds 64 hex characters; otherwise ErrNoToken. A token file that
+// exists but cannot be read is another error.
+func APIToken(cfg *config.Config, user string) (string, error) {
+	if !userRe.MatchString(user) {
+		return "", fmt.Errorf("invalid username: %q", user)
+	}
+	if Load(cfg, user).Steps["fourcat_apitoken"] != "done" {
+		return "", ErrNoToken
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.DeskRoot, "secrets", "4cat-tokens", user, "4cat-token"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", ErrNoToken
+	}
+	if err != nil {
+		return "", err
+	}
+	tok := strings.TrimSpace(string(data))
+	if !apiTokenRe.MatchString(tok) {
+		return "", ErrNoToken
+	}
+	return tok, nil
 }

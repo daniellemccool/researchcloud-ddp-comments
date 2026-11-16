@@ -10,5 +10,6 @@ body{font:14px/1.4 system-ui,sans-serif;margin:2em;max-width:46em;color:#1d2329}
 <body>
 <h1>Desk</h1>
 <p>The desk is not ready yet; ask {{.Contact}}.</p>
-</body>
+{{if .Detail}}<p>{{.Detail}}</p>
+{{end}}</body>
 </html>

@@ -19,6 +19,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0004 — Match roles as whole segments, never substrings](./0004-match-roles-as-whole-segments-never-substrings.md)
 - [0005 — Revoke only on a successful poll that omits the user](./0005-revoke-only-on-a-successful-poll-that-omits-the-user.md)
 - [0008 — Relay a screen only to its authenticated owner](./0008-relay-a-screen-only-to-its-authenticated-owner.md)
+- [0025 — Send 4CAT standing per request; store none per user](./0025-send-4cat-standing-per-request-store-none-per-user.md)
 
 ### Capture
 

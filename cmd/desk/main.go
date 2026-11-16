@@ -222,17 +222,16 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	relay := web.NewRelay(mgr, activity)
 	relay.Members = poller
 	deps := web.Deps{
-		Cfg:          cfg,
-		Access:       ac,
-		Platform:     p,
-		LogPath:      logPath,
-		Prov:         prov,
-		Sessions:     mgr,
-		Log:          dlog,
-		FourcatProxy: fourcatProxy(cfg),
-		Relay:        relay,
-		Activity:     activity,
-		Members:      poller,
+		Cfg:      cfg,
+		Access:   ac,
+		Platform: p,
+		LogPath:  logPath,
+		Prov:     prov,
+		Sessions: mgr,
+		Log:      dlog,
+		Relay:    relay,
+		Activity: activity,
+		Members:  poller,
 	}
 	// The idle stop (the reaper) runs for the serve lifetime: serveCtx is
 	// cancelled on every way out of serve. desk_idle_seconds = 0 turns it off.
@@ -278,6 +277,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		go study.Run(serveCtx, time.Minute)
 	}
+	deps.FourcatProxy = fourcatProxy(cfg, study, prov)
 
 	deps.Admin = web.NewAdmin(deps)
 	gated := web.New(deps)
@@ -332,13 +332,21 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 }
 
-// fourcatProxy returns the admin 4CAT proxy, or a nil handler when 4CAT is
-// disabled so the /fourcat/ route answers 404 (review M6).
-func fourcatProxy(cfg *config.Config) http.Handler {
-	if !cfg.FourcatEnabled {
+// fourcatProxy returns the /fourcat/ proxy, or a nil handler when 4CAT is
+// disabled (no study) so the route answers 404 (review M6).
+func fourcatProxy(cfg *config.Config, study *fourcat.Study, prov *provision.Provisioner) http.Handler {
+	if !cfg.FourcatEnabled || study == nil {
 		return nil
 	}
-	return web.NewFourcatProxy(cfg.FQDN)
+	return web.NewFourcatProxy(web.FourcatDeps{
+		FQDN:    cfg.FQDN,
+		Contact: cfg.Contact,
+		Study:   study,
+		Token: func(user string) (string, error) {
+			return provision.APIToken(cfg, user)
+		},
+		MakeAccount: prov.AdvanceFourcat,
+	})
 }
 
 // The daemon floor for ADR-0007's isolated gateway
