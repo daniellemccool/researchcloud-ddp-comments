@@ -14,11 +14,15 @@ import (
 // Under the user lock, in this order: the registry row is retired (under
 // Global), the registry provisioning step is marked undone, the user's
 // relayed screens are closed, the pair is stopped, and the screens are closed
-// again whatever the stop returned. Retire and MarkUndone touch no Docker, so
-// a crash or a Docker error at any later point leaves a retired row that the
-// next poll or Reconcile finishes. A concurrent Start blocked on the user
-// lock then finds no live row and returns Gone. Idempotent; profile,
-// captures, token, password and the 4CAT account are left as they are.
+// again whatever the stop returned. Then, when 4CAT is enabled (DropToken
+// set), the user's API token is deleted in 4CAT, and only once that succeeded
+// is the token file removed and the fourcat_apitoken step marked undone, so a
+// retired row whose token step is still done marks an unfinished revoke.
+// Retire and MarkUndone touch no Docker, so a crash or a Docker error at any
+// later point leaves a retired row that the next poll or Reconcile finishes.
+// A concurrent Start blocked on the user lock then finds no live row and
+// returns Gone. Idempotent; profile, captures, password and the 4CAT account
+// and its datasets are left as they are.
 func (m *Manager) Revoke(ctx context.Context, user string, closeScreens func(string) int) error {
 	userLock := m.Locks.User(user)
 	userLock.Lock()
@@ -49,14 +53,37 @@ func (m *Manager) revoke(ctx context.Context, user string, closeScreens func(str
 	if serr := m.stop(ctx, user); serr != nil {
 		errs = append(errs, serr)
 	}
+	if m.DropToken != nil {
+		if derr := m.dropToken(ctx, user); derr != nil {
+			errs = append(errs, derr)
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// dropToken deletes user's token in 4CAT and then, only on success, the
+// token file and the token step's done mark.
+func (m *Manager) dropToken(ctx context.Context, user string) error {
+	if err := m.DropToken(ctx, user); err != nil {
+		return fmt.Errorf("delete %s's 4CAT token: %w", user, err)
+	}
+	if err := provision.RemoveToken(m.Cfg, user); err != nil {
+		return fmt.Errorf("remove %s's token file: %w", user, err)
+	}
+	if err := provision.MarkUndone(m.Cfg, user, "fourcat_apitoken"); err != nil {
+		return fmt.Errorf("mark %s token step undone: %w", user, err)
+	}
+	return nil
 }
 
 // RevokeAbsent revokes, from Reg.Rows() (Live cannot tell retired from
 // missing): every live row whose user is absent from present, and every
 // retired row whose user still has a running container (anyRunning) or whose
 // provision.json still marks registry done — a revoke cut short, or a row
-// retired by hand. Each is re-checked under the user lock before Revoke, so
+// retired by hand — or, with 4CAT enabled, still marks fourcat_apitoken done
+// while a non-empty present lacks the user (the token deletion failed). The
+// last sign needs the list's agreement: a re-added admin who opened 4CAT
+// before /desk/ has a retired row and a fresh token, and keeps it. Each is re-checked under the user lock before Revoke, so
 // a user re-added and reactivated since the selection keeps their pair. An
 // empty present selects no live row (ADR-0005: an empty list changes
 // nothing); retired rows are still finished. It returns the users whose
@@ -89,7 +116,10 @@ func (m *Manager) RevokeAbsent(ctx context.Context, present map[string]bool, clo
 					running = map[string]bool{}
 				}
 			}
-			if running[r.User] || provision.Load(m.Cfg, r.User).Steps["registry"] == "done" {
+			st := provision.Load(m.Cfg, r.User)
+			tokenLeft := m.DropToken != nil && !emptyList && !present[r.User] &&
+				st.Steps["fourcat_apitoken"] == "done"
+			if running[r.User] || st.Steps["registry"] == "done" || tokenLeft {
 				users = append(users, r.User)
 			}
 		}

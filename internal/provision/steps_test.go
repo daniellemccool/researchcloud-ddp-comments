@@ -566,3 +566,29 @@ func TestFourcatErrorsRecordedVerbatim(t *testing.T) {
 		t.Errorf("fourcat_account = %q, want %q…", got, "error: 4CAT unreachable: *url.Error")
 	}
 }
+
+// TestReturnAfterRevokeGetsNewToken: after a revoke removed the token file
+// and undid the step, the next Advance asks 4CAT for a token again.
+func TestReturnAfterRevokeGetsNewToken(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+		t.Fatalf("not ready: %v", st.Steps)
+	}
+	if err := RemoveToken(env.cfg, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkUndone(env.cfg, "alice", "fourcat_apitoken"); err != nil {
+		t.Fatal(err)
+	}
+	logins := env.loginCount()
+	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+		t.Fatalf("not ready after return: %v", st.Steps)
+	}
+	if got := env.loginCount() - logins; got != 1 {
+		t.Errorf("logins = %d, want 1 (a new token request)", got)
+	}
+	if got := readFile(t, filepath.Join(env.root, "secrets", "4cat-tokens", "alice", "4cat-token")); got != fakeToken("alice") {
+		t.Error("token file does not hold the new token")
+	}
+}

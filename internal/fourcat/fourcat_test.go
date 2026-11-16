@@ -674,3 +674,37 @@ func TestRequestTokenBadUsername(t *testing.T) {
 		t.Errorf("HTTP hits %d, execs %d; want none", hits, len(f.Execs))
 	}
 }
+
+func TestDeleteTokenSQL(t *testing.T) {
+	ctx := context.Background()
+	for _, out := range []string{"DELETE 1\n", "DELETE 0\n"} {
+		f := newFakeWith4CAT(t)
+		f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: out}
+		c := &Client{Docker: f, Backend: backendName, DB: dbName}
+		if err := c.DeleteToken(ctx, "alice"); err != nil {
+			t.Errorf("%q: DeleteToken error %v, want nil", out, err)
+		}
+		want := `DELETE FROM access_tokens WHERE name = 'alice'`
+		if len(f.Execs) != 1 || f.Execs[0].Container != dbName || f.Execs[0].Cmd[len(f.Execs[0].Cmd)-1] != want {
+			t.Errorf("execs = %v, want one psql with %q", f.Execs, want)
+		}
+	}
+	f := newFakeWith4CAT(t)
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 2}
+	c := &Client{Docker: f, Backend: backendName, DB: dbName}
+	if err := c.DeleteToken(ctx, "alice"); err == nil {
+		t.Error("a failing psql is not an error")
+	}
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: "ERROR\n"}
+	if err := c.DeleteToken(ctx, "alice"); err == nil {
+		t.Error("an answer other than DELETE 0 or DELETE 1 is not an error")
+	}
+	f2 := newFakeWith4CAT(t)
+	c2 := &Client{Docker: f2, Backend: backendName, DB: dbName}
+	if err := c2.DeleteToken(ctx, "a'b"); err == nil || !strings.Contains(err.Error(), "invalid username") {
+		t.Errorf("bad username: err = %v", err)
+	}
+	if len(f2.Execs) != 0 {
+		t.Error("exec ran for a bad username")
+	}
+}

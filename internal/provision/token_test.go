@@ -152,3 +152,19 @@ func TestPreparePasswordNeverLeavesEmptyFile(t *testing.T) {
 	}
 	assertNoPwTemp(t, dir)
 }
+
+func TestRemoveTokenMissingIsFine(t *testing.T) {
+	env := newTestEnv(t)
+	if err := RemoveToken(env.cfg, "alice"); err != nil {
+		t.Errorf("RemoveToken without a file: %v", err)
+	}
+	if err := WriteToken(env.cfg, "alice", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveToken(env.cfg, "alice"); err != nil {
+		t.Fatalf("RemoveToken: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(env.root, "secrets", "4cat-tokens", "alice", "4cat-token")); !os.IsNotExist(err) {
+		t.Errorf("token file still present (err = %v)", err)
+	}
+}

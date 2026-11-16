@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -334,4 +335,141 @@ func TestRevokeReloadNeverRestarts(t *testing.T) {
 		}
 	}
 	f.gone(t, "alice")
+}
+
+// tokenStepDone reports whether user's provision.json marks the token step done.
+func (f *fixture) tokenStepDone(user string) bool {
+	return provision.Load(f.cfg, user).Steps["fourcat_apitoken"] == "done"
+}
+
+// writeToken gives user a token file, as the token step would.
+func (f *fixture) writeToken(t *testing.T, user string) string {
+	t.Helper()
+	if err := provision.WriteToken(f.cfg, user, strings.Repeat("ab", 32)); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(f.cfg.DeskRoot, "secrets", "4cat-tokens", user, "4cat-token")
+}
+
+// TestRevokeDeletesTokenAfterStop: the token is deleted in 4CAT only after
+// retire, the registry step undone, the screens closed and the pair stopped;
+// then the token file goes and the token step is undone.
+func TestRevokeDeletesTokenAfterStop(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	tokenPath := f.writeToken(t, "alice")
+	sc := &screenCloser{}
+	drops := 0
+	f.m.DropToken = func(_ context.Context, user string) error {
+		drops++
+		if user != "alice" {
+			t.Errorf("DropToken(%q), want alice", user)
+		}
+		if got := f.rowStatus(t, user); got != "retired" {
+			t.Errorf("row at DropToken = %q, want retired", got)
+		}
+		if f.registryDone(user) {
+			t.Error("registry still done at DropToken")
+		}
+		if sc.count() < 1 {
+			t.Error("screens not closed before DropToken")
+		}
+		stopped := false
+		for _, c := range f.fake.Calls {
+			if c == "ContainerStop desk-firefox-alice" {
+				stopped = true
+			}
+		}
+		if !stopped {
+			t.Error("DropToken before the pair was stopped")
+		}
+		if _, err := os.Stat(tokenPath); err != nil {
+			t.Errorf("token file gone before the 4CAT deletion: %v", err)
+		}
+		return nil
+	}
+	if err := f.m.Revoke(context.Background(), "alice", sc.close); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if drops != 1 {
+		t.Errorf("DropToken called %d times, want 1", drops)
+	}
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Errorf("token file still present (err = %v)", err)
+	}
+	if f.tokenStepDone("alice") {
+		t.Error("fourcat_apitoken still done after the token was deleted")
+	}
+}
+
+// TestRevokeKeepsTokenStepWhenDeleteFails: a failed deletion in 4CAT keeps
+// the token file and the step done, the durable sign of an unfinished revoke.
+func TestRevokeKeepsTokenStepWhenDeleteFails(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	tokenPath := f.writeToken(t, "alice")
+	f.m.DropToken = func(context.Context, string) error { return errors.New("psql exited with status 2") }
+	err := f.m.Revoke(context.Background(), "alice", (&screenCloser{}).close)
+	if err == nil || !strings.Contains(err.Error(), "psql exited with status 2") {
+		t.Fatalf("Revoke error = %v, want the deletion's error joined", err)
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Errorf("token file removed although the deletion failed: %v", err)
+	}
+	if !f.tokenStepDone("alice") {
+		t.Error("fourcat_apitoken undone although the deletion failed")
+	}
+	f.gone(t, "alice") // the rest of the revoke still ran
+}
+
+// TestRevokeAbsentFinishesTokenDelete: a retired row with nothing running and
+// registry undone, but the token step still done, is selected by a good list
+// that lacks the user, and the deletion is finished; a list that holds the
+// user (re-added, fresh token from /fourcat/) never selects it.
+func TestRevokeAbsentFinishesTokenDelete(t *testing.T) {
+	f := newFixture(t, 4, "alice", "bob")
+	f.retire(t, "alice")
+	if err := provision.MarkUndone(f.cfg, "alice", "registry"); err != nil {
+		t.Fatal(err)
+	}
+	f.writeToken(t, "alice")
+	drops := 0
+	f.m.DropToken = func(context.Context, string) error { drops++; return nil }
+
+	// The user is in the list: not selected.
+	if got := f.m.RevokeAbsent(context.Background(), map[string]bool{"alice": true, "bob": true}, (&screenCloser{}).close); len(got) != 0 || drops != 0 {
+		t.Errorf("present user: RevokeAbsent = %v, drops %d; want none", got, drops)
+	}
+	// An empty list changes nothing either.
+	if got := f.m.RevokeAbsent(context.Background(), map[string]bool{}, (&screenCloser{}).close); len(got) != 0 || drops != 0 {
+		t.Errorf("empty list: RevokeAbsent = %v, drops %d; want none", got, drops)
+	}
+	// A good list without the user finishes the deletion.
+	got := f.m.RevokeAbsent(context.Background(), map[string]bool{"bob": true}, (&screenCloser{}).close)
+	if !reflect.DeepEqual(got, []string{"alice"}) || drops != 1 {
+		t.Errorf("RevokeAbsent = %v, drops %d; want [alice], 1", got, drops)
+	}
+	if f.tokenStepDone("alice") {
+		t.Error("fourcat_apitoken still done")
+	}
+	if got := f.m.RevokeAbsent(context.Background(), map[string]bool{"bob": true}, (&screenCloser{}).close); len(got) != 0 || drops != 1 {
+		t.Errorf("second poll: RevokeAbsent = %v, drops %d; want none", got, drops)
+	}
+}
+
+// TestRevokeWithoutFourcatSkipsToken: with DropToken nil (4CAT disabled) the
+// revoke leaves the token file and step alone, as before.
+func TestRevokeWithoutFourcatSkipsToken(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	f.runningPair(t, "alice", "tiktok-1.14.3")
+	tokenPath := f.writeToken(t, "alice")
+	if err := f.m.Revoke(context.Background(), "alice", (&screenCloser{}).close); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Errorf("token file removed with 4CAT disabled: %v", err)
+	}
+	if !f.tokenStepDone("alice") {
+		t.Error("fourcat_apitoken undone with 4CAT disabled")
+	}
 }

@@ -178,6 +178,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		SelfID: selfID,
 		Log:    logger,
 	}
+	if fc != nil {
+		// Revocation deletes the person's API token in 4CAT (ADR-0005).
+		mgr.DropToken = fc.DeleteToken
+	}
 
 	// Adopt the pairs that survived a desk restart; errors are logged, not
 	// fatal. The reconcile gets a 2-minute budget.

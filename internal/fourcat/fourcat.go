@@ -319,6 +319,24 @@ func (c *Client) RequestToken(ctx context.Context, user, password string) (strin
 	return token, nil
 }
 
+// DeleteToken deletes user's API token in 4CAT's access_tokens table, so the
+// token stops working at once (revocation, ADR-0005). "DELETE 1" and
+// "DELETE 0" (no token) are both success; anything else is an error.
+func (c *Client) DeleteToken(ctx context.Context, user string) error {
+	if err := checkUser(user); err != nil {
+		return err
+	}
+	out, err := c.psql(ctx, `DELETE FROM access_tokens WHERE name = '`+user+`'`)
+	if err != nil {
+		return err
+	}
+	switch lastLine(out) {
+	case "DELETE 0", "DELETE 1":
+		return nil
+	}
+	return fmt.Errorf("unexpected answer deleting the 4CAT token of %s", user)
+}
+
 // parseToken reads a token answer: a JSON object with a string "token", or a
 // bare JSON string; the value must match tokenRe.
 func parseToken(body []byte) (string, bool) {

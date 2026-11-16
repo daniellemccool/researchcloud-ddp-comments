@@ -2,6 +2,7 @@ package provision
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,4 +163,17 @@ func WriteToken(cfg *config.Config, user, token string) error {
 		return err
 	}
 	return writeFileAtomic(dir, "4cat-token", []byte(token), 0o600, 1000, 1000)
+}
+
+// RemoveToken removes the collector's token file; a missing file is success.
+// Revocation calls it only after the token was deleted in 4CAT (ADR-0005).
+func RemoveToken(cfg *config.Config, user string) error {
+	if !userRe.MatchString(user) {
+		return fmt.Errorf("invalid username: %q", user)
+	}
+	err := os.Remove(filepath.Join(cfg.DeskRoot, "secrets", "4cat-tokens", user, "4cat-token"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }

@@ -30,6 +30,9 @@ type Manager struct {
 	// true on 200.
 	Probe func(ctx context.Context, url string) bool
 	Log   *log.Logger // nil → log.Default()
+	// DropToken deletes a user's API token in 4CAT (fourcat.Client.DeleteToken);
+	// nil means 4CAT is disabled and revocation skips all token work.
+	DropToken func(ctx context.Context, user string) error
 
 	mu       sync.Mutex      // guards starting
 	starting map[string]bool // starts in flight, reserved under Locks.Global
