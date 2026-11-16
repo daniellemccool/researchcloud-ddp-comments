@@ -17,7 +17,7 @@ func TestStepsRunInOrderAndPersist(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	if !st.Ready() {
 		t.Fatalf("not ready: steps = %v", st.Steps)
 	}
@@ -88,7 +88,7 @@ func TestErrorStopsAndRetriesThatStep(t *testing.T) {
 	ctx := context.Background()
 	env.setFlags(false, true, false, false) // login refused
 
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	if st.Ready() {
 		t.Fatal("ready despite a refused login")
 	}
@@ -109,7 +109,7 @@ func TestErrorStopsAndRetriesThatStep(t *testing.T) {
 	}
 
 	env.setFlags(false, false, false, false) // login works now
-	st2 := env.prov.Advance(ctx, "alice", false)
+	st2 := env.prov.Advance(ctx, "alice")
 	if !st2.Ready() {
 		t.Fatalf("second Advance not ready: %v", st2.Steps)
 	}
@@ -146,7 +146,7 @@ func TestUnreadableStateStartsOver(t *testing.T) {
 
 	// A garbage file does not stop provisioning: every step is idempotent.
 	writeFile(t, path, "garbage again")
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("Advance after garbage state not ready: %v", st.Steps)
 	}
 }
@@ -156,10 +156,10 @@ func TestRegistryFullText(t *testing.T) {
 	ctx := context.Background()
 	env.reg.MaxSessions = 1
 
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("alice not ready: %v", st.Steps)
 	}
-	st := env.prov.Advance(ctx, "bob", false)
+	st := env.prov.Advance(ctx, "bob")
 	if st.Ready() {
 		t.Fatal("bob ready with a full registry")
 	}
@@ -179,7 +179,7 @@ func TestFourcatSetupPending(t *testing.T) {
 	ctx := context.Background()
 	env.setFlags(true, false, false, false) // setup page still served
 
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	want := "error: " + fourcat.ErrSetupPending.Error()
 	if got := st.Steps["fourcat_account"]; got != want {
 		t.Errorf("fourcat_account = %q, want %q", got, want)
@@ -189,7 +189,7 @@ func TestFourcatSetupPending(t *testing.T) {
 	}
 
 	env.setFlags(false, false, false, false) // an admin completed setup
-	st2 := env.prov.Advance(ctx, "alice", false)
+	st2 := env.prov.Advance(ctx, "alice")
 	if !st2.Ready() {
 		t.Fatalf("second Advance not ready: %v", st2.Steps)
 	}
@@ -203,7 +203,7 @@ func TestNeedsAdoptRemovesFreshPassword(t *testing.T) {
 	ctx := context.Background()
 	env.setFlags(false, false, false, true) // account already exists, no password file
 
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	want := "error: " + fourcat.ErrNeedsAdopt.Error()
 	if got := st.Steps["fourcat_account"]; got != want {
 		t.Errorf("fourcat_account = %q, want %q", got, want)
@@ -229,7 +229,7 @@ func TestCrashedPasswordStepStillNeedsAdopt(t *testing.T) {
 	writeFile(t, pendingPasswordPath(env.cfg, "alice"), "left-by-a-crash")
 	env.setFlags(false, false, false, true) // the account exists
 
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	want := "error: " + fourcat.ErrNeedsAdopt.Error()
 	if got := st.Steps["fourcat_account"]; got != want {
 		t.Errorf("fourcat_account = %q, want %q", got, want)
@@ -268,7 +268,7 @@ func TestPasswordCommittedBeforeCreate(t *testing.T) {
 			}
 		}
 	}
-	st := env.prov.Advance(context.Background(), "alice", false)
+	st := env.prov.Advance(context.Background(), "alice")
 	if !st.Ready() {
 		t.Fatalf("not ready: %v", st.Steps)
 	}
@@ -293,7 +293,7 @@ func TestCommittedPasswordWithoutAccountCreatesIt(t *testing.T) {
 			}
 		}
 	}
-	st := env.prov.Advance(context.Background(), "alice", false)
+	st := env.prov.Advance(context.Background(), "alice")
 	if got := st.Steps["fourcat_account"]; got != "done" {
 		t.Fatalf("fourcat_account = %q, want done", got)
 	}
@@ -307,7 +307,7 @@ func TestCommittedPasswordWithoutAccountCreatesIt(t *testing.T) {
 func TestAccountCheckFailureDiscardsPending(t *testing.T) {
 	env := newTestEnv(t)
 	env.setPsqlExit(1)
-	st := env.prov.Advance(context.Background(), "alice", false)
+	st := env.prov.Advance(context.Background(), "alice")
 	if got := st.Steps["fourcat_account"]; !strings.HasPrefix(got, "error: ") {
 		t.Fatalf("fourcat_account = %q, want an error", got)
 	}
@@ -319,62 +319,34 @@ func TestAccountCheckFailureDiscardsPending(t *testing.T) {
 	}
 }
 
-func TestAdminTagFollowsRole(t *testing.T) {
-	for _, admin := range []bool{true, false} {
-		t.Run(fmtBool(admin), func(t *testing.T) {
-			env := newTestEnv(t)
-			st := env.prov.Advance(context.Background(), "alice", admin)
-			if !st.Ready() {
-				t.Fatalf("not ready: %v", st.Steps)
-			}
-			var create []string
-			for _, call := range env.fake.Execs {
-				if len(call.Cmd) > 0 && call.Cmd[0] == "python3" {
-					create = call.Cmd
-				}
-			}
-			if len(create) == 0 {
-				t.Fatal("no create_user.py exec recorded")
-			}
-			hasFlag := false
-			for _, a := range create {
-				if a == "-a" {
-					hasFlag = true
-				}
-			}
-			if hasFlag != admin {
-				t.Errorf("create argv %v: -a present = %v, want %v", create, hasFlag, admin)
-			}
-			var update string
-			for _, sql := range env.sqlLog() {
-				if strings.HasPrefix(sql, "UPDATE users SET tags") {
-					update = sql
-				}
-			}
-			if update == "" {
-				t.Fatal("no admin-tag UPDATE recorded")
-			}
-			wantUpdate := `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) WHERE name = 'alice'`
-			if admin {
-				wantUpdate = `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) || '["admin"]'::jsonb WHERE name = 'alice'`
-			}
-			if update != wantUpdate {
-				t.Errorf("admin-tag UPDATE = %q, want exactly %q", update, wantUpdate)
-			}
-		})
+// TestAccountStepWritesNoTags: provisioning creates the account without -a
+// and runs no SQL that touches tags; standing comes per request from the
+// desk's proxy.
+func TestAccountStepWritesNoTags(t *testing.T) {
+	env := newTestEnv(t)
+	if st := env.prov.Advance(context.Background(), "alice"); !st.Ready() {
+		t.Fatalf("not ready: %v", st.Steps)
 	}
-}
-
-func fmtBool(b bool) string {
-	if b {
-		return "admin"
+	for _, call := range env.fake.Execs {
+		for _, a := range call.Cmd {
+			if a == "-a" {
+				t.Errorf("an exec passed -a: %q", call.Cmd)
+			}
+		}
 	}
-	return "collector"
+	for _, sql := range env.sqlLog() {
+		if strings.Contains(sql, "tags") {
+			t.Errorf("SQL touching tags ran: %q", sql)
+		}
+	}
+	if n := env.creates(); n != 1 {
+		t.Errorf("create_user.py execs = %d, want 1", n)
+	}
 }
 
 func TestTokenFileModes(t *testing.T) {
 	env := newTestEnv(t)
-	if st := env.prov.Advance(context.Background(), "alice", false); !st.Ready() {
+	if st := env.prov.Advance(context.Background(), "alice"); !st.Ready() {
 		t.Fatalf("not ready: %v", st.Steps)
 	}
 	tokenDir := filepath.Join(env.root, "secrets", "4cat-tokens", "alice")
@@ -421,7 +393,7 @@ func TestAdvanceConcurrentSameUser(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i] = env.prov.Advance(ctx, "alice", false)
+			results[i] = env.prov.Advance(ctx, "alice")
 		}(i)
 	}
 	wg.Wait()
@@ -448,7 +420,7 @@ func TestAdvanceConcurrentSameUser(t *testing.T) {
 func TestOldTokenStepRunsAgainUnderNewName(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("not ready: %v", st.Steps)
 	}
 	// Rewrite the step file and the token file as the old release left them.
@@ -469,7 +441,7 @@ func TestOldTokenStepRunsAgainUnderNewName(t *testing.T) {
 	}
 	logins := env.loginCount()
 
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	if !st.Ready() {
 		t.Fatalf("not ready after the rename: %v", st.Steps)
 	}
@@ -493,7 +465,7 @@ func TestOldTokenStepRunsAgainUnderNewName(t *testing.T) {
 func TestTokenRequestRefusedLeavesNoFile(t *testing.T) {
 	env := newTestEnv(t)
 	env.refuseToken = true
-	st := env.prov.Advance(context.Background(), "alice", false)
+	st := env.prov.Advance(context.Background(), "alice")
 	if got := st.Steps["fourcat_apitoken"]; got != "error: token request refused for alice" {
 		t.Errorf("fourcat_apitoken = %q, want the refusal", got)
 	}
@@ -506,7 +478,7 @@ func TestFourcatDisabledSkipsSteps(t *testing.T) {
 	env := newTestEnv(t)
 	env.prov.Fourcat = nil
 
-	st := env.prov.Advance(context.Background(), "alice", false)
+	st := env.prov.Advance(context.Background(), "alice")
 	if !st.Ready() {
 		t.Fatalf("not ready: %v", st.Steps)
 	}
@@ -536,7 +508,7 @@ func TestUnknownErrorRecordsTypeOnly(t *testing.T) {
 	// field carries a secret-looking string.
 	env := newTestEnv(t)
 	writeFile(t, env.reg.Path, "alice\tsecret-hunter2\n")
-	st := env.prov.Advance(context.Background(), "alice", false)
+	st := env.prov.Advance(context.Background(), "alice")
 	if got := st.Steps["registry"]; got != "error: *fmt.wrapError" {
 		t.Errorf("registry step = %q, want %q (type name only)", got, "error: *fmt.wrapError")
 	}
@@ -552,7 +524,7 @@ func TestFourcatErrorsRecordedVerbatim(t *testing.T) {
 	// psql exits 3: fourcat's own error text is recorded verbatim (F68).
 	env := newTestEnv(t)
 	env.setPsqlExit(3)
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	if got := st.Steps["fourcat_account"]; got != "error: psql exited with status 3" {
 		t.Errorf("fourcat_account = %q, want %q", got, "error: psql exited with status 3")
 	}
@@ -560,7 +532,7 @@ func TestFourcatErrorsRecordedVerbatim(t *testing.T) {
 	// Frontend unreachable: "4CAT unreachable: <type>" verbatim.
 	env2 := newTestEnv(t)
 	env2.prov.Fourcat.FrontendURL = closedURL(t)
-	st2 := env2.prov.Advance(ctx, "alice", false)
+	st2 := env2.prov.Advance(ctx, "alice")
 	got := st2.Steps["fourcat_account"]
 	if !strings.HasPrefix(got, "error: 4CAT unreachable: ") || !strings.Contains(got, "*url.Error") {
 		t.Errorf("fourcat_account = %q, want %q…", got, "error: 4CAT unreachable: *url.Error")
@@ -572,7 +544,7 @@ func TestFourcatErrorsRecordedVerbatim(t *testing.T) {
 func TestReturnAfterRevokeGetsNewToken(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("not ready: %v", st.Steps)
 	}
 	if err := RemoveToken(env.cfg, "alice"); err != nil {
@@ -582,7 +554,7 @@ func TestReturnAfterRevokeGetsNewToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	logins := env.loginCount()
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("not ready after return: %v", st.Steps)
 	}
 	if got := env.loginCount() - logins; got != 1 {

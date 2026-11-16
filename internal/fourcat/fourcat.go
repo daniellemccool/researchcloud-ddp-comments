@@ -1,10 +1,10 @@
 // Package fourcat provisions and queries the per-collector accounts of the
-// bundled 4CAT: it creates accounts by running 4CAT's own helper script
-// inside the backend container, tags admins by updating the users table
-// through psql in the database container, detects whether an admin has
-// completed 4CAT's first-run setup, and obtains a collector's API token by
-// logging in and asking 4CAT's own token route over the compose network
-// (ADR-0009). All
+// bundled 4CAT: it creates accounts by running 4CAT's own helper script in
+// the backend container, asserts the study's settings and removes the admin
+// tag it once wrote through psql in the database container (deleting 4CAT's
+// memcached keys after), detects whether an admin has completed 4CAT's
+// first-run setup, and obtains a collector's API token by logging in and
+// asking 4CAT's own token route over the compose network (ADR-0009). All
 // container access goes through internal/docker; the only HTTP client is the
 // one on Client, which never follows redirects.
 package fourcat
@@ -51,17 +51,18 @@ func (e *LoginError) Error() string {
 	return "login refused for " + e.User
 }
 
-// Client talks to the bundled 4CAT. Backend and DB are container names or
-// ids; when empty they are looked up lazily via FindContainers on first use.
+// Client talks to the bundled 4CAT. Backend, DB and Memcached are container
+// names or ids; when empty they are looked up lazily by their compose labels
+// on first use.
 // FrontendURL is "http://4cat-frontend:5000" in production. A nil HTTP
 // client means one with a 15 s timeout that never follows redirects.
 type Client struct {
-	Docker      docker.Client
-	Backend, DB string
-	FrontendURL string
-	HTTP        *http.Client
+	Docker                 docker.Client
+	Backend, DB, Memcached string
+	FrontendURL            string
+	HTTP                   *http.Client
 
-	mu          sync.Mutex   // guards Backend, DB and defaultHTTP
+	mu          sync.Mutex   // guards Backend, DB, Memcached and defaultHTTP
 	defaultHTTP *http.Client // the nil-HTTP client, built once
 }
 
@@ -176,8 +177,10 @@ func (c *Client) AccountExists(ctx context.Context, user string) (bool, error) {
 }
 
 // CreateAccount creates the 4CAT account user with password by running
-// 4CAT's own create_user.py helper in the backend container (-a when admin).
-func (c *Client) CreateAccount(ctx context.Context, user, password string, admin bool) error {
+// 4CAT's own create_user.py helper in the backend container. It never passes
+// -a: standing in 4CAT comes per request from the desk's proxy, and the desk
+// writes no tag.
+func (c *Client) CreateAccount(ctx context.Context, user, password string) error {
 	if err := checkUser(user); err != nil {
 		return err
 	}
@@ -185,38 +188,9 @@ func (c *Client) CreateAccount(ctx context.Context, user, password string, admin
 	if err != nil {
 		return err
 	}
-	cmd := []string{"python3", "helper-scripts/create_user.py", "-u", user, "-e", "-p", password}
-	if admin {
-		cmd = append(cmd, "-a")
-	}
-	_, err = c.exec(ctx, backend, "create_user.py", cmd...)
+	_, err = c.exec(ctx, backend, "create_user.py",
+		"python3", "helper-scripts/create_user.py", "-u", user, "-e", "-p", password)
 	return err
-}
-
-// SetAdmin adds or removes the "admin" tag of user's account by updating the
-// users table through psql. The CASE normalises tags to an array first:
-// 4CAT v1.57's create_user.py -a stores tags as the jsonb string
-// "[\"admin\"]" (a scalar), and `tags - 'admin'` on a scalar fails. Success
-// requires the last non-empty stdout line to be "UPDATE 1"; anything else
-// means no such account.
-func (c *Client) SetAdmin(ctx context.Context, user string, admin bool) error {
-	if err := checkUser(user); err != nil {
-		return err
-	}
-	var sql string
-	if admin {
-		sql = `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) || '["admin"]'::jsonb WHERE name = '` + user + `'`
-	} else {
-		sql = `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) WHERE name = '` + user + `'`
-	}
-	out, err := c.psql(ctx, sql)
-	if err != nil {
-		return err
-	}
-	if lastLine(out) != "UPDATE 1" {
-		return fmt.Errorf("no 4CAT account for %s", user)
-	}
-	return nil
 }
 
 // lastLine returns the last non-empty line of psql's output, trimmed: the

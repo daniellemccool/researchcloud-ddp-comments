@@ -106,3 +106,18 @@ func (c *Client) db(ctx context.Context) (string, error) {
 	}
 	return c.DB, nil
 }
+
+// memcached returns the name of 4CAT's memcached container, looked up by its
+// compose labels on first use and kept on the client, under c.mu.
+func (c *Client) memcached(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Memcached == "" {
+		name, err := findOne(ctx, c.Docker, "4cat-memcached")
+		if err != nil {
+			return "", err
+		}
+		c.Memcached = name
+	}
+	return c.Memcached, nil
+}

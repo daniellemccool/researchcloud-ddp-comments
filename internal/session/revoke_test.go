@@ -285,7 +285,7 @@ func TestQueuedAdvanceCannotReactivate(t *testing.T) {
 		if n != 1 {
 			return
 		}
-		go func() { result <- prov.Advance(context.Background(), user, false) }()
+		go func() { result <- prov.Advance(context.Background(), user) }()
 		time.Sleep(50 * time.Millisecond) // let it block on the user lock
 	}}
 	if err := f.m.Revoke(context.Background(), "alice", sc.close); err != nil {

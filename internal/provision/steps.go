@@ -48,7 +48,7 @@ func (p *Provisioner) now() time.Time {
 // lock (the global lock is taken inside the registry step only), and returns
 // the state after the run. It stops at the first failing step, records the
 // error in the step file and returns; the next call retries that step.
-func (p *Provisioner) Advance(ctx context.Context, user string, admin bool) State {
+func (p *Provisioner) Advance(ctx context.Context, user string) State {
 	if !userRe.MatchString(user) {
 		return State{Steps: map[string]string{Steps[0]: "error: invalid username"}}
 	}
@@ -67,7 +67,7 @@ func (p *Provisioner) Advance(ctx context.Context, user string, admin bool) Stat
 		if st.Steps[step] == "done" {
 			continue
 		}
-		if err := p.runStep(ctx, step, user, admin); err != nil {
+		if err := p.runStep(ctx, step, user); err != nil {
 			st.Steps[step] = "error: " + describe(err)
 			_ = p.save(user, &st) // best effort: the in-memory state is returned either way
 			return st
@@ -87,7 +87,7 @@ func (p *Provisioner) Advance(ctx context.Context, user string, admin bool) Stat
 	return st
 }
 
-func (p *Provisioner) runStep(ctx context.Context, step, user string, admin bool) error {
+func (p *Provisioner) runStep(ctx context.Context, step, user string) error {
 	switch step {
 	case "registry":
 		return p.stepRegistry(user)
@@ -96,7 +96,7 @@ func (p *Provisioner) runStep(ctx context.Context, step, user string, admin bool
 	case "template":
 		return p.stepTemplate(user)
 	case "fourcat_account":
-		return p.stepFourcatAccount(ctx, user, admin)
+		return p.stepFourcatAccount(ctx, user)
 	case "fourcat_apitoken":
 		return p.stepFourcatAPIToken(ctx, user)
 	case "render":
@@ -187,10 +187,11 @@ func (p *Provisioner) stepTemplate(user string) error {
 	return nil
 }
 
-// stepFourcatAccount creates the collector's own 4CAT account (admins
-// tagged), or stops with ErrNeedsAdopt when the account already exists but
-// the desk holds no password for it. Skipped when 4CAT is disabled.
-func (p *Provisioner) stepFourcatAccount(ctx context.Context, user string, admin bool) error {
+// stepFourcatAccount creates the person's own 4CAT account (never tagged:
+// standing comes per request), or stops with ErrNeedsAdopt when the account
+// already exists but the desk holds no password for it. Skipped when 4CAT is
+// disabled.
+func (p *Provisioner) stepFourcatAccount(ctx context.Context, user string) error {
 	if p.Fourcat == nil {
 		return nil
 	}
@@ -226,12 +227,9 @@ func (p *Provisioner) stepFourcatAccount(ctx context.Context, user string, admin
 		}
 	}
 	if !exists {
-		if err := p.Fourcat.CreateAccount(ctx, user, pw, admin); err != nil {
+		if err := p.Fourcat.CreateAccount(ctx, user, pw); err != nil {
 			return &fourcatError{err}
 		}
-	}
-	if err := p.Fourcat.SetAdmin(ctx, user, admin); err != nil {
-		return &fourcatError{err}
 	}
 	return nil
 }

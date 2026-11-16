@@ -261,6 +261,23 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		log:          dlog,
 		logf:         mgr.Log.Printf,
 	}).run(serveCtx, time.Minute)
+	// With 4CAT enabled the desk asserts its study settings in 4CAT and
+	// removes the admin tag from the accounts it made: now, or once 4CAT's
+	// first-run setup is complete, retrying every minute until it succeeds.
+	var study *fourcat.Study
+	if fc != nil {
+		study = &fourcat.Study{
+			Client:     fc,
+			SecretPath: filepath.Join(cfg.DeskRoot, "secrets", "4cat-proxy-secret"),
+			OncePath:   filepath.Join(cfg.DeskRoot, "state", "fourcat-settings-once"),
+			Sources:    p.ZeeschuimerModules,
+			MadeAccounts: func() ([]string, error) {
+				return provision.MadeAccounts(cfg)
+			},
+			Logf: mgr.Log.Printf,
+		}
+		go study.Run(serveCtx, time.Minute)
+	}
 
 	deps.Admin = web.NewAdmin(deps)
 	gated := web.New(deps)

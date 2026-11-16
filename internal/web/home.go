@@ -71,15 +71,15 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 			// 4CAT's first-run setup is pending: kick provisioning again so
 			// the first visit after an admin completes the setup resumes it
 			// (ruling F73), and still answer the not-ready message.
-			h.kick(user, id.Admin)
+			h.kick(user)
 			h.say(w, http.StatusServiceUnavailable, notReady, 0)
 		case errText != "":
 			// A failed step is retried on the next visit (ruling F79): kick
 			// and refresh like the provisioning branch; the text is unchanged.
-			h.kick(user, id.Admin)
+			h.kick(user)
 			h.say(w, http.StatusOK, "Setup failed at "+st.Current()+"; ask "+contact+".", 3)
 		default:
-			h.kick(user, id.Admin)
+			h.kick(user)
 			h.say(w, http.StatusOK, "Setting up your desk — "+st.Current(), 3)
 		}
 		return
@@ -122,7 +122,7 @@ const defaultAdvanceTimeout = 2 * time.Minute
 // kick runs Prov.Advance in a goroutine unless one is already running for
 // user. The goroutine's context is not cancelled by the
 // request; it carries its own deadline, defaultAdvanceTimeout.
-func (h *handler) kick(user string, admin bool) {
+func (h *handler) kick(user string) {
 	if _, loaded := h.provisioning.LoadOrStore(user, true); loaded {
 		return
 	}
@@ -134,7 +134,7 @@ func (h *handler) kick(user string, admin bool) {
 		defer h.provisioning.Delete(user)
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		_ = h.prov.Advance(ctx, user, admin)
+		_ = h.prov.Advance(ctx, user)
 	}()
 }
 

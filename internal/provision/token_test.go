@@ -168,3 +168,26 @@ func TestRemoveTokenMissingIsFine(t *testing.T) {
 		t.Errorf("token file still present (err = %v)", err)
 	}
 }
+
+// TestMadeAccounts: the users with a final password file, sorted; pending
+// and temp files and names that are not usernames are not listed.
+func TestMadeAccounts(t *testing.T) {
+	env := newTestEnv(t)
+	if got, err := MadeAccounts(env.cfg); err != nil || len(got) != 0 {
+		t.Errorf("no password dir: %v, %v; want none, nil", got, err)
+	}
+	dir := filepath.Dir(PasswordPath(env.cfg, "x"))
+	for _, name := range []string{"bob", "alice", ".pending-carol", ".pw-123", "Not.A.User", "dave.d"} {
+		writeFile(t, filepath.Join(dir, name), "pw")
+	}
+	if err := os.Mkdir(filepath.Join(dir, "erin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := MadeAccounts(env.cfg)
+	if err != nil {
+		t.Fatalf("MadeAccounts: %v", err)
+	}
+	if strings.Join(got, ",") != "alice,bob,dave.d" {
+		t.Errorf("MadeAccounts = %q, want alice,bob,dave.d", got)
+	}
+}

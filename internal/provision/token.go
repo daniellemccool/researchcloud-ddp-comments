@@ -177,3 +177,24 @@ func RemoveToken(cfg *config.Config, user string) error {
 	}
 	return nil
 }
+
+// MadeAccounts returns, sorted, the users whose 4CAT account the desk made:
+// those with a final password file under secrets/4cat-passwords. Pending and
+// temp files, directories and names that are not usernames are skipped; a
+// missing directory means none.
+func MadeAccounts(cfg *config.Config) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(cfg.DeskRoot, "secrets", "4cat-passwords"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var users []string
+	for _, e := range entries {
+		if e.Type().IsRegular() && userRe.MatchString(e.Name()) {
+			users = append(users, e.Name())
+		}
+	}
+	return users, nil
+}

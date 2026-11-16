@@ -31,7 +31,7 @@ const (
 // provisioner is what the home handler needs of *provision.Provisioner
 // (controller ruling F54: small interfaces, so tests can use fakes).
 type provisioner interface {
-	Advance(ctx context.Context, user string, admin bool) provision.State
+	Advance(ctx context.Context, user string) provision.State
 }
 
 // sessions is what the routes need of *session.Manager.

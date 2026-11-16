@@ -10,7 +10,7 @@ import (
 func TestTemplateIdempotent(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	if !st.Ready() {
 		t.Fatalf("not ready: %v", st.Steps)
 	}
@@ -36,7 +36,7 @@ func TestTemplateIdempotent(t *testing.T) {
 	stale := filepath.Join(env.root, "state", "firefox", "alice", ".template.tmp")
 	writeFile(t, filepath.Join(stale, "junk"), "junk")
 
-	st = env.prov.Advance(ctx, "alice", false)
+	st = env.prov.Advance(ctx, "alice")
 	if !st.Ready() {
 		t.Fatalf("second Advance not ready: %v", st.Steps)
 	}
@@ -57,7 +57,7 @@ func TestTemplateMissing(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(env.root, "templates", "release", generation)); err != nil {
 		t.Fatal(err)
 	}
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	if st.Ready() {
 		t.Fatal("ready without a release template")
 	}
@@ -76,7 +76,7 @@ func TestTemplateMissing(t *testing.T) {
 	if err := os.Remove(filepath.Join(env2.root, "templates", "release", generation, "prefs.js")); err != nil {
 		t.Fatal(err)
 	}
-	st2 := env2.prov.Advance(ctx, "alice", false)
+	st2 := env2.prov.Advance(ctx, "alice")
 	if st2.Ready() {
 		t.Fatal("ready from a release directory without prefs.js")
 	}
@@ -88,7 +88,7 @@ func TestTemplateMissing(t *testing.T) {
 func TestHideMediaCSS(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("not ready: %v", st.Steps)
 	}
 	css := filepath.Join(env.root, "state", "firefox", "alice", "profile", "chrome", "userContent.css")
@@ -104,7 +104,7 @@ func TestHideMediaCSS(t *testing.T) {
 	if err := os.Remove(StatePath(env.cfg, "alice")); err != nil {
 		t.Fatal(err)
 	}
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("second Advance not ready: %v", st.Steps)
 	}
 	if _, err := os.Stat(css); !os.IsNotExist(err) {
@@ -118,7 +118,7 @@ func TestHideMediaCSSMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st := env.prov.Advance(context.Background(), "alice", false)
+	st := env.prov.Advance(context.Background(), "alice")
 	want := "error: hide-media stylesheet missing: platform/userContent.css"
 	if got := st.Steps["template"]; got != want {
 		t.Errorf("template step = %q, want %q", got, want)

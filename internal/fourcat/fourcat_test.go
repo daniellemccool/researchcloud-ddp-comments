@@ -237,14 +237,11 @@ func TestCreateAccountCommand(t *testing.T) {
 	f := newFakeWith4CAT(t)
 	c := &Client{Docker: f, Backend: backendName, DB: dbName}
 
-	if err := c.CreateAccount(ctx, "alice", "s3cret", false); err != nil {
+	if err := c.CreateAccount(ctx, "alice", "s3cret"); err != nil {
 		t.Fatalf("CreateAccount(alice) error: %v", err)
 	}
-	if err := c.CreateAccount(ctx, "bob", "s3cret", true); err != nil {
-		t.Fatalf("CreateAccount(bob, admin) error: %v", err)
-	}
-	if len(f.Execs) != 2 {
-		t.Fatalf("len(Execs) = %d; want 2", len(f.Execs))
+	if len(f.Execs) != 1 {
+		t.Fatalf("len(Execs) = %d; want 1", len(f.Execs))
 	}
 	plain := f.Execs[0]
 	if plain.Container != backendName {
@@ -254,59 +251,11 @@ func TestCreateAccountCommand(t *testing.T) {
 	if strings.Join(plain.Cmd, "\x00") != strings.Join(wantPlain, "\x00") {
 		t.Errorf("CreateAccount argv = %q; want %q (no -a)", plain.Cmd, wantPlain)
 	}
-	admin := f.Execs[1]
-	wantAdmin := []string{"python3", "helper-scripts/create_user.py", "-u", "bob", "-e", "-p", "s3cret", "-a"}
-	if strings.Join(admin.Cmd, "\x00") != strings.Join(wantAdmin, "\x00") {
-		t.Errorf("CreateAccount(admin) argv = %q; want %q (with -a)", admin.Cmd, wantAdmin)
-	}
 
 	f.ExecResults["python3 helper-scripts/create_user.py"] = docker.Exec{ExitCode: 1, Stderr: "boom"}
-	err := c.CreateAccount(ctx, "alice", "s3cret", false)
+	err := c.CreateAccount(ctx, "alice", "s3cret")
 	if err == nil || err.Error() != "create_user.py exited with status 1" {
 		t.Errorf("CreateAccount(exit 1) error = %v; want \"create_user.py exited with status 1\"", err)
-	}
-}
-
-func TestSetAdminSQL(t *testing.T) {
-	ctx := context.Background()
-	f := newFakeWith4CAT(t)
-	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: "UPDATE 1\n"}
-	c := &Client{Docker: f, Backend: backendName, DB: dbName}
-
-	if err := c.SetAdmin(ctx, "alice", true); err != nil {
-		t.Fatalf("SetAdmin(true) error: %v", err)
-	}
-	if err := c.SetAdmin(ctx, "alice", false); err != nil {
-		t.Fatalf("SetAdmin(false) error: %v", err)
-	}
-	if len(f.Execs) != 2 {
-		t.Fatalf("len(Execs) = %d; want 2", len(f.Execs))
-	}
-	// v1.57's create_user.py -a stores tags as the jsonb string "[\"admin\"]"
-	// (a scalar), so the CASE normalises a non-array to '[]' before the
-	// delete/|| (F81).
-	wantTrue := `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) || '["admin"]'::jsonb WHERE name = 'alice'`
-	wantFalse := `UPDATE users SET tags = (CASE WHEN jsonb_typeof(tags) = 'array' THEN tags - 'admin' ELSE '[]'::jsonb END) WHERE name = 'alice'`
-	for i, want := range []string{wantTrue, wantFalse} {
-		call := f.Execs[i]
-		if call.Container != dbName {
-			t.Errorf("SetAdmin exec container = %q; want %q", call.Container, dbName)
-		}
-		if len(call.Cmd) != 9 || call.Cmd[8] != want {
-			t.Errorf("SetAdmin argv = %q; want psql argv with SQL %q", call.Cmd, want)
-		}
-	}
-}
-
-func TestSetAdminNoAccount(t *testing.T) {
-	ctx := context.Background()
-	f := newFakeWith4CAT(t)
-	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: "UPDATE 0\n"}
-	c := &Client{Docker: f, Backend: backendName, DB: dbName}
-
-	err := c.SetAdmin(ctx, "alice", true)
-	if err == nil || err.Error() != "no 4CAT account for alice" {
-		t.Errorf("SetAdmin(UPDATE 0) error = %v; want \"no 4CAT account for alice\"", err)
 	}
 }
 
@@ -421,7 +370,7 @@ func TestLazyLookup(t *testing.T) {
 	if c.Backend != backendName || c.DB != dbName {
 		t.Errorf("after lazy lookup Backend, DB = %q, %q; want %q, %q", c.Backend, c.DB, backendName, dbName)
 	}
-	if err := c.CreateAccount(ctx, "alice", "s3cret", false); err != nil {
+	if err := c.CreateAccount(ctx, "alice", "s3cret"); err != nil {
 		t.Errorf("CreateAccount(lazy) error: %v", err)
 	}
 	if len(f.Execs) != 2 {
@@ -438,8 +387,8 @@ func TestLazyLookup(t *testing.T) {
 	c = &Client{Docker: empty}
 	for name, call := range map[string]func() error{
 		"AccountExists": func() error { _, err := c.AccountExists(ctx, "alice"); return err },
-		"CreateAccount": func() error { return c.CreateAccount(ctx, "alice", "s3cret", false) },
-		"SetAdmin":      func() error { return c.SetAdmin(ctx, "alice", true) },
+		"CreateAccount": func() error { return c.CreateAccount(ctx, "alice", "s3cret") },
+		"ClearAdmin":    func() error { return c.ClearAdmin(ctx, "alice") },
 	} {
 		err := call()
 		if err == nil || err.Error() != "4CAT containers not found" {
@@ -500,11 +449,11 @@ func TestBadUsernameRefusedBeforeSQL(t *testing.T) {
 		if _, err := c.AccountExists(ctx, user); err == nil || !strings.Contains(err.Error(), "invalid username") {
 			t.Errorf("AccountExists(%q) error = %v; want invalid username", user, err)
 		}
-		if err := c.CreateAccount(ctx, user, "pw", false); err == nil || !strings.Contains(err.Error(), "invalid username") {
+		if err := c.CreateAccount(ctx, user, "pw"); err == nil || !strings.Contains(err.Error(), "invalid username") {
 			t.Errorf("CreateAccount(%q) error = %v; want invalid username", user, err)
 		}
-		if err := c.SetAdmin(ctx, user, true); err == nil || !strings.Contains(err.Error(), "invalid username") {
-			t.Errorf("SetAdmin(%q) error = %v; want invalid username", user, err)
+		if err := c.ClearAdmin(ctx, user); err == nil || !strings.Contains(err.Error(), "invalid username") {
+			t.Errorf("ClearAdmin(%q) error = %v; want invalid username", user, err)
 		}
 		if _, err := c.LoginToken(ctx, user, "pw"); err == nil || !strings.Contains(err.Error(), "invalid username") {
 			t.Errorf("LoginToken(%q) error = %v; want invalid username", user, err)

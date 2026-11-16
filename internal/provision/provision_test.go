@@ -50,7 +50,8 @@ type testEnv struct {
 }
 
 // fourcatDocker wraps the Fake so psql answers come from the env's scenario
-// (account exists or not, UPDATE 1) instead of one shared ExecResults key.
+// (account exists or not, the token expiry UPDATE 1) instead of one shared
+// ExecResults key.
 type fourcatDocker struct {
 	*docker.Fake
 	env *testEnv
@@ -73,8 +74,7 @@ func (d *fourcatDocker) Exec(ctx context.Context, container string, cmd []string
 				return docker.Exec{ExitCode: 0, Stdout: "1\n"}, nil
 			}
 			return docker.Exec{ExitCode: 0, Stdout: ""}, nil
-		case strings.HasPrefix(sql, "UPDATE users SET tags"),
-			strings.HasPrefix(sql, "UPDATE access_tokens SET expires = 0"):
+		case strings.HasPrefix(sql, "UPDATE access_tokens SET expires = 0"):
 			return docker.Exec{ExitCode: 0, Stdout: "UPDATE 1\n"}, nil
 		}
 	}
@@ -310,7 +310,7 @@ func (a absentMembers) Absent(user string) bool { return a[user] }
 func TestMarkUndone(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("alice not ready: %v", st.Steps)
 	}
 	if err := MarkUndone(env.cfg, "alice", "registry"); err != nil {
@@ -354,10 +354,10 @@ func TestMarkUndone(t *testing.T) {
 func TestReactivateAfterReaddKeepsIndex(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	if st := env.prov.Advance(ctx, "carol", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "carol"); !st.Ready() {
 		t.Fatalf("carol not ready: %v", st.Steps)
 	}
-	if st := env.prov.Advance(ctx, "alice", false); !st.Ready() {
+	if st := env.prov.Advance(ctx, "alice"); !st.Ready() {
 		t.Fatalf("alice not ready: %v", st.Steps)
 	}
 	before, err := env.reg.Live()
@@ -372,7 +372,7 @@ func TestReactivateAfterReaddKeepsIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.prov.Members = absentMembers{} // alice is on the list again
-	st := env.prov.Advance(ctx, "alice", false)
+	st := env.prov.Advance(ctx, "alice")
 	if !st.Ready() {
 		t.Fatalf("alice not ready after re-add: %v", st.Steps)
 	}
@@ -394,7 +394,7 @@ func TestReactivateAfterReaddKeepsIndex(t *testing.T) {
 func TestRegistryStepRefusesAbsentUser(t *testing.T) {
 	env := newTestEnv(t)
 	env.prov.Members = absentMembers{"alice": true}
-	st := env.prov.Advance(context.Background(), "alice", false)
+	st := env.prov.Advance(context.Background(), "alice")
 	if got := st.Steps["registry"]; got != "error: access removed" {
 		t.Errorf("registry step = %q, want %q", got, "error: access removed")
 	}

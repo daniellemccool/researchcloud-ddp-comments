@@ -50,8 +50,7 @@ func testPlatform() *platform.Platform {
 }
 
 type advanceCall struct {
-	user  string
-	admin bool
+	user string
 }
 
 // fakeProvisioner records Advance calls; started/block/finished make the
@@ -66,9 +65,9 @@ type fakeProvisioner struct {
 	result    provision.State // returned by Advance when Steps is non-nil
 }
 
-func (f *fakeProvisioner) Advance(_ context.Context, user string, admin bool) provision.State {
+func (f *fakeProvisioner) Advance(_ context.Context, user string) provision.State {
 	f.mu.Lock()
-	f.calls = append(f.calls, advanceCall{user: user, admin: admin})
+	f.calls = append(f.calls, advanceCall{user: user})
 	f.mu.Unlock()
 	if f.started != nil {
 		f.started <- user
@@ -708,8 +707,8 @@ func TestAdminGetsCollectorPageWithAdminLink(t *testing.T) {
 	}
 	<-e.prov.finished
 	call, ok := e.prov.firstCall()
-	if !ok || !call.admin || call.user != "boss" {
-		t.Fatalf("Advance call = %+v, want boss with admin=true", call)
+	if !ok || call.user != "boss" {
+		t.Fatalf("Advance call = %+v, want boss", call)
 	}
 
 	e.sess.startResult = session.Started
