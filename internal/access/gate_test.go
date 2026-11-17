@@ -115,23 +115,25 @@ func TestCollectorOnly(t *testing.T) {
 	}
 }
 
-// TestTechAdminOnly: the Tech Admin role makes a Tech Admin and nothing else.
-func TestTechAdminOnly(t *testing.T) {
+// TestTechAdminIsAdmin: the Tech Admin role alone makes a Tech Admin, an
+// admin and a collector; the admin role does not make a Tech Admin, and a
+// longer group name makes nothing.
+func TestTechAdminIsAdmin(t *testing.T) {
 	r := newRequest("dmccool2", testTechAdminRole, testGate)
 	id, err := FromRequest(r, testConfig())
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	if !id.TechAdmin || id.Collector || id.Admin {
-		t.Errorf("TechAdmin=%v Collector=%v Admin=%v, want only TechAdmin", id.TechAdmin, id.Collector, id.Admin)
+	if !id.TechAdmin || !id.Admin || !id.Collector {
+		t.Errorf("TechAdmin=%v Admin=%v Collector=%v, want all true", id.TechAdmin, id.Admin, id.Collector)
 	}
 	r = newRequest("dmccool2", testAdminRole, testGate)
 	if id, _ := FromRequest(r, testConfig()); id.TechAdmin {
 		t.Error("the admin role made a Tech Admin")
 	}
 	r = newRequest("dmccool2", testTechAdminRole+"s", testGate)
-	if id, _ := FromRequest(r, testConfig()); id.TechAdmin {
-		t.Error("a longer group name made a Tech Admin")
+	if id, _ := FromRequest(r, testConfig()); id.TechAdmin || id.Admin || id.Collector {
+		t.Errorf("a longer group name gave TechAdmin=%v Admin=%v Collector=%v, want none", id.TechAdmin, id.Admin, id.Collector)
 	}
 }
 

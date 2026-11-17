@@ -28,8 +28,9 @@ type Identity struct {
 	Roles     []string
 	Collector bool
 	Admin     bool
-	// TechAdmin is the Tech Admin standing (4CAT's users, settings and
-	// extensions); it implies neither Collector nor Admin.
+	// TechAdmin is the Tech Admin standing: an admin who may also manage
+	// 4CAT's users, settings and extensions. It implies Admin, and so
+	// Collector; Admin does not imply it.
 	TechAdmin bool
 }
 
@@ -57,7 +58,8 @@ var (
 // is wrong has its other headers ignored entirely. Then the RAW username
 // value is validated (no trimming: " dmccool2 " is not a valid name), then
 // the roles are split into whole ';'-separated segments.
-// Admin implies Collector; TechAdmin implies nothing else.
+// The implications between the standings are decided here and nowhere else
+// (ADR-0004): TechAdmin implies Admin, and Admin implies Collector.
 func FromRequest(r *http.Request, c Config) (Identity, error) {
 	if !gateOK(r, c.GateSecret) {
 		return Identity{}, ErrGate
@@ -76,6 +78,9 @@ func FromRequest(r *http.Request, c Config) (Identity, error) {
 		Collector: IsRole(rolesHeader, c.CollectorRole),
 		Admin:     IsRole(rolesHeader, c.AdminRole),
 		TechAdmin: IsRole(rolesHeader, c.TechAdminRole),
+	}
+	if id.TechAdmin {
+		id.Admin = true
 	}
 	if id.Admin {
 		id.Collector = true

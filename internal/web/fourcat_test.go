@@ -313,9 +313,9 @@ func TestFourcatStandingHeaders(t *testing.T) {
 	rig := newFourcatRig(t)
 	for _, c := range []struct{ roles, tags string }{
 		{adminRole, "studylead"},
-		{techAdminRole, "techadmin"},
+		{techAdminRole, "studylead,techadmin"},
 		{adminRole + ";" + techAdminRole, "studylead,techadmin"},
-		{collectorRole + ";" + techAdminRole, "techadmin"},
+		{collectorRole + ";" + techAdminRole, "studylead,techadmin"},
 	} {
 		rig.setToken("alice", tokenFor("alice"))
 		rec := doReq(t, rig.srv, http.MethodGet, "alice", c.roles, "/fourcat/", nil, fromOwnPages)
@@ -612,11 +612,12 @@ func TestFourcatHidesSecretsOnLogsPage(t *testing.T) {
 	}
 }
 
-// TestTechAdminOnlyReachesOnlyFourcat: a Tech Admin who is neither collector
-// nor admin gets the 403 page on every path outside /fourcat/ (the admin,
-// screen and claim handlers do not check the collector role themselves) and
-// reaches the 4CAT proxy.
-func TestTechAdminOnlyReachesOnlyFourcat(t *testing.T) {
+// TestTechAdminReachesAdminAndDesk: a Tech Admin who holds neither the
+// collector nor the admin role is an admin (ADR-0004): they reach the admin
+// page, the screen relay, the collector page and the 4CAT proxy. A member
+// with none of the three roles gets the 403 page on all four and reaches no
+// handler.
+func TestTechAdminReachesAdminAndDesk(t *testing.T) {
 	var mu sync.Mutex
 	reached := map[string]int{}
 	stub := func(name string) http.Handler {
@@ -633,38 +634,38 @@ func TestTechAdminOnlyReachesOnlyFourcat(t *testing.T) {
 		d.Admin = stub("admin")
 	})
 	same := map[string]string{"Origin": "https://desk.example.org", "Sec-Fetch-Site": "same-origin"}
-	for _, c := range []struct{ method, path string }{
-		{http.MethodGet, "/desk/"},
-		{http.MethodGet, "/desk/admin/"},
-		{http.MethodGet, "/desk/vnc/"},
-		{http.MethodPost, "/desk/claim"},
+	for _, c := range []struct{ path, body string }{
+		{"/desk/admin/", "admin"},
+		{"/desk/vnc/", "relay"},
+		{"/fourcat/", "fourcat"},
 	} {
-		rec := doReq(t, srv, c.method, "techie", techAdminRole, c.path, nil, same)
+		rec := doReq(t, srv, http.MethodGet, "techie", techAdminRole, c.path, nil, same)
+		if rec.Code != http.StatusOK || rec.Body.String() != c.body {
+			t.Errorf("Tech Admin %s: status %d body %q, want 200 %q", c.path, rec.Code, rec.Body.String(), c.body)
+		}
+	}
+	// The collector page: this server has no provisioner, so it answers its
+	// not-ready message; what matters is that it is not the 403 page.
+	rec := doReq(t, srv, http.MethodGet, "techie", techAdminRole, "/desk/", nil, same)
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("Tech Admin /desk/: status 403 body %q, want the collector page's own answer", rec.Body.String())
+	}
+
+	mu.Lock()
+	before := reached["admin"] + reached["relay"] + reached["fourcat"]
+	mu.Unlock()
+	for _, path := range []string{"/desk/", "/desk/admin/", "/desk/vnc/", "/fourcat/"} {
+		rec := doReq(t, srv, http.MethodGet, "stranger", "other_group", path, nil, same)
 		if rec.Code != http.StatusForbidden {
-			t.Errorf("%s %s: status = %d, want 403", c.method, c.path, rec.Code)
+			t.Errorf("other_group %s: status = %d, want 403", path, rec.Code)
 		}
 		if b := rec.Body.String(); !strings.Contains(b, testContact) {
-			t.Errorf("%s %s: body %q lacks the contact", c.method, c.path, b)
+			t.Errorf("other_group %s: body %q lacks the contact", path, b)
 		}
-	}
-	// A path that only starts with /fourcat/ is cleaned by the mux into a
-	// redirect; it never reaches another handler.
-	rec := doReq(t, srv, http.MethodGet, "techie", techAdminRole, "/fourcat/../desk/admin/", nil, same)
-	if rec.Code == http.StatusOK {
-		t.Errorf("/fourcat/../desk/admin/: status 200 body %q, want no handler reached", rec.Body.String())
-	}
-	// /fourcat without the slash gets the mux's redirect, as it does for an admin.
-	rec = doReq(t, srv, http.MethodGet, "techie", techAdminRole, "/fourcat", nil, same)
-	if rec.Code < 300 || rec.Code > 399 || rec.Header().Get("Location") != "/fourcat/" {
-		t.Errorf("/fourcat: status %d Location %q, want a redirect to /fourcat/", rec.Code, rec.Header().Get("Location"))
-	}
-	rec = doReq(t, srv, http.MethodGet, "techie", techAdminRole, "/fourcat/", nil, same)
-	if rec.Code != http.StatusOK || rec.Body.String() != "fourcat" {
-		t.Errorf("/fourcat/: status %d body %q, want the proxy", rec.Code, rec.Body.String())
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if reached["relay"] != 0 || reached["admin"] != 0 || reached["fourcat"] != 1 {
-		t.Errorf("handlers reached %v, want only fourcat once", reached)
+	if after := reached["admin"] + reached["relay"] + reached["fourcat"]; after != before {
+		t.Errorf("a member with no standing reached a handler: %v", reached)
 	}
 }

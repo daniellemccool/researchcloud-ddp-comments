@@ -254,7 +254,7 @@ func TestEmptyRolesLoggedOnce(t *testing.T) {
 }
 
 // TestAccessLogNamesTechAdmin: the access log line says whether the identity
-// is a Tech Admin.
+// is a Tech Admin, who is an admin and a collector as well.
 func TestAccessLogNamesTechAdmin(t *testing.T) {
 	srv, logPath := newTestServer(t)
 	do(t, srv, "techie", techAdminRole, testGate, "/fourcat/")
@@ -270,7 +270,7 @@ func TestAccessLogNamesTechAdmin(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &e); err != nil {
 		t.Fatalf("log %q: %v", data, err)
 	}
-	if e.TechAdmin == nil || !*e.TechAdmin || e.Collector || e.Admin {
-		t.Errorf("log line %s, want techadmin true and nothing else", data)
+	if e.TechAdmin == nil || !*e.TechAdmin || !e.Collector || !e.Admin {
+		t.Errorf("log line %s, want techadmin, admin and collector all true", data)
 	}
 }

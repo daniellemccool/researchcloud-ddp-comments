@@ -108,7 +108,7 @@ func New(d Deps) *http.Server {
 	})
 	mux.HandleFunc("/desk/admin/", h.serveAdminTree) // admins only, else 404
 	mux.HandleFunc("/desk/vnc/", h.serveVNC)         // nil Relay → 404
-	mux.HandleFunc("/fourcat/", h.serveFourcat)      // admins and Tech Admins, nil proxy → 404
+	mux.HandleFunc("/fourcat/", h.serveFourcat)      // admins (a Tech Admin is one), nil proxy → 404
 	h.routes = mux
 	return &http.Server{Addr: defaultGatedAddr, Handler: h}
 }
@@ -178,21 +178,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.note(id, r.URL.Path)
 
-	// A member with none of the three standings gets the 403 page; a Tech
-	// Admin who is not a collector reaches only /fourcat/ (ADR-0004), since
-	// the admin, screen and claim handlers do not check the collector role.
-	allowed := id.Collector || id.Admin || (id.TechAdmin && isFourcatPath(r.URL.Path))
-	if !allowed {
+	// A member with none of the three standings gets the 403 page. Every
+	// standing is a collector (an admin is one, and a Tech Admin is an admin;
+	// access.FromRequest, ADR-0004), so the gate has no case per path.
+	if !id.Collector {
 		h.forbidden(w)
 		return
 	}
 	h.routes.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, id)))
-}
-
-// isFourcatPath reports whether path is under the /fourcat/ proxy, or is
-// /fourcat itself, which the mux redirects to /fourcat/.
-func isFourcatPath(path string) bool {
-	return path == "/fourcat" || strings.HasPrefix(path, "/fourcat/")
 }
 
 func plain(w http.ResponseWriter, status int, body string) {
