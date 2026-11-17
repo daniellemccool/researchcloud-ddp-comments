@@ -111,3 +111,43 @@ func TestStatusRows(t *testing.T) {
 		t.Errorf("bob row = %+v, want index 2, not running, not ready", b)
 	}
 }
+
+// TestManagerStatusMarksLive: a status row says whether its registry row is
+// live, so the admin page can list the live seats only.
+func TestManagerStatusMarksLive(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	if err := os.WriteFile(f.reg.Path, []byte("alice\t1\tlive\nbob\t2\tretired\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.m.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := map[string]bool{}
+	for _, r := range rows {
+		live[r.User] = r.Live
+	}
+	if len(rows) != 2 || !live["alice"] || live["bob"] {
+		t.Errorf("Status rows = %+v, want alice live and bob not", rows)
+	}
+}
+
+// TestManagerSeatsMakesNoDockerCall: Seats is the registry's rows, live and
+// retired, read without asking Docker anything.
+func TestManagerSeatsMakesNoDockerCall(t *testing.T) {
+	f := newFixture(t, 4, "alice")
+	if err := os.WriteFile(f.reg.Path, []byte("alice\t1\tlive\nbob\t2\tretired\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.fake.Calls)
+	seats, err := f.m.Seats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seats) != 2 || seats[0].User != "alice" || seats[0].Status != "live" || seats[1].User != "bob" || seats[1].Status != "retired" {
+		t.Errorf("Seats = %+v, want alice live then bob retired", seats)
+	}
+	if n := len(f.fake.Calls) - before; n != 0 {
+		t.Errorf("Seats made %d Docker calls, want none: %v", n, f.fake.Calls[before:])
+	}
+}

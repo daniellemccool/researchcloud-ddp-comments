@@ -24,9 +24,13 @@ type Activity struct {
 
 // userActivity is one user's clocks and open screens.
 type userActivity struct {
-	lastInput       time.Time
+	lastInput       time.Time // the idle clock: also set at first sight and by Forget
 	lastScreenClose time.Time
 	screens         map[*screen]struct{}
+	// reportedInput is the time of the last real Input, zero when none;
+	// only Input sets it. It is for display (LastInput); the idle stop
+	// never reads it.
+	reportedInput time.Time
 }
 
 // screen is one open relayed websocket; its cancel ends the proxied request.
@@ -55,7 +59,25 @@ func (a *Activity) Input(user string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	t := a.now()
-	a.entry(user, t).lastInput = t
+	u := a.entry(user, t)
+	u.lastInput, u.reportedInput = t, t
+}
+
+// LastInput is the time of user's last real input (the last Input call),
+// for display on the admin page; false when the tracker does not hold the
+// user or holds them without any input reported (an entry Idle or an
+// opening screen created). It is not the idle clock: the first sight and
+// Forget, which restart that clock, never move it. A Forget that drops the
+// entry (no screen open) drops it too. It is a pure read: it creates no
+// entry, so it never starts a user's grace early.
+func (a *Activity) LastInput(user string) (time.Time, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	u, ok := a.users[user]
+	if !ok || u.reportedInput.IsZero() {
+		return time.Time{}, false
+	}
+	return u.reportedInput, true
 }
 
 // Idle reports whether user has been idle for longer than idle, and why:

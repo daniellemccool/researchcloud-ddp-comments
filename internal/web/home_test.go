@@ -147,14 +147,20 @@ func TestKickAdvanceHasDeadline(t *testing.T) {
 	t.Errorf("exec calls after the second visit = %d, want 2 (the retry was never kicked or never ended)", n)
 }
 
-// fakeMembers is the CO poll view: absent users and a fixed status line.
+// fakeMembers is the CO poll view: absent users, a fixed status line and the
+// member list with its roles (known false: no good poll yet).
 type fakeMembers struct {
-	absent map[string]bool
-	line   string
+	absent  map[string]bool
+	line    string
+	members map[string][]string
+	known   bool
 }
 
 func (f fakeMembers) Absent(user string) bool { return f.absent[user] }
 func (f fakeMembers) StatusLine() string      { return f.line }
+func (f fakeMembers) Members() (map[string][]string, bool) {
+	return f.members, f.known
+}
 
 func accessRemovedText() string {
 	return "Your access to the desk was removed. If you were just re-added, try again in a minute; otherwise contact " + testContact + "."

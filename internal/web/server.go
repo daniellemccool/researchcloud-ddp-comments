@@ -19,6 +19,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
 
@@ -42,11 +43,31 @@ type sessions interface {
 	OpenURL(ctx context.Context, user, url string) (int, string, error)
 }
 
+// adminSessions is what the admin page needs of *session.Manager: every
+// registry row's status (Docker is asked), the registry's rows alone (no
+// Docker call) and a stop.
+type adminSessions interface {
+	Status(context.Context) ([]session.Row, error)
+	Seats() ([]registry.Row, error)
+	Stop(context.Context, string) error
+}
+
+// SeatFigures are the two figures behind the running cap: the configured
+// desk_max_running and what the box's memory allows (0: unknown). The cap
+// itself is Cfg.MaxRunning, already lowered to what memory allows.
+type SeatFigures struct {
+	Configured, MemoryAllows int
+}
+
 // membersView is what the routes need of the CO poll (*coapi.Poller): Absent
-// gates the home page and the relay, StatusLine is the admin overview's line.
+// gates the home page and the relay, StatusLine is the admin overview's line,
+// and Members (each member's roles from the last good poll; false while no
+// poll has succeeded) feeds the admin page's two member lists, for display
+// only.
 type membersView interface {
 	Absent(user string) bool
 	StatusLine() string
+	Members() (map[string][]string, bool)
 }
 
 // Deps are the gated listener's dependencies. Prov and Sessions may be nil
@@ -72,6 +93,11 @@ type Deps struct {
 	// Uploads reads 4CAT's latest uploads (*fourcat.Client); nil when 4CAT
 	// is disabled or not wired, and the upload state is then unknown.
 	Uploads uploadsReader
+	// AdminSessions is the session data of the admin page
+	// (*session.Manager); nil: the page shows no session data.
+	AdminSessions adminSessions
+	// Seats are the figures behind the running cap, for the admin page.
+	Seats SeatFigures
 }
 
 // New returns the gated listener's server. Every request goes through the

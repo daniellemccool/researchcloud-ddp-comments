@@ -2,6 +2,8 @@ package web
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -11,16 +13,26 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
 
 // newAdminServer builds the gated server with the Admin handler mounted and
 // returns it with the temp desk root (for pool.csv and the desk log).
 func newAdminServer(t *testing.T) (*http.Server, string) {
+	t.Helper()
+	return newAdminServerWith(t, nil)
+}
+
+// newAdminServerWith is newAdminServer with fill free to set further Deps
+// (and fields of Cfg) before the admin handler and the server are built.
+func newAdminServerWith(t *testing.T, fill func(*Deps)) (*http.Server, string) {
 	t.Helper()
 	root := t.TempDir()
 	plat := testPlatform()
@@ -39,8 +51,56 @@ func newAdminServer(t *testing.T) (*http.Server, string) {
 		LogPath:  filepath.Join(root, "state", "access.ndjson"),
 		Log:      &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: plat.DefaultKind},
 	}
+	if fill != nil {
+		fill(&d)
+	}
 	d.Admin = NewAdmin(d)
 	return New(d), root
+}
+
+// fakeAdminSessions stands in for *session.Manager on the admin page and
+// counts what was asked of it.
+type fakeAdminSessions struct {
+	rows      []session.Row
+	statusErr error
+	seats     []registry.Row
+	seatsErr  error
+	stopErr   error
+
+	mu          sync.Mutex
+	statusCalls int
+	seatsCalls  int
+	stops       []string
+}
+
+func (f *fakeAdminSessions) Status(context.Context) ([]session.Row, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusCalls++
+	return f.rows, f.statusErr
+}
+
+func (f *fakeAdminSessions) Seats() ([]registry.Row, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seatsCalls++
+	return f.seats, f.seatsErr
+}
+
+func (f *fakeAdminSessions) Stop(_ context.Context, user string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stops = append(f.stops, user)
+	return f.stopErr
+}
+
+// appendLog appends events to the desk log under root.
+func appendLog(t *testing.T, root string, evs ...desklog.Event) {
+	t.Helper()
+	lg := &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: "video"}
+	if err := lg.Append(evs...); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // uploadBody builds a multipart form with one file part (field may be ""
@@ -299,14 +359,24 @@ func TestAdminUploadNotices(t *testing.T) {
 	}
 }
 
-func TestAdminQueueLine(t *testing.T) {
+// TestAdminCollectionSection: the collection's two lines under the
+// platform's name, the upload form as it was, and no placeholder sentence.
+func TestAdminCollectionSection(t *testing.T) {
 	srv, root := newAdminServer(t)
 	poolPath := filepath.Join(root, "pool.csv")
 	if err := os.WriteFile(poolPath, []byte("id,kind,bucket,note\n1,video,,a\n2,video,,b\n3,video,,c\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lg := &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: "video"}
-	if err := lg.Append(desklog.Event{T: 1, User: "root", Action: "claim", Kind: "video", ID: "1", Batch: 1, Code: ""}); err != nil {
+	appendLog(t, root,
+		desklog.Event{T: 1, User: "root", Action: "claim", Kind: "video", ID: "1", Batch: 1, Code: ""},
+		desklog.Event{T: 2, User: "alice", Action: "claim", Kind: "video", ID: "2", Batch: 1, Code: ""},
+		desklog.Event{T: 3, User: "alice", Action: "problem", Kind: "video", ID: "2", Code: "NOT_FOUND"},
+	)
+	captures := filepath.Join(root, "state", "captures", "alice", "captures.ndjson")
+	if err := os.MkdirAll(filepath.Dir(captures), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(captures, []byte("{}\n{}\n{}\n{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -316,18 +386,31 @@ func TestAdminQueueLine(t *testing.T) {
 	}
 	b := rec.Body.String()
 	for _, want := range []string{
-		`<h2>Queue</h2>`,
-		`<p>2 of 3 videos unclaimed in the pool.</p>`,
+		`<h2>Collection: TestTube</h2>`,
+		`<p>Queue 3 videos · unclaimed 1 · claimed 2 · done 1 (1 problem) · open 1</p>`,
+		`<p>Records captured 4 · collectors who took part 2</p>`,
 		`<form method="post" action="/desk/admin/pool" enctype="multipart/form-data"><label>Add to the pool (CSV with an id column; kind, bucket, note optional): <input type="file" name="file" accept=".csv,text/csv" required></label> <button>Upload</button></form>`,
-		`<p>Sessions, 4CAT, export and problems arrive in plan 2b.</p>`,
 		`<title>Desk admin</title>`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("admin page lacks %q:\n%s", want, b)
 		}
 	}
+	if strings.Contains(b, "arrive in plan 2b") || strings.Contains(b, "<h2>Queue</h2>") || strings.Contains(b, "<h2>Members</h2>") {
+		t.Errorf("admin page still has the old headings or the placeholder sentence:\n%s", b)
+	}
+	// The sections come in a fixed order.
+	last := -1
+	for _, h := range []string{"<h2>Collection: ", "<h2>Problems</h2>", "<h2>Health</h2>"} {
+		i := strings.Index(b, h)
+		if i <= last {
+			t.Errorf("section %q is missing or out of order (at %d, after %d)", h, i, last)
+		}
+		last = i
+	}
 
-	// An unreadable pool.csv shows the error line instead.
+	// An unreadable pool.csv shows the error line instead of the queue line;
+	// the rest of the page is still there.
 	if err := os.WriteFile(poolPath, []byte("a,b\n1,2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -335,6 +418,299 @@ func TestAdminQueueLine(t *testing.T) {
 	b = rec.Body.String()
 	if !strings.Contains(b, "pool.csv unreadable: pool.csv: unrecognised header [a b]") {
 		t.Errorf("unreadable pool line missing from:\n%s", b)
+	}
+	if !strings.Contains(b, "<h2>Problems</h2>") || !strings.Contains(b, "Records captured 4") {
+		t.Errorf("with an unreadable pool the rest of the page is gone:\n%s", b)
+	}
+}
+
+// logFailServer builds the admin server with a pool of three, one running
+// seat (alice), a CO list with a collector who never claimed (chris) and the
+// desk log at the path setLog returns for the desk root.
+func logFailServer(t *testing.T, setLog func(t *testing.T, root string) string) *http.Server {
+	t.Helper()
+	ready := provision.State{Steps: allDoneSteps()}
+	srv, _ := newAdminServerWith(t, func(d *Deps) {
+		root := d.Cfg.DeskRoot
+		if err := os.WriteFile(filepath.Join(root, "pool.csv"), []byte("id,kind,bucket,note\n1,video,,a\n2,video,,b\n3,video,,c\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d.Log.Path = setLog(t, root)
+		d.AdminSessions = &fakeAdminSessions{rows: []session.Row{{User: "alice", Index: 1, Live: true, Running: true, State: ready}}}
+		d.Members = fakeMembers{known: true, members: map[string][]string{"chris": {collectorRole}}}
+	})
+	return srv
+}
+
+// An unreadable desk log is not an empty one: the page says at its top that
+// the log cannot be read (without the error text), and every figure that
+// comes from the log reads unknown. The pool total and the Stop button,
+// which do not come from the log, still show. A readable empty log is no
+// failure: no warning, and the zeros stay.
+func TestAdminUnreadableDeskLog(t *testing.T) {
+	const warning = `<p class="warn">The desk log cannot be read, so the figures that come from it are unknown.</p>`
+	stop := `<form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop</button></form>`
+	for _, tc := range []struct {
+		name   string
+		setLog func(t *testing.T, root string) string
+		secret string // a part of the error text that must not reach the page
+	}{
+		{"parent is a regular file", func(t *testing.T, root string) string {
+			f := filepath.Join(root, "notadir")
+			if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(f, "desk-log.ndjson")
+		}, "not a directory"},
+		{"malformed line in the middle", func(t *testing.T, root string) string {
+			p := filepath.Join(root, "desk-log.ndjson")
+			data := `{"t":1,"user":"alice","action":"claim","kind":"video","id":"1"}` + "\n" +
+				`{"t":2,"user":"bob","act` + "\n" +
+				`{"t":3,"user":"alice","action":"problem","kind":"video","id":"1","code":"NOT_FOUND"}` + "\n"
+			if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}, "line 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := logFailServer(t, tc.setLog)
+			rec := getAdmin(t, srv, "root", adminRole, "/desk/admin/")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			b := rec.Body.String()
+			for _, want := range []string{
+				`<h1>Desk admin</h1>` + warning + `<h2>Collection: `,
+				`<p>Queue 3 videos · unclaimed unknown · claimed unknown · done unknown (problems unknown) · open unknown</p>`,
+				` · collectors who took part unknown</p>`,
+				`<h2>Problems</h2><p>unknown: the desk log cannot be read</p>`,
+				`<tr><td>alice</td><td>unknown</td><td>unknown</td><td>running ` + stop + `</td></tr>`,
+				`<p>Hold the collector role, never claimed: unknown: the desk log cannot be read</p>`,
+				`<p>Worked here, no longer have access: unknown: the desk log cannot be read</p>`,
+				`<h2>Health</h2>`,
+			} {
+				if !strings.Contains(b, want) {
+					t.Errorf("page lacks %q:\n%s", want, b)
+				}
+			}
+			for _, bad := range []string{"No problems reported.", "0:00", "chris", "claimed 0", tc.secret} {
+				if strings.Contains(b, bad) {
+					t.Errorf("page with an unreadable desk log has %q:\n%s", bad, b)
+				}
+			}
+			if n := strings.Count(b, `class="warn"`); n != 1 {
+				t.Errorf("page has %d warnings, want 1:\n%s", n, b)
+			}
+		})
+	}
+
+	t.Run("readable empty log", func(t *testing.T) {
+		srv := logFailServer(t, func(t *testing.T, root string) string {
+			p := filepath.Join(root, "desk-log.ndjson")
+			if err := os.WriteFile(p, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		})
+		b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+		for _, want := range []string{
+			`<p>Queue 3 videos · unclaimed 3 · claimed 0 · done 0 (0 problems) · open 0</p>`,
+			` · collectors who took part 0</p>`,
+			`<h2>Problems</h2><p>No problems reported.</p>`,
+			`<tr><td>alice</td><td>0:00</td><td>0:00</td><td>running ` + stop + `</td></tr>`,
+			`<p>Hold the collector role, never claimed: chris</p>`,
+			`<p>Worked here, no longer have access: alice (removed)</p>`,
+		} {
+			if !strings.Contains(b, want) {
+				t.Errorf("page lacks %q:\n%s", want, b)
+			}
+		}
+		if strings.Contains(b, "desk log cannot be read") || strings.Contains(b, `class="warn"`) {
+			t.Errorf("page with a readable empty desk log has a warning:\n%s", b)
+		}
+	})
+}
+
+// TestAdminProblemsNewestFirst: every problem report, newest first, with
+// the linked item, the platform's label for the code, the note, the student
+// and the time in Amsterdam time. The clock stands at Tuesday 10:00.
+func TestAdminProblemsNewestFirst(t *testing.T) {
+	srv, root := newAdminServerWith(t, func(d *Deps) { d.Now = func() time.Time { return tueTenAmsterdam } })
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if !strings.Contains(b, "<h2>Problems</h2><p>No problems reported.</p>") {
+		t.Errorf("page without reports lacks the empty problems line:\n%s", b)
+	}
+
+	appendLog(t, root,
+		desklog.Event{T: monAfternoon, User: "alice", Action: "problem", Kind: "video", ID: "111", Code: "NOT_FOUND"},
+		desklog.Event{T: tueNine, User: "bob", Action: "problem", Kind: "video", ID: "222", Code: "OTHER", Note: "kept spinning"},
+		desklog.Event{T: tueNine, User: "bob", Action: "open", Kind: "video", ID: "333", ExecRC: rc(0)},
+	)
+	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	newer := `<tr><td><a href="https://example.org/watch?v=222">video 222</a></td><td>Other</td><td>kept spinning</td><td>bob</td><td>09:00</td></tr>`
+	older := `<tr><td><a href="https://example.org/watch?v=111">video 111</a></td><td>Not found</td><td></td><td>alice</td><td>Mon 14:00</td></tr>`
+	i, j := strings.Index(b, newer), strings.Index(b, older)
+	if i < 0 || j < 0 {
+		t.Fatalf("problems table lacks a row (newer at %d, older at %d):\n%s", i, j, b)
+	}
+	if i > j {
+		t.Error("the older report comes before the newer one")
+	}
+	if strings.Contains(b, "333") {
+		t.Error("an open event shows in the problems table")
+	}
+
+	// The order is by the report's time, not its place in the log: a report
+	// written last but timed Monday 13:00 comes last.
+	appendLog(t, root, desklog.Event{T: monAfternoon - 3600, User: "carol", Action: "problem", Kind: "video", ID: "444", Code: "NOT_FOUND"})
+	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	oldest := `<tr><td><a href="https://example.org/watch?v=444">video 444</a></td><td>Not found</td><td></td><td>carol</td><td>Mon 13:00</td></tr>`
+	if k := strings.Index(b, oldest); k < 0 || k < strings.Index(b, older) {
+		t.Errorf("the report timed Monday 13:00 is missing or not last (at %d):\n%s", k, b)
+	}
+}
+
+// TestAdminEscapesWhatPeopleTyped: a note, an item id and a user name that
+// hold HTML are shown as text, and an id the platform cannot open gets no
+// link at all.
+func TestAdminEscapesWhatPeopleTyped(t *testing.T) {
+	srv, root := newAdminServer(t)
+	logPath := filepath.Join(root, "state", "desk-log.ndjson")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"t":1,"user":"<i>","action":"problem","kind":"video","id":"\"><b>","code":"<u>","note":"<script>x</script>"}` + "\n"
+	if err := os.WriteFile(logPath, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	for _, raw := range []string{"<script>x</script>", `"><b>`, "<i>", "<u>"} {
+		if strings.Contains(b, raw) {
+			t.Errorf("the page holds %q raw:\n%s", raw, b)
+		}
+	}
+	for _, want := range []string{"&lt;script&gt;x&lt;/script&gt;", "video &#34;&gt;&lt;b&gt;", "&lt;i&gt;", "&lt;u&gt;"} {
+		if !strings.Contains(b, want) {
+			t.Errorf("the page lacks the escaped %q:\n%s", want, b)
+		}
+	}
+	if strings.Contains(b, `<a href="https://example.org/watch`) {
+		t.Errorf("an item id the platform cannot open was linked:\n%s", b)
+	}
+}
+
+// TestAdminHealthSeatsLine: pairs running of the cap, the configured value
+// and what memory allows, and the live seats of the session limit.
+func TestAdminHealthSeatsLine(t *testing.T) {
+	sess := &fakeAdminSessions{rows: []session.Row{
+		{User: "alice", Index: 1, Running: true, Live: true},
+		{User: "bob", Index: 2, Running: false, Live: true},
+		{User: "carol", Index: 3, Running: false, Live: false},
+	}}
+	seats := SeatFigures{Configured: 3}
+	srv, _ := newAdminServerWith(t, func(d *Deps) {
+		d.Cfg.MaxRunning, d.Cfg.MaxSessions = 3, 99
+		d.AdminSessions = sess
+		d.Seats = seats
+	})
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<p>Seats: 1 of 3 running (configured 3; memory allows unknown) · registered 2 of 99</p>`; !strings.Contains(b, want) {
+		t.Errorf("page lacks %q:\n%s", want, b)
+	}
+
+	// The cap lowered by memory: configured 7, memory allows 3.
+	srv, _ = newAdminServerWith(t, func(d *Deps) {
+		d.Cfg.MaxRunning, d.Cfg.MaxSessions = 3, 99
+		d.AdminSessions = sess
+		d.Seats = SeatFigures{Configured: 7, MemoryAllows: 3}
+	})
+	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<p>Seats: 1 of 3 running (configured 7; memory allows 3) · registered 2 of 99</p>`; !strings.Contains(b, want) {
+		t.Errorf("page lacks %q:\n%s", want, b)
+	}
+
+	// Docker not answering: the line says so, the live seats come from the
+	// registry, and the rest of the page still renders.
+	failing := &fakeAdminSessions{statusErr: errors.New("docker: no answer"), seats: []registry.Row{
+		{User: "alice", Index: 1, Status: "live"}, {User: "bob", Index: 2, Status: "live"}, {User: "carol", Index: 3, Status: "retired"},
+	}}
+	srv, _ = newAdminServerWith(t, func(d *Deps) {
+		d.Cfg.MaxRunning, d.Cfg.MaxSessions = 3, 99
+		d.AdminSessions = failing
+		d.Seats = seats
+	})
+	rec := getAdmin(t, srv, "root", adminRole, "/desk/admin/")
+	b = rec.Body.String()
+	if want := `<p class="warn">Seats: the running count is unavailable; at most 3 may run (configured 3; memory allows unknown) · registered 2 of 99</p>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
+		t.Errorf("status %d; page lacks %q:\n%s", rec.Code, want, b)
+	}
+	if !strings.Contains(b, "<h2>Collection: TestTube</h2>") || !strings.Contains(b, "<h2>Problems</h2>") {
+		t.Errorf("with Docker not answering the rest of the page is gone:\n%s", b)
+	}
+
+	// No session data wired: no seats line.
+	srv, _ = newAdminServer(t)
+	if b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String(); strings.Contains(b, "Seats:") {
+		t.Errorf("page without session data shows a seats line:\n%s", b)
+	}
+}
+
+// hangingSessions is a Docker that takes the status call and never answers:
+// Status blocks until its context ends and returns the context's error.
+type hangingSessions struct{ fakeAdminSessions }
+
+func (h *hangingSessions) Status(ctx context.Context) ([]session.Row, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestAdminStatusHasATimeLimit: a status call that never answers is cut off
+// by the page's own time limit and becomes the "running count is
+// unavailable" line; the rest of the page renders. The limit is shortened
+// for the test, and the request's own deadline is far longer, so a page
+// that waits for the request to end is caught by the elapsed time.
+func TestAdminStatusHasATimeLimit(t *testing.T) {
+	sess := &hangingSessions{fakeAdminSessions{seats: []registry.Row{
+		{User: "alice", Index: 1, Status: "live"}, {User: "bob", Index: 2, Status: "retired"},
+	}}}
+	srv, _ := newAdminServerWith(t, func(d *Deps) {
+		d.Cfg.MaxRunning, d.Cfg.MaxSessions = 3, 99
+		d.AdminSessions = sess
+		d.Seats = SeatFigures{Configured: 3, MemoryAllows: 3}
+	})
+	srv.Handler.(*handler).admin.(*adminHandler).statusLimit = 50 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/desk/admin/", nil).WithContext(ctx)
+	access.SetTestHeaders(req, "root", adminRole, testGate)
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	srv.Handler.ServeHTTP(rec, req)
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("the page took %v: it waited for the request to end instead of its own time limit", took.Round(time.Millisecond))
+	}
+	b := rec.Body.String()
+	if want := `<p class="warn">Seats: the running count is unavailable; at most 3 may run (configured 3; memory allows 3) · registered 1 of 99</p>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
+		t.Errorf("status %d; page lacks %q:\n%s", rec.Code, want, b)
+	}
+	for _, h := range []string{"<h2>Collection: TestTube</h2>", "<h2>Problems</h2>", "<h2>Health</h2>"} {
+		if !strings.Contains(b, h) {
+			t.Errorf("page lacks %q:\n%s", h, b)
+		}
+	}
+}
+
+func TestAdminFourcatLinksOnlyWhenEnabled(t *testing.T) {
+	srv, _ := newAdminServerWith(t, func(d *Deps) { d.Cfg.FourcatEnabled = true })
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<p>4CAT: <a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></p>`; !strings.Contains(b, want) {
+		t.Errorf("page lacks %q:\n%s", want, b)
+	}
+	srv, _ = newAdminServer(t)
+	if b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String(); strings.Contains(b, "4CAT:") {
+		t.Errorf("page without 4CAT shows the 4CAT links:\n%s", b)
 	}
 }
 
@@ -446,12 +822,13 @@ func TestAdminConcurrentUploadsLoseNothing(t *testing.T) {
 	}
 }
 
-// The overview shows the CO poll status line, as a warning when it alarms,
-// and no line at all without a poller.
+// The CO poll status line sits under Health, as a warning when it alarms,
+// and there is no line at all without a poller.
 func TestAdminOverviewShowsPollLine(t *testing.T) {
 	newServer := func(m interface {
 		Absent(string) bool
 		StatusLine() string
+		Members() (map[string][]string, bool)
 	}) *http.Server {
 		root := t.TempDir()
 		plat := testPlatform()
@@ -468,17 +845,17 @@ func TestAdminOverviewShowsPollLine(t *testing.T) {
 	}
 
 	b := getAdmin(t, newServer(fakeMembers{line: "CO poll: last good 12:34, 0 failures"}), "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<h2>Members</h2><p>CO poll: last good 12:34, 0 failures</p>`; !strings.Contains(b, want) {
+	if want := `<h2>Health</h2><p>CO poll: last good 12:34, 0 failures</p>`; !strings.Contains(b, want) {
 		t.Errorf("overview lacks %q:\n%s", want, b)
 	}
 
 	b = getAdmin(t, newServer(fakeMembers{line: "ALARM: CO poll: no good poll yet, 3 failures <x>"}), "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<p class="warn">ALARM: CO poll: no good poll yet, 3 failures &lt;x&gt;</p>`; !strings.Contains(b, want) {
+	if want := `<h2>Health</h2><p class="warn">ALARM: CO poll: no good poll yet, 3 failures &lt;x&gt;</p>`; !strings.Contains(b, want) {
 		t.Errorf("overview lacks the alarm line %q:\n%s", want, b)
 	}
 
 	b = getAdmin(t, newServer(nil), "root", adminRole, "/desk/admin/").Body.String()
-	if strings.Contains(b, "CO poll") || strings.Contains(b, "<h2>Members</h2>") {
+	if strings.Contains(b, "CO poll") || !strings.Contains(b, "<h2>Health</h2>") {
 		t.Errorf("overview without a poller shows a poll line:\n%s", b)
 	}
 }

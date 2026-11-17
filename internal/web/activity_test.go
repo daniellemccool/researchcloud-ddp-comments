@@ -175,3 +175,64 @@ func TestCloseUserCancelsOnlyThatUsersScreens(t *testing.T) {
 		t.Errorf("bob's open screens = %d, want 1", open)
 	}
 }
+
+// TestActivityLastInput: a user the tracker does not hold has no last input,
+// and asking creates no entry, so a following Idle still starts them with
+// the full grace; after Input the answer is that input's time.
+func TestActivityLastInput(t *testing.T) {
+	c := newFakeClock()
+	a := NewActivity(c.now)
+	if got, ok := a.LastInput("alice"); ok {
+		t.Errorf("LastInput(alice) on an empty tracker = (%v, true), want false", got)
+	}
+	if ok, _, _ := activitySnapshot(a, "alice"); ok {
+		t.Fatal("LastInput created an entry for a user the tracker did not hold")
+	}
+	// Had the read created an entry, alice would now be idle: her clocks
+	// would date from before this advance.
+	c.advance(testIdle + time.Minute)
+	assertIdle(t, a, "alice", false, "")
+
+	a.Input("bob") // 09:16 UTC on the fake clock
+	c.advance(3 * time.Minute)
+	want := time.Date(2026, 11, 5, 9, 16, 0, 0, time.UTC)
+	if got, ok := a.LastInput("bob"); !ok || !got.Equal(want) {
+		t.Errorf("LastInput(bob) = (%v, %v), want (%v, true)", got, ok, want)
+	}
+}
+
+// TestLastInputOnlyFromInput: only a real Input sets the last input. An
+// entry that Idle or an opening screen created answers false, and a Forget
+// that resets the clocks of a user with a screen open does not move it: it
+// still answers the time of the last Input, not the time of the Forget.
+func TestLastInputOnlyFromInput(t *testing.T) {
+	c := newFakeClock() // 09:00 UTC
+	a := NewActivity(c.now)
+	assertIdle(t, a, "alice", false, "") // Idle creates alice's entry
+	if ok, _, _ := activitySnapshot(a, "alice"); !ok {
+		t.Fatal("Idle created no entry for alice")
+	}
+	if got, ok := a.LastInput("alice"); ok {
+		t.Errorf("LastInput(alice) after Idle alone = (%v, true), want false", got)
+	}
+	closeCarol := a.openScreen("carol", func() {})
+	defer closeCarol()
+	if got, ok := a.LastInput("carol"); ok {
+		t.Errorf("LastInput(carol) after a screen opened = (%v, true), want false", got)
+	}
+
+	c.advance(2 * time.Minute)
+	a.Input("alice") // 09:02 UTC
+	want := time.Date(2026, 11, 5, 9, 2, 0, 0, time.UTC)
+	if got, ok := a.LastInput("alice"); !ok || !got.Equal(want) {
+		t.Errorf("LastInput(alice) after Input = (%v, %v), want (%v, true)", got, ok, want)
+	}
+
+	closeAlice := a.openScreen("alice", func() {})
+	defer closeAlice()
+	c.advance(5 * time.Minute)
+	a.Forget("alice") // 09:07 UTC; her screen is open, so her clocks restart
+	if got, ok := a.LastInput("alice"); !ok || !got.Equal(want) {
+		t.Errorf("LastInput(alice) after Forget with a screen open = (%v, %v), want (%v, true): the time of the last Input, not of the Forget", got, ok, want)
+	}
+}

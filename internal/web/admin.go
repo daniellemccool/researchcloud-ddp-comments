@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -8,13 +9,20 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
 
 // maxUploadBytes is the pool upload limit.
@@ -55,15 +63,37 @@ func setAdminHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 }
 
-// adminHandler serves GET /desk/admin/{$} and POST /desk/admin/pool
-// (plan-2a part only). It is mounted
-// admin-only by the gated listener; every response carries the framing and
-// no-store headers.
+// adminStatusLimit is how long the admin page waits for the session status
+// (a Docker container list). Docker that does not answer in time is a
+// failed status: the seats line says the running count is unavailable and
+// the rest of the page renders.
+const adminStatusLimit = 5 * time.Second
+
+// adminHandler serves GET /desk/admin/{$} and POST /desk/admin/pool. It is
+// mounted admin-only by the gated listener; every response carries the
+// framing and no-store headers.
 type adminHandler struct {
+	cfg      *config.Config
+	platform *platform.Platform
 	poolPath string
 	kinds    *platformKinds
 	log      *desklog.Log
-	members  interface{ StatusLine() string } // the CO poll, nil → no poll line
+	// members is the CO poll: its status line and its last good member
+	// list; nil → no poll line and no member lists.
+	members interface {
+		StatusLine() string
+		Members() (map[string][]string, bool)
+	}
+	roles    access.Config // the role names, for the member lists
+	sessions adminSessions // nil → no session data
+	activity *Activity     // nil → no "input N min ago"
+	uploads  *uploadStates // nil → every upload state is unknown
+	// statusLimit is how long the page waits for the session status
+	// (adminStatusLimit; shortened by the tests).
+	statusLimit time.Duration
+	seats       SeatFigures
+	now         func() time.Time
+	records     recordCounter
 
 	addMu   sync.Mutex // held around pool.Add, whose read-modify-write contract requires it (F75)
 	mu      sync.Mutex
@@ -72,13 +102,27 @@ type adminHandler struct {
 
 // NewAdmin returns the admin page handler over the gated listener's Deps.
 func NewAdmin(d Deps) http.Handler {
-	return &adminHandler{
+	a := &adminHandler{
+		cfg:      d.Cfg,
+		platform: d.Platform,
 		poolPath: filepath.Join(d.Cfg.DeskRoot, "pool.csv"),
 		kinds:    newPlatformKinds(d.Platform),
 		log:      d.Log,
+		sessions: d.AdminSessions,
 		members:  d.Members,
+		roles:    d.Access,
+		activity: d.Activity,
+		uploads:  newUploadStates(d),
+		seats:    d.Seats,
+		now:      d.Now,
 		notices:  make(map[string]string),
+
+		statusLimit: adminStatusLimit,
 	}
+	if a.now == nil {
+		a.now = time.Now
+	}
+	return a
 }
 
 // ServeHTTP routes the two admin routes and sets the security headers on
@@ -95,25 +139,232 @@ func (a *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveOverview is GET /desk/admin/{$}: the queue line, the upload form, the
-// CO poll line and the plan-2b note, with the one-shot notice taken for this user.
+// serveOverview is GET /desk/admin/{$}: the admin page, with the one-shot
+// notice taken for this user.
 func (a *adminHandler) serveOverview(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
-	body := a.overviewBody(a.takeNotice(id.User))
+	body := a.overviewBody(r.Context(), a.takeNotice(id.User))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
 }
 
-// overviewBody renders the admin page with the given notice (not stored).
-func (a *adminHandler) overviewBody(notice string) string {
-	inner := `<h2>Queue</h2><p>` + a.poolLine() + `</p>` + uploadForm + a.pollLine() +
-		`<p>Sessions, 4CAT, export and problems arrive in plan 2b.</p>`
+// logUnknown is what a list built from the desk log reads when the log
+// cannot be read.
+const logUnknown = "unknown: the desk log cannot be read"
+
+// overviewBody renders the admin page with the given notice (not stored):
+// the sections Collection, Students, Problems and Health, in that order.
+// The desk log is read once for the whole page, and the seats once
+// (seatsOf). When the log cannot be read, the page starts with a warning
+// and every figure from the log reads unknown; the error itself stays in
+// the container log, since it can quote part of a line.
+func (a *adminHandler) overviewBody(ctx context.Context, notice string) string {
+	evs, err := a.readLog()
+	logKnown := err == nil
+	sd := a.seatsOf(ctx)
+	inner := ""
+	if !logKnown {
+		inner = `<p class="warn">The desk log cannot be read, so the figures that come from it are unknown.</p>`
+	}
+	inner += a.collectionSection(evs, logKnown) + a.studentsSection(ctx, evs, logKnown, sd) + a.problemsSection(evs, logKnown) + a.healthSection(sd)
 	return adminShell("Desk admin", inner, notice, false)
 }
 
-// pollLine is the Members section: the CO poll's status line (ADR-0005),
-// shown as a warning while it alarms; "" without a poller.
+// seatData is what one page load knows of the seats: the session status
+// rows, or, when the status failed, the registry's rows (no Docker), read
+// only then.
+type seatData struct {
+	rows      []session.Row
+	statusErr error
+	seats     []registry.Row // read only when statusErr != nil
+	seatsErr  error
+}
+
+// seatsOf asks for the session status once, under the page's time limit,
+// and when it fails reads the registry once; the zero value without session
+// data.
+func (a *adminHandler) seatsOf(ctx context.Context) seatData {
+	var sd seatData
+	if a.sessions == nil {
+		return sd
+	}
+	sctx, cancel := context.WithTimeout(ctx, a.statusLimit)
+	sd.rows, sd.statusErr = a.sessions.Status(sctx)
+	cancel()
+	if sd.statusErr == nil {
+		return sd
+	}
+	log.Printf("web: admin: session status: %v", sd.statusErr)
+	if sd.seats, sd.seatsErr = a.sessions.Seats(); sd.seatsErr != nil {
+		log.Printf("web: admin: registry: %v", sd.seatsErr)
+	}
+	return sd
+}
+
+// names are the users of every seat, live and retired, as far as the page
+// knows them: from the status rows, else from the registry, else none.
+func (sd seatData) names() []string {
+	var out []string
+	switch {
+	case sd.statusErr == nil:
+		for _, r := range sd.rows {
+			out = append(out, r.User)
+		}
+	case sd.seatsErr == nil:
+		for _, r := range sd.seats {
+			out = append(out, r.User)
+		}
+	}
+	return out
+}
+
+// deskLog is the desk log, or an empty one with the platform's default kind
+// when none is wired, so its key rule (KeyOf) is always at hand.
+func (a *adminHandler) deskLog() *desklog.Log {
+	if a.log != nil {
+		return a.log
+	}
+	return &desklog.Log{DefaultKind: a.kinds.Default()}
+}
+
+// readLog returns the desk log's events; nil without a log, and the error
+// (logged here) when it cannot be read.
+func (a *adminHandler) readLog() ([]desklog.Event, error) {
+	if a.log == nil {
+		return nil, nil
+	}
+	evs, err := a.log.Read()
+	if err != nil {
+		log.Printf("web: admin: desk log: %v", err)
+		return nil, err
+	}
+	return evs, nil
+}
+
+// collectionSection is the Collection section: the queue line (or the
+// unreadable-pool line), the records line and the pool upload form. With
+// the desk log unknown (logKnown false), the queue's split and the collectors
+// read unknown; the queue total still shows.
+func (a *adminHandler) collectionSection(evs []desklog.Event, logKnown bool) string {
+	queue := ""
+	var c collection
+	rows, err := pool.Read(a.poolPath, a.kinds.Default())
+	if err != nil {
+		queue = "pool.csv unreadable: " + html.EscapeString(err.Error())
+		c = collect(nil, evs, a.deskLog())
+	} else {
+		c = collect(a.openable(rows), evs, a.deskLog())
+		problems := strconv.Itoa(c.Problems) + " problems"
+		if c.Problems == 1 {
+			problems = "1 problem"
+		}
+		queue = fmt.Sprintf("Queue %d %ss · unclaimed %d · claimed %d · done %d (%s) · open %d",
+			c.Queue, html.EscapeString(a.kinds.Default()), c.Queue-c.Claimed, c.Claimed, c.Done, problems, c.Claimed-c.Done)
+		if !logKnown {
+			queue = fmt.Sprintf("Queue %d %ss · unclaimed unknown · claimed unknown · done unknown (problems unknown) · open unknown",
+				c.Queue, html.EscapeString(a.kinds.Default()))
+		}
+	}
+	collectors := strconv.Itoa(c.Collectors)
+	if !logKnown {
+		collectors = "unknown"
+	}
+	captured := "unknown"
+	if n, err := a.records.Total(a.cfg.DeskRoot); err != nil {
+		log.Printf("web: admin: captures: %v", err)
+	} else {
+		captured = strconv.FormatInt(n, 10)
+	}
+	return `<h2>Collection: ` + html.EscapeString(a.platform.Label) + `</h2>` +
+		`<p>` + queue + `</p>` +
+		`<p>Records captured ` + captured + ` · collectors who took part ` + collectors + `</p>` +
+		uploadForm
+}
+
+// openable returns the pool rows this platform can open (desk.pool()).
+func (a *adminHandler) openable(rows []pool.Row) []pool.Row {
+	out := make([]pool.Row, 0, len(rows))
+	for _, row := range rows {
+		if re, ok := a.kinds.Kind(row.Kind); ok && re.MatchString(row.ID) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// problemsSection is the Problems section: every problem report in the
+// desk log, newest first (by time, then by place in the log), with the
+// item (linked when the platform can open it), the platform's label for
+// the code, the note, the student and the time. Everything from the log is
+// escaped. With the desk log unknown (logKnown false), one line says so.
+func (a *adminHandler) problemsSection(evs []desklog.Event, logKnown bool) string {
+	if !logKnown {
+		return `<h2>Problems</h2><p>` + logUnknown + `</p>`
+	}
+	var reports []desklog.Event
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Action == "problem" {
+			reports = append(reports, evs[i])
+		}
+	}
+	if len(reports) == 0 {
+		return `<h2>Problems</h2><p>No problems reported.</p>`
+	}
+	sort.SliceStable(reports, func(i, j int) bool { return reports[i].T > reports[j].T })
+	now := a.now()
+	var b strings.Builder
+	b.WriteString(`<h2>Problems</h2><table><tr><th>Item</th><th>Problem</th><th>Note</th><th>Student</th><th>When</th></tr>`)
+	for _, e := range reports {
+		b.WriteString(`<tr><td>` + a.itemCell(a.deskLog().KeyOf(e)) + `</td>` +
+			`<td>` + html.EscapeString(a.problemLabel(e.Code)) + `</td>` +
+			`<td>` + html.EscapeString(e.Note) + `</td>` +
+			`<td>` + html.EscapeString(e.User) + `</td>` +
+			`<td>` + html.EscapeString(when(time.Unix(e.T, 0), now)) + `</td></tr>`)
+	}
+	b.WriteString(`</table>`)
+	return b.String()
+}
+
+// itemCell is an item as "<kind> <id>", linked to the item when the
+// platform can open it (its id matches the kind's whole pattern and
+// ItemURL builds a URL), else as text.
+func (a *adminHandler) itemCell(k desklog.Key) string {
+	text := html.EscapeString(k.Kind + " " + k.ID)
+	re, ok := a.kinds.Kind(k.Kind)
+	if !ok || !re.MatchString(k.ID) {
+		return text
+	}
+	u, err := a.platform.ItemURL(k.Kind, k.ID)
+	if err != nil {
+		return text
+	}
+	return `<a href="` + html.EscapeString(u) + `">` + text + `</a>`
+}
+
+// problemLabel is the platform's label for a problem code, {contact}
+// replaced as on the student's page; an unknown code is the code itself.
+func (a *adminHandler) problemLabel(code string) string {
+	for _, p := range a.platform.Problems {
+		if p.Code == code {
+			return strings.ReplaceAll(p.Label, "{contact}", a.cfg.Contact)
+		}
+	}
+	return code
+}
+
+// healthSection is the Health section: the CO poll line, the seats line
+// and, with 4CAT enabled, the links to 4CAT's own pages.
+func (a *adminHandler) healthSection(sd seatData) string {
+	s := `<h2>Health</h2>` + a.pollLine() + a.seatsLine(sd)
+	if a.cfg.FourcatEnabled {
+		s += `<p>4CAT: <a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></p>`
+	}
+	return s
+}
+
+// pollLine is the CO poll's status line (ADR-0005), shown as a warning
+// while it alarms; "" without a poller.
 func (a *adminHandler) pollLine() string {
 	if a.members == nil {
 		return ""
@@ -123,39 +374,48 @@ func (a *adminHandler) pollLine() string {
 	if strings.HasPrefix(line, "ALARM") {
 		class = ` class="warn"`
 	}
-	return `<h2>Members</h2><p` + class + `>` + html.EscapeString(line) + `</p>`
+	return `<p` + class + `>` + html.EscapeString(line) + `</p>`
 }
 
-// poolLine is the Queue line (the overview's pool line):
-// the unreadable variant, else "<free> of <total> <noun>s unclaimed in the
-// pool." over the pool rows this platform can open, free = not in the log's
-// taken set. The line is already-escaped text.
-func (a *adminHandler) poolLine() string {
-	rows, err := pool.Read(a.poolPath, a.kinds.Default())
-	if err != nil {
-		return "pool.csv unreadable: " + html.EscapeString(err.Error())
+// seatsLine is the seats line: the pairs running of the cap (Cfg.MaxRunning,
+// already lowered to what memory allows), the configured value and what
+// memory allows, and the live registry rows of the session limit. When the
+// running count is unavailable (statusErr) it says so as a warning and
+// takes the live rows from the registry alone. "" without session data.
+func (a *adminHandler) seatsLine(sd seatData) string {
+	if a.sessions == nil {
+		return ""
 	}
-	taken := map[desklog.Key]bool{}
-	if a.log != nil {
-		evs, err := a.log.Read()
-		if err != nil {
-			log.Printf("web: admin: desk log: %v", err)
-		} else {
-			taken = a.log.Taken(evs)
-		}
+	memory := "unknown"
+	if a.seats.MemoryAllows > 0 {
+		memory = strconv.Itoa(a.seats.MemoryAllows)
 	}
-	free, total := 0, 0
-	for _, row := range rows {
-		re, ok := a.kinds.Kind(row.Kind)
-		if !ok || !re.MatchString(row.ID) {
-			continue // desk.pool(): only rows this platform can open
+	figures := fmt.Sprintf("(configured %d; memory allows %s)", a.seats.Configured, memory)
+	if sd.statusErr == nil {
+		running, live := 0, 0
+		for _, r := range sd.rows {
+			if r.Running {
+				running++
+			}
+			if r.Live {
+				live++
+			}
 		}
-		total++
-		if !taken[desklog.Key{Kind: row.Kind, ID: row.ID}] {
-			free++
-		}
+		return fmt.Sprintf(`<p>Seats: %d of %d running %s · registered %d of %d</p>`,
+			running, a.cfg.MaxRunning, figures, live, a.cfg.MaxSessions)
 	}
-	return fmt.Sprintf("%d of %d %ss unclaimed in the pool.", free, total, html.EscapeString(a.kinds.Default()))
+	registered := "unknown"
+	if sd.seatsErr == nil {
+		live := 0
+		for _, r := range sd.seats {
+			if r.Status == "live" {
+				live++
+			}
+		}
+		registered = strconv.Itoa(live)
+	}
+	return fmt.Sprintf(`<p class="warn">Seats: the running count is unavailable; at most %d may run %s · registered %s of %d</p>`,
+		a.cfg.MaxRunning, figures, registered, a.cfg.MaxSessions)
 }
 
 // servePoolUpload is POST /desk/admin/pool : CSRF, size limits, the
@@ -214,7 +474,7 @@ func (a *adminHandler) servePoolUpload(w http.ResponseWriter, r *http.Request) {
 	added, _, err := pool.Add(a.poolPath, rows, a.kinds)
 	a.addMu.Unlock()
 	if err != nil {
-		body := a.overviewBody("could not add to the pool: " + err.Error())
+		body := a.overviewBody(r.Context(), "could not add to the pool: "+err.Error())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(body))

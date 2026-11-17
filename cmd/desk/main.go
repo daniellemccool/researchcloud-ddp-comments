@@ -279,6 +279,8 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		deps.Uploads = fc // only here: a nil *fourcat.Client must not become a non-nil interface
 	}
 	deps.FourcatProxy = fourcatProxy(cfg, study, prov)
+	deps.AdminSessions = mgr
+	deps.Seats = web.SeatFigures{Configured: configured, MemoryAllows: memAllows}
 
 	deps.Admin = web.NewAdmin(deps)
 	gated := web.New(deps)

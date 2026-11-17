@@ -52,11 +52,12 @@ const (
 	Gone
 )
 
-// Row is one registry row's status: whether the pair runs and the
-// provisioning state on disk.
+// Row is one registry row's status: whether the row is live (not retired),
+// whether the pair runs, and the provisioning state on disk.
 type Row struct {
 	User    string
 	Index   int
+	Live    bool
 	Running bool
 	State   provision.State
 }
@@ -138,8 +139,9 @@ func (m *Manager) OpenURL(ctx context.Context, user, url string) (rc int, stderr
 	return ex.ExitCode, stderrTail(ex.Stderr, 200), nil
 }
 
-// Status returns one Row per registry row (live and retired): Running from
-// Running(), State from the provisioning step file.
+// Status returns one Row per registry row (live and retired): Live from
+// the row's status, Running from Running(), State from the provisioning
+// step file.
 func (m *Manager) Status(ctx context.Context) ([]Row, error) {
 	rows, err := m.Reg.Rows()
 	if err != nil {
@@ -154,11 +156,19 @@ func (m *Manager) Status(ctx context.Context) ([]Row, error) {
 		out = append(out, Row{
 			User:    r.User,
 			Index:   r.Index,
+			Live:    r.Status == "live",
 			Running: running[r.User],
 			State:   provision.Load(m.Cfg, r.User),
 		})
 	}
 	return out, nil
+}
+
+// Seats returns the registry's rows, live and retired, read from the
+// registry file alone: it makes no Docker call, so it answers while Docker
+// does not.
+func (m *Manager) Seats() ([]registry.Row, error) {
+	return m.Reg.Rows()
 }
 
 // logger returns the manager's logger, defaulting to log.Default().
