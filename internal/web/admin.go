@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -69,9 +71,9 @@ func setAdminHeaders(w http.ResponseWriter) {
 // the rest of the page renders.
 const adminStatusLimit = 5 * time.Second
 
-// adminHandler serves GET /desk/admin/{$} and POST /desk/admin/pool. It is
-// mounted admin-only by the gated listener; every response carries the
-// framing and no-store headers.
+// adminHandler serves GET /desk/admin/{$}, POST /desk/admin/pool and POST
+// /desk/admin/stop. It is mounted admin-only by the gated listener; every
+// response carries the framing and no-store headers.
 type adminHandler struct {
 	cfg      *config.Config
 	platform *platform.Platform
@@ -125,8 +127,9 @@ func NewAdmin(d Deps) http.Handler {
 	return a
 }
 
-// ServeHTTP routes the two admin routes and sets the security headers on
-// every response.
+// ServeHTTP routes the three admin routes and sets the security headers on
+// every response. Without session data the stop route is 404, like an
+// unknown admin path.
 func (a *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setAdminHeaders(w)
 	switch {
@@ -134,6 +137,8 @@ func (a *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.serveOverview(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/desk/admin/pool":
 		a.servePoolUpload(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/desk/admin/stop" && a.sessions != nil:
+		a.serveStop(w, r)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -481,6 +486,87 @@ func (a *adminHandler) servePoolUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.setNotice(id.User, fmt.Sprintf("added %d of %d; %s", added, len(rows)+len(rejects), rejectText(rejects)))
+	a.redirect(w)
+}
+
+// maxStopBytes is the stop form's body limit.
+const maxStopBytes = 4 * 1024
+
+// adminStopLimit bounds an admin's stop of a pair, which runs on when the
+// admin's request goes away. A normal stop waits at most 10 s for each of
+// the two containers (session.stopTimeout) plus a few quick Docker calls;
+// one minute leaves ample room above that and still ends a stop that hangs.
+const adminStopLimit = time.Minute
+
+// userRe is the username grammar; a name the stop form sends must match it
+// before it reaches the registry, Docker or the log.
+var userRe = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,31}$`)
+
+// serveStop is POST /desk/admin/stop (form field user), for a hung session;
+// it is not a ban and changes nothing else. A request that is not
+// same-origin, too large, names no username or names one without a registry
+// row is refused with no Docker call and no log event. Otherwise the pair is
+// stopped under its own time limit (adminStopLimit), whether or not the
+// request is still there; on success a stop event (code admin, note
+// "by <admin>") is written and the user's idle clocks restart. Either way
+// the answer is the overview with a one-shot notice. A stop that worked
+// stands when the log cannot be written; the notice says so.
+func (a *adminHandler) serveStop(w http.ResponseWriter, r *http.Request) {
+	id := identity(r)
+	if !csrfOK(r) {
+		a.say(w, http.StatusForbidden, "Refused: this request did not come from the admin page.")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxStopBytes)
+	if err := r.ParseForm(); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			a.say(w, http.StatusRequestEntityTooLarge, "Refused: the request is too large.")
+			return
+		}
+		a.say(w, http.StatusBadRequest, "Refused: not a form.")
+		return
+	}
+	user := r.PostForm.Get("user")
+	if !userRe.MatchString(user) {
+		a.say(w, http.StatusBadRequest, "Refused: not a username.")
+		return
+	}
+	seats, err := a.sessions.Seats()
+	if err != nil {
+		log.Printf("web: admin: stop %s: registry: %v", user, err)
+		a.say(w, http.StatusInternalServerError, "Refused: the seat registry cannot be read.")
+		return
+	}
+	if !slices.ContainsFunc(seats, func(s registry.Row) bool { return s.User == user }) {
+		a.say(w, http.StatusBadRequest, "Refused: "+user+" has no seat.")
+		return
+	}
+	// The stop runs to its end even when the admin's request goes away: a
+	// half-done stop leaves the proxy and the network behind with no Stop
+	// button to finish it.
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), adminStopLimit)
+	err = a.sessions.Stop(sctx, user)
+	cancel()
+	if err != nil {
+		log.Printf("web: admin: stop %s by %s: %v", user, id.User, err)
+		a.setNotice(id.User, "could not stop "+user+": "+err.Error())
+		a.redirect(w)
+		return
+	}
+	notice := "stopped " + user
+	if a.log != nil {
+		ev := desklog.Event{T: a.now().Unix(), User: user, Action: "stop", Code: "admin", Note: "by " + id.User}
+		if err := a.log.Append(ev); err != nil {
+			log.Printf("web: admin: desk log (stop %s by %s): %v", user, id.User, err)
+			notice += ", but the desk log could not record the stop"
+		}
+	}
+	if a.activity != nil {
+		a.activity.Forget(user)
+	}
+	log.Printf("web: admin: %s stopped %s", id.User, user)
+	a.setNotice(id.User, notice)
 	a.redirect(w)
 }
 

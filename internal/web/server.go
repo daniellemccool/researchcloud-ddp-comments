@@ -140,6 +140,7 @@ func New(d Deps) *http.Server {
 	mux.HandleFunc("POST /desk/active", sameOrigin(h.serveActive))   // page heartbeat: input seen, is the pair running
 	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)              // nil Admin handler → 404
 	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin)            // nil Admin handler → 404
+	mux.HandleFunc("POST /desk/admin/stop", h.serveAdmin)            // stop a hung pair; nil Admin handler → 404
 	mux.HandleFunc("GET /desk/admin", func(w http.ResponseWriter, r *http.Request) {
 		setAdminHeaders(w)                                               // the 301 answer carries the admin headers too
 		http.Redirect(w, r, "/desk/admin/", http.StatusMovedPermanently) // no-slash → 301

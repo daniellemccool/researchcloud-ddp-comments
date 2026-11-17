@@ -19,6 +19,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
@@ -71,6 +72,10 @@ type fakeAdminSessions struct {
 	statusCalls int
 	seatsCalls  int
 	stops       []string
+	// For each Stop call, at the time of the call: whether the context
+	// had already ended, and whether it had a deadline.
+	stopCtxEnded    []bool
+	stopCtxDeadline []bool
 }
 
 func (f *fakeAdminSessions) Status(context.Context) ([]session.Row, error) {
@@ -87,10 +92,13 @@ func (f *fakeAdminSessions) Seats() ([]registry.Row, error) {
 	return f.seats, f.seatsErr
 }
 
-func (f *fakeAdminSessions) Stop(_ context.Context, user string) error {
+func (f *fakeAdminSessions) Stop(ctx context.Context, user string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stops = append(f.stops, user)
+	_, hasDeadline := ctx.Deadline()
+	f.stopCtxEnded = append(f.stopCtxEnded, ctx.Err() != nil)
+	f.stopCtxDeadline = append(f.stopCtxDeadline, hasDeadline)
 	return f.stopErr
 }
 
@@ -857,5 +865,290 @@ func TestAdminOverviewShowsPollLine(t *testing.T) {
 	b = getAdmin(t, newServer(nil), "root", adminRole, "/desk/admin/").Body.String()
 	if strings.Contains(b, "CO poll") || !strings.Contains(b, "<h2>Health</h2>") {
 		t.Errorf("overview without a poller shows a poll line:\n%s", b)
+	}
+}
+
+// postStop sends POST /desk/admin/stop with the form body as user with
+// roles and the extra headers.
+func postStop(t *testing.T, srv *http.Server, user, roles string, hdrs map[string]string, form string) *httptest.ResponseRecorder {
+	t.Helper()
+	h := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	for k, v := range hdrs {
+		h[k] = v
+	}
+	return doReq(t, srv, http.MethodPost, user, roles, "/desk/admin/stop", strings.NewReader(form), h)
+}
+
+// deskEvents reads the desk log under root; none when it does not exist.
+func deskEvents(t *testing.T, root string) []desklog.Event {
+	t.Helper()
+	evs, err := (&desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: "video"}).Read()
+	if err != nil {
+		t.Fatalf("read desk log: %v", err)
+	}
+	return evs
+}
+
+// wantAdminHeaders checks the framing and no-store headers of an answer.
+func wantAdminHeaders(t *testing.T, what string, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	for k, want := range map[string]string{
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"Cache-Control":           "no-store",
+	} {
+		if got := rec.Header().Get(k); got != want {
+			t.Errorf("%s: header %s = %q, want %q", what, k, got, want)
+		}
+	}
+}
+
+// stopSessions is a seat list with alice running and bob stopped, both live.
+func stopSessions() *fakeAdminSessions {
+	ready := provision.State{Steps: allDoneSteps()}
+	return &fakeAdminSessions{
+		rows: []session.Row{
+			{User: "alice", Index: 1, Live: true, Running: true, State: ready},
+			{User: "bob", Index: 2, Live: true, Running: false, State: ready},
+		},
+		seats: []registry.Row{{User: "alice", Index: 1, Status: "live"}, {User: "bob", Index: 2, Status: "live"}},
+	}
+}
+
+// An admin's same-origin stop stops the pair once, writes a stop event with
+// code admin and the admin's name, restarts the user's idle clocks and
+// returns to the page with a one-shot notice.
+func TestAdminStopStopsAndLogs(t *testing.T) {
+	sess := stopSessions()
+	clock := &fakeClock{t: time.Date(2026, 11, 17, 8, 52, 30, 0, time.UTC)}
+	act := NewActivity(clock.now)
+	act.Input("alice")
+	srv, root := newAdminServerWith(t, func(d *Deps) {
+		d.Now = func() time.Time { return time.Date(2026, 11, 17, 9, 0, 0, 0, time.UTC) }
+		d.AdminSessions = sess
+		d.Activity = act
+	})
+	appendLog(t, root, desklog.Event{T: 1794900000, User: "alice", Action: "claim", Kind: "video", ID: "1"})
+
+	rec := postStop(t, srv, "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=alice")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("stop: status = %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/desk/admin/" {
+		t.Errorf("stop: Location = %q, want /desk/admin/", got)
+	}
+	wantAdminHeaders(t, "stop", rec)
+	if len(sess.stops) != 1 || sess.stops[0] != "alice" {
+		t.Errorf("stops = %q, want [alice]", sess.stops)
+	}
+	if sess.statusCalls != 0 {
+		t.Errorf("the stop asked for the session status %d times, want 0", sess.statusCalls)
+	}
+	evs := deskEvents(t, root)
+	if len(evs) != 2 {
+		t.Fatalf("desk log has %d events, want 2: %+v", len(evs), evs)
+	}
+	want := desklog.Event{T: 1794906000, User: "alice", Action: "stop", Code: "admin", Note: "by root"}
+	if got := evs[1]; got != want {
+		t.Errorf("last event = %+v, want %+v", got, want)
+	}
+	if _, ok := act.LastInput("alice"); ok {
+		t.Errorf("alice's idle clocks were not restarted after the stop")
+	}
+
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<p class="notice" role="status">stopped alice</p>`; !strings.Contains(b, want) {
+		t.Errorf("page after the stop lacks %q:\n%s", want, b)
+	}
+	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if strings.Contains(b, "stopped alice") {
+		t.Errorf("the notice was shown twice:\n%s", b)
+	}
+}
+
+// A stop that passed every refusal runs to its end when the admin's request
+// has gone away: Stop gets a context that has not ended and has its own
+// time limit, and the event, the restart of the idle clocks and the notice
+// follow as usual.
+func TestAdminStopOutlivesTheRequest(t *testing.T) {
+	sess := stopSessions()
+	clock := &fakeClock{t: time.Date(2026, 11, 17, 8, 52, 30, 0, time.UTC)}
+	act := NewActivity(clock.now)
+	act.Input("alice")
+	srv, root := newAdminServerWith(t, func(d *Deps) {
+		d.Now = func() time.Time { return time.Date(2026, 11, 17, 9, 0, 0, 0, time.UTC) }
+		d.AdminSessions = sess
+		d.Activity = act
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the admin's request is already gone
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/desk/admin/stop", strings.NewReader("user=alice"))
+	access.SetTestHeaders(req, "root", adminRole, testGate)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("stop: status = %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if len(sess.stops) != 1 || sess.stops[0] != "alice" {
+		t.Fatalf("stops = %q, want [alice]", sess.stops)
+	}
+	if sess.stopCtxEnded[0] {
+		t.Errorf("Stop was given a context that had already ended")
+	}
+	if !sess.stopCtxDeadline[0] {
+		t.Errorf("Stop was given a context without a time limit")
+	}
+	evs := deskEvents(t, root)
+	want := desklog.Event{T: 1794906000, User: "alice", Action: "stop", Code: "admin", Note: "by root"}
+	if len(evs) != 1 || evs[0] != want {
+		t.Errorf("desk log = %+v, want [%+v]", evs, want)
+	}
+	if _, ok := act.LastInput("alice"); ok {
+		t.Errorf("alice's idle clocks were not restarted after the stop")
+	}
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<p class="notice" role="status">stopped alice</p>`; !strings.Contains(b, want) {
+		t.Errorf("page after the stop lacks %q:\n%s", want, b)
+	}
+}
+
+// A stop is refused, with no Docker call and no log event, without the
+// same-origin mark, for a name outside the grammar, for a name with no
+// registry row, for an oversized body and for a non-admin.
+func TestAdminStopRefusals(t *testing.T) {
+	cases := []struct {
+		name, user, roles string
+		hdrs              map[string]string
+		form              string
+		code              int
+		text              string
+	}{
+		{"cross-site", "root", adminRole, map[string]string{"Sec-Fetch-Site": "cross-site"}, "user=alice", 403, "Refused: this request did not come from the admin page."},
+		{"no same-origin mark", "root", adminRole, nil, "user=alice", 403, "Refused: this request did not come from the admin page."},
+		{"bad name", "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=Bad+User", 400, "Refused: not a username."},
+		{"no name", "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "", 400, "Refused: not a username."},
+		{"no registry row", "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=zoe", 400, "Refused: zoe has no seat."},
+		{"oversized body", "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=alice&pad=" + strings.Repeat("x", 5000), 413, "Refused: the request is too large."},
+		{"collector", "anna", collectorRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=alice", 403, testContact},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sess := stopSessions()
+			srv, root := newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
+			rec := postStop(t, srv, c.user, c.roles, c.hdrs, c.form)
+			if rec.Code != c.code {
+				t.Errorf("status = %d, want %d (body %q)", rec.Code, c.code, rec.Body.String())
+			}
+			if b := rec.Body.String(); !strings.Contains(b, c.text) {
+				t.Errorf("body %q lacks %q", b, c.text)
+			}
+			wantAdminHeaders(t, c.name, rec)
+			if len(sess.stops) != 0 || sess.statusCalls != 0 {
+				t.Errorf("a refused stop called Stop %q and Status %d times", sess.stops, sess.statusCalls)
+			}
+			if evs := deskEvents(t, root); len(evs) != 0 {
+				t.Errorf("a refused stop wrote %+v", evs)
+			}
+		})
+	}
+
+	// No session data wired: the route answers 404, like an unknown admin path.
+	srv, root := newAdminServer(t)
+	rec := postStop(t, srv, "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=alice")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("without session data: status = %d, want 404", rec.Code)
+	}
+	wantAdminHeaders(t, "without session data", rec)
+	if evs := deskEvents(t, root); len(evs) != 0 {
+		t.Errorf("a stop without session data wrote %+v", evs)
+	}
+}
+
+// A failed stop returns to the page with the error as the notice and
+// writes no event.
+func TestAdminStopFailureWritesNoEvent(t *testing.T) {
+	sess := stopSessions()
+	sess.stopErr = errors.New("docker: container desk-proxy-alice is not ours")
+	srv, root := newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
+	rec := postStop(t, srv, "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=alice")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("failed stop: status = %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if len(sess.stops) != 1 {
+		t.Errorf("stops = %q, want one", sess.stops)
+	}
+	if evs := deskEvents(t, root); len(evs) != 0 {
+		t.Errorf("a failed stop wrote %+v", evs)
+	}
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<p class="notice" role="status">could not stop alice: docker: container desk-proxy-alice is not ours</p>`; !strings.Contains(b, want) {
+		t.Errorf("page after the failed stop lacks %q:\n%s", want, b)
+	}
+}
+
+// A stop that worked stands when the desk log cannot be written, and the
+// notice says the log lacks it.
+func TestAdminStopStandsWhenLogFails(t *testing.T) {
+	sess := stopSessions()
+	srv, _ := newAdminServerWith(t, func(d *Deps) {
+		d.AdminSessions = sess
+		// A directory where the log file should be: every append fails.
+		p := filepath.Join(d.Cfg.DeskRoot, "state", "desk-log.ndjson")
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
+	rec := postStop(t, srv, "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=alice")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("stop: status = %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if len(sess.stops) != 1 || sess.stops[0] != "alice" {
+		t.Errorf("stops = %q, want [alice]", sess.stops)
+	}
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<p class="notice" role="status">stopped alice, but the desk log could not record the stop</p>`; !strings.Contains(b, want) {
+		t.Errorf("page after the stop lacks %q:\n%s", want, b)
+	}
+}
+
+// The Stop button follows Running: a running pair has it, also while its
+// provisioning is not ready; a stopped pair has none, and neither has any
+// row while the session status is unknown. The name in the form is escaped.
+func TestStopButtonOnlyOnRunning(t *testing.T) {
+	ready := provision.State{Steps: allDoneSteps()}
+	notReady := provision.State{Steps: map[string]string{"registry": "done", "dirs": "done"}}
+	sess := &fakeAdminSessions{rows: []session.Row{
+		{User: "alice", Index: 1, Live: true, Running: true, State: ready},
+		{User: "bob", Index: 2, Live: true, Running: false, State: ready},
+		{User: "carol", Index: 3, Live: true, Running: true, State: notReady},
+		{User: `x"<y>&z`, Index: 4, Live: true, Running: true, State: ready},
+	}}
+	srv, _ := newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	for _, want := range []string{
+		`<tr><td>alice</td><td>0:00</td><td>0:00</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop</button></form></td></tr>`,
+		`<tr><td>bob</td><td>0:00</td><td>0:00</td><td>stopped</td></tr>`,
+		`<tr><td>carol</td><td>0:00</td><td>0:00</td><td>at template <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="carol"><button>Stop</button></form></td></tr>`,
+		`<td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="x&#34;&lt;y&gt;&amp;z"><button>Stop</button></form></td></tr>`,
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("page lacks %q:\n%s", want, b)
+		}
+	}
+	if n := strings.Count(b, `action="/desk/admin/stop"`); n != 3 {
+		t.Errorf("page has %d Stop forms, want 3:\n%s", n, b)
+	}
+
+	sess = &fakeAdminSessions{statusErr: errors.New("docker: no answer"), seats: []registry.Row{{User: "alice", Index: 1, Status: "live"}}}
+	srv, _ = newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
+	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	if want := `<tr><td>alice</td><td>0:00</td><td>0:00</td><td>unknown</td></tr>`; !strings.Contains(b, want) {
+		t.Errorf("page lacks %q:\n%s", want, b)
+	}
+	if strings.Contains(b, "/desk/admin/stop") {
+		t.Errorf("a row with an unknown session has a Stop button:\n%s", b)
 	}
 }

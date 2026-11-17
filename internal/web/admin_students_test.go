@@ -182,8 +182,8 @@ func TestAdminStudentsTable(t *testing.T) {
 	inOrder(t, b,
 		`<h2>Collection: TestTube</h2>`,
 		`<h2>Students</h2><table><tr><th>Name</th><th>This week</th><th>Total</th><th>Uploaded</th><th>Session</th></tr>`,
-		`<tr><td><a href="/results/?user=erin">erin</a></td><td>0:00</td><td>0:00</td><td>nothing captured</td><td>running</td></tr>`,
-		`<tr><td><a href="/results/?user=alice">alice</a></td><td>0:10</td><td>0:15</td><td>yes, 09:30</td><td>running, input 7 min ago</td></tr>`,
+		`<tr><td><a href="/results/?user=erin">erin</a></td><td>0:00</td><td>0:00</td><td>nothing captured</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button>Stop</button></form></td></tr>`,
+		`<tr><td><a href="/results/?user=alice">alice</a></td><td>0:10</td><td>0:15</td><td>yes, 09:30</td><td>running, input 7 min ago <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop</button></form></td></tr>`,
 		`<tr><td><a href="/results/?user=carol">carol</a></td><td>0:00</td><td>0:00</td><td>nothing captured</td><td>at template (template missing)</td></tr>`,
 		`<tr><td><a href="/results/?user=bob">bob</a></td><td>0:00</td><td>0:05</td><td>no, captures since Mon 14:00</td><td>stopped</td></tr>`,
 		`</table>`,
@@ -394,7 +394,7 @@ func TestAdminStudentsRunningWithoutInput(t *testing.T) {
 		d.AdminSessions = sess
 	})
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<tr><td>erin</td><td>0:00</td><td>0:00</td><td>running</td></tr>`; !strings.Contains(b, want) {
+	if want := `<tr><td>erin</td><td>0:00</td><td>0:00</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button>Stop</button></form></td></tr>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 	if strings.Contains(b, "running, input") {

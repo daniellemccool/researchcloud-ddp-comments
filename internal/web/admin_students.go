@@ -112,10 +112,11 @@ func (a *adminHandler) studentsSection(ctx context.Context, evs []desklog.Event,
 	return `<h2>Students</h2>` + a.studentsTable(ctx, evs, logKnown, sd) + a.memberLists(evs, logKnown, sd)
 }
 
-// student is one row of the Students table: a live seat and its session
-// cell.
+// student is one row of the Students table: a live seat, its session cell
+// and whether its pair runs (it then has a Stop button).
 type student struct {
 	user, session string
+	running       bool
 }
 
 // studentsTable is one row per live seat, in registry order: the name
@@ -135,7 +136,7 @@ func (a *adminHandler) studentsTable(ctx context.Context, evs []desklog.Event, l
 	case sd.statusErr == nil:
 		for _, r := range sd.rows {
 			if r.Live {
-				list = append(list, student{user: r.User, session: a.sessionCell(r, now)})
+				list = append(list, student{user: r.User, session: a.sessionCell(r, now), running: r.Running})
 			}
 		}
 	case sd.seatsErr == nil:
@@ -167,10 +168,21 @@ func (a *adminHandler) studentsTable(ctx context.Context, evs []desklog.Event, l
 		if a.cfg.FourcatEnabled {
 			b.WriteString(`<td>` + html.EscapeString(uploadCell(a.uploads.Of(ctx, s.user), now)) + `</td>`)
 		}
-		b.WriteString(`<td>` + html.EscapeString(s.session) + `</td></tr>`)
+		b.WriteString(`<td>` + html.EscapeString(s.session) + stopButton(s) + `</td></tr>`)
 	}
 	b.WriteString(`</table>`)
 	return b.String()
+}
+
+// stopButton is the Stop form of a row whose pair runs (Row.Running, also
+// while its provisioning is not ready), after the session text; "" for any
+// other row, and for every row while the session status is unknown.
+func stopButton(s student) string {
+	if !s.running {
+		return ""
+	}
+	return ` <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="` +
+		html.EscapeString(s.user) + `"><button>Stop</button></form>`
 }
 
 // nameCell is the person's name, linked to /results/?user=<name> when 4CAT
