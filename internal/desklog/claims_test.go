@@ -289,6 +289,30 @@ func TestViewIgnoresStopEvents(t *testing.T) {
 	}
 }
 
+// TestViewIgnoresActiveEvents: an `active` mark (time worked) marks nothing
+// in the claim view and takes no item.
+func TestViewIgnoresActiveEvents(t *testing.T) {
+	l := newTestLog(t)
+	evs := []Event{
+		{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "1", Batch: 1, Code: ""},
+		{T: 300, User: "alice", Action: "active", Code: ""},
+		{T: 600, User: "bob", Action: "active", Code: ""},
+	}
+	v := l.ViewOf("alice", evs)
+	if len(v.Claims) != 1 || v.Claims[0].Key != (Key{Kind: "video", ID: "1"}) {
+		t.Fatalf("claims = %+v, want only key 1", v.Claims)
+	}
+	if len(v.Done) != 0 || len(v.Opened) != 0 || len(v.Problems) != 0 {
+		t.Fatalf("view = %+v, want active events to mark nothing", v)
+	}
+	if v := l.ViewOf("bob", evs); len(v.Claims) != 0 {
+		t.Fatalf("bob's claims = %+v, want none", v.Claims)
+	}
+	if taken := l.Taken(evs); len(taken) != 1 {
+		t.Fatalf("taken = %v, want only key 1", taken)
+	}
+}
+
 // A claim after an unfinished last line succeeds: the fragment is not read
 // as a bad line, and it is cut before the claim is written, so every line of
 // the file parses afterwards.

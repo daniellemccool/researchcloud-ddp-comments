@@ -6,7 +6,9 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 )
 
@@ -30,6 +32,8 @@ header{padding:12px 14px;border-bottom:1px solid var(--line);background:#fff}
 header b{font-size:15px}.who{color:var(--muted);font-size:12px}
 .progress{margin-top:6px;font-size:12px;color:var(--muted)}
 .bar{height:6px;background:var(--line);border-radius:3px;margin-top:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--ok)}
+.worked{margin-top:6px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+details.days{padding:0;border:0;background:none;font-size:12px;margin-top:2px}
 details{padding:8px 14px;border-bottom:1px solid var(--line);background:#fff;font-size:13px}
 details summary{cursor:pointer;color:var(--accent)}details ol{margin:6px 0 2px 18px;padding:0}
 .list{flex:1;overflow:auto;padding:10px 10px 4px}
@@ -65,7 +69,7 @@ const PAGE = `<!doctype html>
 </style></head>
 <body>
 <aside>
-<header><b>Your %%NOUN%%s</b> <span class="who">%%USER%%</span>%%PROGRESS%%</header>
+<header><b>Your %%NOUN%%s</b> <span class="who">%%USER%%</span>%%PROGRESS%%%%WORKED%%</header>
 <details%%OPEN_HELP%%><summary>How to collect</summary><ol>
 <li>Click <b>Open next %%NOUN%%</b> (or an item in the list). It opens in the browser on the right.</li>
 <li>Open the comments and scroll until no more load%%TIMER_HELP%%. Don't open replies.</li>
@@ -91,11 +95,12 @@ document.getElementById('screen').addEventListener('load',function(){try{if(this
 function showStopped(){stopped=true;document.getElementById('stopped').hidden=false;}
 function showDenied(){stopped=true;document.getElementById('denied').hidden=false;}
 function refused(r){return r.status===401||r.status===403||r.type==='opaqueredirect';}
+function showFigures(j){const w=document.getElementById('worked');if(w&&typeof j.worked==='string')w.textContent=j.worked;}
 setInterval(async()=>{if(stopped)return;const hadInput=sawInput;sawInput=false;
  try{const r=hadInput?await fetch('active',{method:'POST',redirect:'manual'}):await fetch('status',{redirect:'manual'});
   if(refused(r)){showDenied();return;}
   if(!r.ok){if(hadInput)sawInput=true;return;}
-  const j=await r.json();
+  const j=await r.json();showFigures(j);
   if(hadInput){if(!j.running)showStopped();}
   else if(j.ready)wasReady=true;else if(wasReady)showStopped();
  }catch(e){if(hadInput)sawInput=true;}},60000);
@@ -212,9 +217,11 @@ type pageParams struct {
 	ProgressHTML  string // already HTML
 	Body          string // already HTML
 	OpenHelp      bool
-	FooterHint    *string // nil hides the footer
-	IdleMinutes   int     // N of the stopped banner, desk_idle_seconds/60 rounded down, at least 1
-	Contact       string  // desk_contact, escaped by deskPage
+	FooterHint    *string        // nil hides the footer
+	IdleMinutes   int            // N of the stopped banner, desk_idle_seconds/60 rounded down, at least 1
+	Contact       string         // desk_contact, escaped by deskPage
+	Worked        desklog.Worked // the user's time worked, shown in the header
+	Now           time.Time      // the clock's reading: which of Worked's days is today
 }
 
 // deskPage renders the two-pane page. Body and
@@ -250,6 +257,7 @@ func deskPage(p pageParams) string {
 		"%%USER%%", user,
 		"%%NOUN%%", html.EscapeString(p.Noun),
 		"%%PROGRESS%%", p.ProgressHTML,
+		"%%WORKED%%", workedHTML(p.Worked, p.Now),
 		"%%OPEN_HELP%%", openHelp,
 		"%%BODY%%", p.Body,
 		"%%TIMER_HELP%%", timerHelp,

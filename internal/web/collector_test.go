@@ -165,6 +165,13 @@ type collectorEnv struct {
 
 func newCollectorEnv(t *testing.T, fourcatEnabled bool) *collectorEnv {
 	t.Helper()
+	return newCollectorEnvWith(t, fourcatEnabled, nil)
+}
+
+// newCollectorEnvWith is newCollectorEnv with fill free to set further Deps
+// (the clock, for one) before the server is built.
+func newCollectorEnvWith(t *testing.T, fourcatEnabled bool, fill func(*Deps)) *collectorEnv {
+	t.Helper()
 	root := t.TempDir()
 	plat := testPlatform()
 	cfg := &config.Config{
@@ -183,7 +190,7 @@ func newCollectorEnv(t *testing.T, fourcatEnabled bool) *collectorEnv {
 	sess := &fakeSessions{}
 	dlog := &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: plat.DefaultKind}
 	ac := access.Config{CollectorRole: collectorRole, AdminRole: adminRole, GateSecret: testGate}
-	srv := New(Deps{
+	d := Deps{
 		Cfg:      cfg,
 		Access:   ac,
 		Platform: plat,
@@ -191,8 +198,11 @@ func newCollectorEnv(t *testing.T, fourcatEnabled bool) *collectorEnv {
 		Prov:     prov,
 		Sessions: sess,
 		Log:      dlog,
-	})
-	return &collectorEnv{srv: srv, root: root, cfg: cfg, prov: prov, sess: sess, log: dlog}
+	}
+	if fill != nil {
+		fill(&d)
+	}
+	return &collectorEnv{srv: New(d), root: root, cfg: cfg, prov: prov, sess: sess, log: dlog}
 }
 
 // doMethod sends a gated request; a POST carries Sec-Fetch-Site: same-origin,
@@ -731,8 +741,8 @@ func TestStatusJSON(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
-	if b := rec.Body.String(); b != `{"ready":true}` {
-		t.Errorf("body = %q, want {\"ready\":true}", b)
+	if ans := checkInBody(t, rec); ans["ready"] != true {
+		t.Errorf("body = %q, want ready true", rec.Body.String())
 	}
 }
 
@@ -743,8 +753,8 @@ func TestStatusNotReadyWhenFirefoxExited(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if b := rec.Body.String(); b != `{"ready":false}` {
-		t.Errorf("body = %q, want {\"ready\":false}", b)
+	if ans := checkInBody(t, rec); ans["ready"] != false {
+		t.Errorf("body = %q, want ready false", rec.Body.String())
 	}
 }
 
@@ -1197,8 +1207,8 @@ func TestActiveRecordsInputAndAnswersRunning(t *testing.T) {
 		t.Fatal("setup: alice should be idle before the heartbeat")
 	}
 	rec := e.post(t, "alice", collectorRole, "/desk/active")
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"running":true}` {
-		t.Fatalf("active = %d %q, want 200 {\"running\":true}", rec.Code, rec.Body.String())
+	if ans := checkInBody(t, rec); ans["running"] != true {
+		t.Fatalf("active = %q, want running true", rec.Body.String())
 	}
 	if idle, why := act.Idle("alice", 5*time.Minute); idle && why == "no input" {
 		t.Errorf("alice idle (%s) right after /desk/active; want fresh input", why)
@@ -1208,8 +1218,8 @@ func TestActiveRecordsInputAndAnswersRunning(t *testing.T) {
 func TestActiveNotRunning(t *testing.T) {
 	e, _, _ := newActiveEnv(t)
 	rec := e.post(t, "alice", collectorRole, "/desk/active")
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"running":false}` {
-		t.Fatalf("active = %d %q, want 200 {\"running\":false}", rec.Code, rec.Body.String())
+	if ans := checkInBody(t, rec); ans["running"] != false {
+		t.Fatalf("active = %q, want running false", rec.Body.String())
 	}
 }
 
@@ -1234,8 +1244,89 @@ func TestActiveWithoutActivityStillAnswers(t *testing.T) {
 	e := newCollectorEnv(t, false)
 	e.sess.running = true
 	rec := e.post(t, "alice", collectorRole, "/desk/active")
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"running":true}` {
-		t.Fatalf("active = %d %q", rec.Code, rec.Body.String())
+	if ans := checkInBody(t, rec); ans["running"] != true {
+		t.Fatalf("active = %q, want running true", rec.Body.String())
+	}
+}
+
+// activeMarks returns the desk log's events, which in these tests are only
+// the `active` marks the heartbeat wrote.
+func activeMarks(t *testing.T, e *collectorEnv) []desklog.Event {
+	t.Helper()
+	evs, err := e.log.Read()
+	if err != nil {
+		t.Fatalf("read desk log: %v", err)
+	}
+	return evs
+}
+
+// TestActiveWritesOneMarkPerSlot: the heartbeat appends one `active` event
+// per user per five-minute slot, stamped with the slot's start, and the
+// check-in without input writes none. 1,000,000 is 100 seconds into the slot
+// that starts at 999,900.
+func TestActiveWritesOneMarkPerSlot(t *testing.T) {
+	clock := time.Unix(1_000_000, 0)
+	e := newCollectorEnvWith(t, false, func(d *Deps) { d.Now = func() time.Time { return clock } })
+	e.sess.running = true
+
+	if rec := e.post(t, "alice", collectorRole, "/desk/active"); rec.Code != http.StatusOK {
+		t.Fatalf("first active: status %d", rec.Code)
+	}
+	clock = time.Unix(1_000_199, 0) // the last second of the same slot
+	if rec := e.post(t, "alice", collectorRole, "/desk/active"); rec.Code != http.StatusOK {
+		t.Fatalf("second active: status %d", rec.Code)
+	}
+	evs := activeMarks(t, e)
+	if len(evs) != 1 {
+		t.Fatalf("after two heartbeats in one slot the log has %d events, want 1: %+v", len(evs), evs)
+	}
+	if want := (desklog.Event{T: 999_900, User: "alice", Action: "active", Code: ""}); evs[0] != want {
+		t.Errorf("mark = %+v, want %+v", evs[0], want)
+	}
+
+	clock = time.Unix(1_000_200, 0) // the next slot
+	e.post(t, "alice", collectorRole, "/desk/active")
+	e.post(t, "bob", collectorRole, "/desk/active") // another user, same slot
+	if rec := e.get(t, "alice", collectorRole, "/desk/status"); rec.Code != http.StatusOK {
+		t.Fatalf("status: %d", rec.Code)
+	}
+	evs = activeMarks(t, e)
+	if len(evs) != 3 {
+		t.Fatalf("log has %d events, want 3: %+v", len(evs), evs)
+	}
+	if evs[1].T != 1_000_200 || evs[1].User != "alice" || evs[2].T != 1_000_200 || evs[2].User != "bob" {
+		t.Errorf("later marks = %+v, want alice then bob at 1000200", evs[1:])
+	}
+}
+
+// TestActiveSurvivesLogFailure: a desk log that cannot be written never
+// fails the check-in (the idle stop must not depend on it), and the slot is
+// not remembered, so the mark is written once the log works again.
+func TestActiveSurvivesLogFailure(t *testing.T) {
+	clock := time.Unix(1_000_000, 0)
+	e := newCollectorEnvWith(t, false, func(d *Deps) { d.Now = func() time.Time { return clock } })
+	e.sess.running = true
+	state := filepath.Join(e.root, "state")
+	if err := os.WriteFile(state, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", state, err)
+	}
+	rec := e.post(t, "alice", collectorRole, "/desk/active")
+	var ans struct {
+		Running *bool `json:"running"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &ans); err != nil {
+		t.Fatalf("active body %q: %v", rec.Body.String(), err)
+	}
+	if rec.Code != http.StatusOK || ans.Running == nil || !*ans.Running {
+		t.Fatalf("active with an unwritable log = %d %q, want 200 with running true", rec.Code, rec.Body.String())
+	}
+
+	if err := os.Remove(state); err != nil {
+		t.Fatal(err)
+	}
+	e.post(t, "alice", collectorRole, "/desk/active") // same slot, the log works now
+	if evs := activeMarks(t, e); len(evs) != 1 || evs[0].T != 999_900 {
+		t.Errorf("after the log came back the marks are %+v, want one at 999900", evs)
 	}
 }
 

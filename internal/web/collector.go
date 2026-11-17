@@ -25,13 +25,16 @@ func identity(r *http.Request) access.Identity {
 	return r.Context().Value(ctxKey{}).(access.Identity)
 }
 
-// serveStatus is GET /desk/status: {"ready":true|false} from Sessions.Ready.
+// serveStatus is GET /desk/status, the check-in without input:
+// {"ready":true|false} from Sessions.Ready, plus the display text a page
+// left open keeps current ("worked", the time line).
 func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
+	user := identity(r).User
 	ready := false
 	if h.sessions != nil {
-		ready = h.sessions.Ready(r.Context(), identity(r).User)
+		ready = h.sessions.Ready(r.Context(), user)
 	}
-	body, err := json.Marshal(map[string]bool{"ready": ready})
+	body, err := json.Marshal(map[string]any{"ready": ready, "worked": workedLine(h.workedOf(user))})
 	if err != nil {
 		log.Printf("web: status: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -43,18 +46,21 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveActive is POST /desk/active, the page heartbeat: it records that the
-// collector touched mouse or keyboard and answers {"running":bool}, so the
-// page can show the stopped banner once the pair is gone.
+// collector touched mouse or keyboard, marks the current slot as worked, and
+// answers {"running":bool}, so the page can show the stopped banner once the
+// pair is gone, plus the same display text as serveStatus; the time line
+// already counts the slot just marked.
 func (h *handler) serveActive(w http.ResponseWriter, r *http.Request) {
 	user := identity(r).User
 	if h.activity != nil {
 		h.activity.Input(user)
 	}
+	h.markActive(user)
 	running := false
 	if h.sessions != nil {
 		running = h.sessions.IsRunning(r.Context(), user)
 	}
-	body, err := json.Marshal(map[string]bool{"running": running})
+	body, err := json.Marshal(map[string]any{"running": running, "worked": workedLine(h.workedOf(user))})
 	if err != nil {
 		log.Printf("web: active: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -63,6 +69,44 @@ func (h *handler) serveActive(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// markActive appends user's `active` mark for the current five-minute slot
+// to the desk log, at most once per user per slot; time worked is read only
+// from these marks (desklog.SlotsByUser). The last slot written is kept in
+// memory, so a desk restart may write one duplicate, which the reader counts
+// once. A failed append is logged and the slot is forgotten again: the
+// check-in, and with it the idle stop, never depends on the log being
+// writable. The slot is taken under slotMu and the append runs outside it,
+// so slotMu is never held over a write. (The answers of both check-ins read
+// the desk log for the time line, and that read waits for an append in
+// progress, as the page load's read always has.)
+func (h *handler) markActive(user string) {
+	if h.deskLog == nil {
+		return
+	}
+	slot := desklog.SlotStart(h.now().Unix())
+	h.slotMu.Lock()
+	last, marked := h.lastSlot[user]
+	if marked && last == slot {
+		h.slotMu.Unlock()
+		return
+	}
+	h.lastSlot[user] = slot
+	h.slotMu.Unlock()
+
+	if err := h.deskLog.Append(desklog.Event{T: slot, User: user, Action: "active", Code: ""}); err != nil {
+		log.Printf("web: desk log (active %s): %v", user, err)
+		h.slotMu.Lock()
+		if h.lastSlot[user] == slot { // a later slot's mark may have been taken meanwhile
+			if marked {
+				h.lastSlot[user] = last
+			} else {
+				delete(h.lastSlot, user)
+			}
+		}
+		h.slotMu.Unlock()
+	}
 }
 
 // serveClaim is POST /desk/claim: n must be ASCII

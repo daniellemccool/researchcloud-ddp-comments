@@ -262,6 +262,7 @@ func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 		}
 	}
 
+	now := h.now()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(deskPage(pageParams{
@@ -277,6 +278,8 @@ func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 		FooterHint:    footer,
 		IdleMinutes:   h.cfg.IdleSeconds / 60,
 		Contact:       h.cfg.Contact,
+		Worked:        workedFrom(evs, user, now),
+		Now:           now,
 	})))
 }
 

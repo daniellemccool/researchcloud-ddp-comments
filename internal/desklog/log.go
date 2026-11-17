@@ -2,7 +2,8 @@
 // <DeskRoot>/state/desk-log.ndjson, one JSON event per line, stdlib only.
 //
 // The log is the only record of who claimed which item, which items were
-// opened in the browser, and which were reported as a problem. It carries the
+// opened in the browser, which were reported as a problem, and in which
+// five-minute slots a person's page reported input (worked.go). It carries the
 // same events the Python prototype wrote, so older logs on existing
 // workspaces keep counting: legacy lines carry video_id instead of id and may
 // lack kind; they are read, never written.
@@ -35,7 +36,7 @@ import (
 type Event struct {
 	T       int64  `json:"t"`
 	User    string `json:"user"`
-	Action  string `json:"action"` // claim | open | problem | stop (codes idle_no_input, idle_no_screen) | revoke (code co_absent)
+	Action  string `json:"action"` // claim | open | problem | active (t is the slot start, worked.go) | stop (codes idle_no_input, idle_no_screen) | revoke (code co_absent)
 	Kind    string `json:"kind,omitempty"`
 	ID      string `json:"id,omitempty"`
 	Batch   int    `json:"batch,omitempty"`

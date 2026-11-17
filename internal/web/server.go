@@ -66,6 +66,9 @@ type Deps struct {
 	FourcatProxy http.Handler // nil until a later task
 	Relay        http.Handler // nil until a later task
 	Admin        http.Handler // nil until a later task
+	// Now is the clock of everything the pages show or record as a time
+	// (the `active` marks, time worked); nil means time.Now.
+	Now func() time.Time
 }
 
 // New returns the gated listener's server. Every request goes through the
@@ -92,6 +95,11 @@ func New(d Deps) *http.Server {
 		activity: d.Activity,
 		members:  d.Members,
 		kinds:    newPlatformKinds(d.Platform),
+		now:      d.Now,
+		lastSlot: map[string]int64{},
+	}
+	if h.now == nil {
+		h.now = time.Now
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /desk/{$}", h.serveHome)                     // the collector page, exactly /desk/
@@ -163,6 +171,10 @@ type handler struct {
 	activity *Activity      // per-user input and screen clocks, nil → nothing recorded
 	members  membersView    // the CO poll's view, nil → nobody absent
 	kinds    *platformKinds // the pool.Kinds adapter over the platform
+
+	now      func() time.Time // the clock of the marks and the times shown
+	slotMu   sync.Mutex       // guards lastSlot
+	lastSlot map[string]int64 // user → slot start of the last `active` mark written
 
 	provisioning   sync.Map      // users with an Advance goroutine in flight
 	advanceTimeout time.Duration // deadline of a kicked Advance; 0 → defaultAdvanceTimeout
