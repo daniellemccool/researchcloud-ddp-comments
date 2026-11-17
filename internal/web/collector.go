@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -34,7 +35,9 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 	if h.sessions != nil {
 		ready = h.sessions.Ready(r.Context(), user)
 	}
-	body, err := json.Marshal(map[string]any{"ready": ready, "worked": workedLine(h.workedOf(user))})
+	ans := h.figures(r.Context(), user)
+	ans["ready"] = ready
+	body, err := json.Marshal(ans)
 	if err != nil {
 		log.Printf("web: status: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -60,7 +63,9 @@ func (h *handler) serveActive(w http.ResponseWriter, r *http.Request) {
 	if h.sessions != nil {
 		running = h.sessions.IsRunning(r.Context(), user)
 	}
-	body, err := json.Marshal(map[string]any{"running": running, "worked": workedLine(h.workedOf(user))})
+	ans := h.figures(r.Context(), user)
+	ans["running"] = running
+	body, err := json.Marshal(ans)
 	if err != nil {
 		log.Printf("web: active: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -69,6 +74,30 @@ func (h *handler) serveActive(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// figures is the display text both check-in answers carry, so a page left
+// open stays right: "worked", the time line, and with 4CAT enabled "footer"
+// (the footer's inner HTML) and "footer_warn".
+func (h *handler) figures(ctx context.Context, user string) map[string]any {
+	ans := map[string]any{"worked": workedLine(h.workedOf(user))}
+	if footer, warn := h.footer(ctx, user, h.now()); footer != nil {
+		ans["footer"], ans["footer_warn"] = *footer, warn
+	}
+	return ans
+}
+
+// footer is the student's upload footer and whether it warns; nil without
+// 4CAT, where the page has no footer. Whether it shows at all follows the
+// configuration, not whether a reader is wired: without one the state is
+// unknown and the footer is the plain reminder.
+func (h *handler) footer(ctx context.Context, user string, now time.Time) (*string, bool) {
+	if !h.cfg.FourcatEnabled {
+		return nil, false
+	}
+	st := h.uploads.Of(ctx, user)
+	text := uploadFooter(h.platform.UploadHint, st, now)
+	return &text, st.Kind == uploadDue
 }
 
 // markActive appends user's `active` mark for the current five-minute slot

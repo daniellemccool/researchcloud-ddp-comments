@@ -276,6 +276,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			Logf: mgr.Log.Printf,
 		}
 		go study.Run(serveCtx, time.Minute)
+		deps.Uploads = fc // only here: a nil *fourcat.Client must not become a non-nil interface
 	}
 	deps.FourcatProxy = fourcatProxy(cfg, study, prov)
 

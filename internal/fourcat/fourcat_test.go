@@ -624,6 +624,42 @@ func TestRequestTokenBadUsername(t *testing.T) {
 	}
 }
 
+// TestLatestUploadsSQL: the statement is constant text; a row counts only
+// when it has three fields, a valid username as owner and an integer time,
+// so 4CAT's `tag:` owners and anything unexpected are skipped.
+func TestLatestUploadsSQL(t *testing.T) {
+	ctx := context.Background()
+	const want = `SELECT o.name, d.type, max(d.timestamp) FROM datasets d JOIN datasets_owners o ON o.key = d.key WHERE d.is_finished AND d.num_rows > 0 AND o.role = 'owner' GROUP BY o.name, d.type`
+
+	f := newFakeWith4CAT(t)
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: "alice|tiktok-search|100\nalice|tiktok-comments-search|120\ntag:x|tiktok-search|500\nbroken line\nbob|tiktok-search|soon\nbob|a|b|7\n"}
+	c := &Client{Docker: f, Backend: backendName, DB: dbName}
+	got, err := c.LatestUploads(ctx)
+	if err != nil {
+		t.Fatalf("LatestUploads: %v", err)
+	}
+	if len(f.Execs) != 1 || f.Execs[0].Container != dbName || f.Execs[0].Cmd[len(f.Execs[0].Cmd)-1] != want {
+		t.Errorf("execs = %v, want one psql with %q", f.Execs, want)
+	}
+	if len(got) != 1 || len(got["alice"]) != 2 || got["alice"]["tiktok-search"] != 100 || got["alice"]["tiktok-comments-search"] != 120 {
+		t.Errorf("uploads = %v, want only alice with tiktok-search 100 and tiktok-comments-search 120", got)
+	}
+
+	f = newFakeWith4CAT(t)
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 0, Stdout: ""}
+	c = &Client{Docker: f, Backend: backendName, DB: dbName}
+	if got, err := c.LatestUploads(ctx); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("no datasets: %v, %v; want an empty map and no error", got, err)
+	}
+
+	f = newFakeWith4CAT(t)
+	f.ExecResults["psql -v"] = docker.Exec{ExitCode: 2}
+	c = &Client{Docker: f, Backend: backendName, DB: dbName}
+	if _, err := c.LatestUploads(ctx); err == nil {
+		t.Error("a failing psql is not an error")
+	}
+}
+
 func TestDeleteTokenSQL(t *testing.T) {
 	ctx := context.Background()
 	for _, out := range []string{"DELETE 1\n", "DELETE 0\n"} {

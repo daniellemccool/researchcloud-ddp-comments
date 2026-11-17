@@ -67,8 +67,11 @@ type Deps struct {
 	Relay        http.Handler // nil until a later task
 	Admin        http.Handler // nil until a later task
 	// Now is the clock of everything the pages show or record as a time
-	// (the `active` marks, time worked); nil means time.Now.
+	// (the `active` marks, time worked, the upload cache); nil means time.Now.
 	Now func() time.Time
+	// Uploads reads 4CAT's latest uploads (*fourcat.Client); nil when 4CAT
+	// is disabled or not wired, and the upload state is then unknown.
+	Uploads uploadsReader
 }
 
 // New returns the gated listener's server. Every request goes through the
@@ -97,6 +100,7 @@ func New(d Deps) *http.Server {
 		kinds:    newPlatformKinds(d.Platform),
 		now:      d.Now,
 		lastSlot: map[string]int64{},
+		uploads:  newUploadStates(d),
 	}
 	if h.now == nil {
 		h.now = time.Now
@@ -175,6 +179,7 @@ type handler struct {
 	now      func() time.Time // the clock of the marks and the times shown
 	slotMu   sync.Mutex       // guards lastSlot
 	lastSlot map[string]int64 // user → slot start of the last `active` mark written
+	uploads  *uploadStates    // the upload state per person; nil without a reader → unknown
 
 	provisioning   sync.Map      // users with an Advance goroutine in flight
 	advanceTimeout time.Duration // deadline of a kicked Advance; 0 → defaultAdvanceTimeout

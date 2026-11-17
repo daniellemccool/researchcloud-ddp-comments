@@ -109,7 +109,7 @@ func (h *handler) serveHome(w http.ResponseWriter, r *http.Request) {
 		if h.activity != nil {
 			h.activity.Forget(user)
 		}
-		h.servePage(w, id)
+		h.servePage(w, r, id)
 	}
 }
 
@@ -146,7 +146,7 @@ func (h *handler) say(w http.ResponseWriter, status int, text string, refresh in
 }
 
 // servePage renders the collector page.
-func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
+func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Identity) {
 	user := id.User
 	evs, err := h.deskLog.Read()
 	if err != nil {
@@ -250,11 +250,8 @@ func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 	if len(shown) > 0 {
 		progressHTML = progress(nDone, len(shown))
 	}
-	var footer *string
-	if h.cfg.FourcatEnabled {
-		hint := h.platform.UploadHint
-		footer = &hint
-	}
+	now := h.now()
+	footer, footerWarn := h.footer(r.Context(), user, now)
 	noteCodes := make([]string, 0, len(h.platform.Problems))
 	for _, p := range h.problems() {
 		if p.Note {
@@ -262,7 +259,6 @@ func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 		}
 	}
 
-	now := h.now()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(deskPage(pageParams{
@@ -275,7 +271,8 @@ func (h *handler) servePage(w http.ResponseWriter, id access.Identity) {
 		ProgressHTML:  progressHTML,
 		Body:          body.String(),
 		OpenHelp:      len(view.Claims) == 0,
-		FooterHint:    footer,
+		Footer:        footer,
+		FooterWarn:    footerWarn,
 		IdleMinutes:   h.cfg.IdleSeconds / 60,
 		Contact:       h.cfg.Contact,
 		Worked:        workedFrom(evs, user, now),

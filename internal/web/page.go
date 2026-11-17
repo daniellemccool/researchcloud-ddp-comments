@@ -55,6 +55,7 @@ li[data-state=todo] .mark::before{content:"\25CB";color:var(--muted)}
 .more{padding:8px 0}.more button{font:inherit;padding:6px 10px;margin-right:6px;border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:6px;cursor:pointer}
 .hint{font-size:12px;color:var(--muted);margin:6px 2px}
 footer{padding:10px 14px;border-top:1px solid var(--line);background:#fff8e6;font-size:12px}
+footer.warn{background:#ffe3cc;color:var(--warn);font-weight:600;border-top:2px solid var(--warn)}
 #starting{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:15px}
 #stopped,#denied{position:fixed;top:0;left:0;right:0;z-index:10;padding:14px;text-align:center;font-size:15px;font-weight:600;background:#fff8e6;color:var(--warn);border-bottom:1px solid var(--line)}
 #stopped[hidden]{display:none}
@@ -95,7 +96,8 @@ document.getElementById('screen').addEventListener('load',function(){try{if(this
 function showStopped(){stopped=true;document.getElementById('stopped').hidden=false;}
 function showDenied(){stopped=true;document.getElementById('denied').hidden=false;}
 function refused(r){return r.status===401||r.status===403||r.type==='opaqueredirect';}
-function showFigures(j){const w=document.getElementById('worked');if(w&&typeof j.worked==='string')w.textContent=j.worked;}
+function showFigures(j){const w=document.getElementById('worked');if(w&&typeof j.worked==='string')w.textContent=j.worked;
+ const f=document.getElementById('upload');if(f&&typeof j.footer==='string'){f.innerHTML=j.footer;f.classList.toggle('warn',j.footer_warn===true);}}
 setInterval(async()=>{if(stopped)return;const hadInput=sawInput;sawInput=false;
  try{const r=hadInput?await fetch('active',{method:'POST',redirect:'manual'}):await fetch('status',{redirect:'manual'});
   if(refused(r)){showDenied();return;}
@@ -217,7 +219,8 @@ type pageParams struct {
 	ProgressHTML  string // already HTML
 	Body          string // already HTML
 	OpenHelp      bool
-	FooterHint    *string        // nil hides the footer
+	Footer        *string        // the footer's inner HTML (uploadFooter); nil hides the footer
+	FooterWarn    bool           // the footer warns: something captured is not in 4CAT yet
 	IdleMinutes   int            // N of the stopped banner, desk_idle_seconds/60 rounded down, at least 1
 	Contact       string         // desk_contact, escaped by deskPage
 	Worked        desklog.Worked // the user's time worked, shown in the header
@@ -225,11 +228,15 @@ type pageParams struct {
 }
 
 // deskPage renders the two-pane page. Body and
-// ProgressHTML are already HTML; FooterHint nil hides the footer.
+// ProgressHTML are already HTML, and so is Footer; a nil Footer hides the footer.
 func deskPage(p pageParams) string {
 	footer := ""
-	if p.FooterHint != nil {
-		footer = "<footer>Before you leave: click <b>Z</b> in the browser's toolbar, " + *p.FooterHint + ".</footer>\n"
+	if p.Footer != nil {
+		warn := ""
+		if p.FooterWarn {
+			warn = ` class="warn"`
+		}
+		footer = `<footer id="upload"` + warn + `>` + *p.Footer + "</footer>\n"
 	}
 	noteCodes := "[]" // a nil NoteCodes renders as [], never null
 	if p.NoteCodes != nil {

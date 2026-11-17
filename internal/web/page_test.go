@@ -74,7 +74,7 @@ func TestProgress(t *testing.T) {
 }
 
 func TestDeskPageSlotsAndOnePass(t *testing.T) {
-	hint := "upload them to 4CAT"
+	footer := "Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT."
 	out := deskPage(pageParams{
 		User:          "alice",
 		PlatformLabel: "TestTube",
@@ -84,7 +84,7 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 		ProgressHTML:  progress(0, 1),
 		Body:          `<p>%%USER%% stays literal</p>`,
 		OpenHelp:      true,
-		FooterHint:    &hint,
+		Footer:        &footer,
 	})
 	for _, want := range []string{
 		"<title>TestTube desk — alice</title>",
@@ -94,7 +94,7 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 		", or until the timer reaches 0:00",
 		"const SECONDS=120,NOTE_CODES=[\"OTHER\"]",
 		`<p>%%USER%% stays literal</p>`, // one pass: substituted text is never rescanned
-		"<footer>Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>",
+		`<footer id="upload">Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>`,
 		`fetch('status')`,
 		`f.src='/desk/vnc/?resize=remote'`, // the remote browser follows the frame's size
 	} {
@@ -140,8 +140,8 @@ func TestDeskPageAdminLinkAndNoFooter(t *testing.T) {
 	if !strings.Contains(out, `<span class="who">boss <a href="/desk/admin/">admin</a></span>`) {
 		t.Errorf("admin page lacks the admin link after the user name")
 	}
-	if strings.Contains(out, "<footer>") {
-		t.Errorf("page without a footer hint renders a footer")
+	if strings.Contains(out, "<footer") {
+		t.Errorf("page without a footer renders one")
 	}
 	if strings.Contains(out, "TIMER_HELP") || strings.Contains(out, "timer reaches") {
 		t.Errorf("page with SECONDS=0 still has the timer help")

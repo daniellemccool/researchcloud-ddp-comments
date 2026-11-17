@@ -598,7 +598,7 @@ func TestHomePageFooterHintOnlyWhenFourcatEnabled(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if b := rec.Body.String(); strings.Contains(b, "upload them to 4CAT") || strings.Contains(b, "<footer>") {
+	if b := rec.Body.String(); strings.Contains(b, "upload them to 4CAT") || strings.Contains(b, "<footer") {
 		t.Errorf("page shows the footer hint although 4CAT is disabled")
 	}
 }
