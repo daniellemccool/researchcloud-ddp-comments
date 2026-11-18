@@ -51,3 +51,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 ### Pool
 
 - [0026 — Draw each claim at random, weighted by age, never by donor](./0026-draw-each-claim-at-random-weighted-by-age-never-by-donor.md)
+
+### Retention
+
+- [0027 — Expire only superseded snapshots, never a collector's newest two](./0027-expire-only-superseded-snapshots-never-a-collector-s-newest-two.md)
