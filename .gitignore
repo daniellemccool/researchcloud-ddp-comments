@@ -11,6 +11,7 @@ deploy/.env
 /CLAUDE.md
 /.claude/
 /docs/superpowers/
+/docs/followups.md
 /docs/box-inventory-*.md
 /docs/proxy-spike-*.md
 /docs/sandbox-log.md
