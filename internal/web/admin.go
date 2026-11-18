@@ -78,6 +78,7 @@ type adminHandler struct {
 	cfg      *config.Config
 	platform *platform.Platform
 	poolPath string
+	pool     *pool.Cache // nil → pool.csv read per view (poolSnapshot)
 	kinds    *platformKinds
 	log      *desklog.Log
 	// members is the CO poll: its status line and its last good member
@@ -108,6 +109,7 @@ func NewAdmin(d Deps) http.Handler {
 		cfg:      d.Cfg,
 		platform: d.Platform,
 		poolPath: filepath.Join(d.Cfg.DeskRoot, "pool.csv"),
+		pool:     d.Pool,
 		kinds:    newPlatformKinds(d.Platform),
 		log:      d.Log,
 		sessions: d.AdminSessions,
@@ -254,12 +256,12 @@ func (a *adminHandler) readLog() ([]desklog.Event, error) {
 func (a *adminHandler) collectionSection(evs []desklog.Event, logKnown bool) string {
 	queue := ""
 	var c collection
-	rows, err := pool.Read(a.poolPath, a.kinds.Default())
+	snap, err := a.poolSnapshot()
 	if err != nil {
 		queue = "pool.csv unreadable: " + html.EscapeString(err.Error())
 		c = collect(nil, evs, a.deskLog())
 	} else {
-		c = collect(a.openable(rows), evs, a.deskLog())
+		c = collect(snap.Valid, evs, a.deskLog())
 		problems := strconv.Itoa(c.Problems) + " problems"
 		if c.Problems == 1 {
 			problems = "1 problem"
@@ -287,15 +289,15 @@ func (a *adminHandler) collectionSection(evs []desklog.Event, logKnown bool) str
 		uploadForm
 }
 
-// openable returns the pool rows this platform can open (desk.pool()).
-func (a *adminHandler) openable(rows []pool.Row) []pool.Row {
-	out := make([]pool.Row, 0, len(rows))
-	for _, row := range rows {
-		if re, ok := a.kinds.Kind(row.Kind); ok && re.MatchString(row.ID) {
-			out = append(out, row)
-		}
+// poolSnapshot returns the pool as it is now, through Deps.Pool (shared
+// with the collector pages), or read from pool.csv on the spot when none is
+// wired. Its Valid rows are the ones this platform can open (desk.pool()).
+func (a *adminHandler) poolSnapshot() (*pool.Snapshot, error) {
+	c := a.pool
+	if c == nil {
+		c = &pool.Cache{Path: a.poolPath, DefaultKind: a.kinds.Default(), Valid: a.kinds.valid}
 	}
-	return out
+	return c.Snapshot()
 }
 
 // problemsSection is the Problems section: every problem report in the

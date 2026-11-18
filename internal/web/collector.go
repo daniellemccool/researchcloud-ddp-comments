@@ -442,3 +442,10 @@ func (k *platformKinds) Kind(kind string) (*regexp.Regexp, bool) {
 	k.cache[kind] = re
 	return re, true
 }
+
+// valid reports whether kind is known and id matches its pattern, anchored
+// to the whole id: a row the platform can open.
+func (k *platformKinds) valid(kind, id string) bool {
+	re, ok := k.Kind(kind)
+	return ok && re.MatchString(id)
+}

@@ -171,7 +171,7 @@ func newCollectorEnv(t *testing.T, fourcatEnabled bool) *collectorEnv {
 
 // newCollectorEnvWith is newCollectorEnv with fill free to set further Deps
 // (the clock, for one) before the server is built.
-func newCollectorEnvWith(t *testing.T, fourcatEnabled bool, fill func(*Deps)) *collectorEnv {
+func newCollectorEnvWith(t testing.TB, fourcatEnabled bool, fill func(*Deps)) *collectorEnv {
 	t.Helper()
 	root := t.TempDir()
 	plat := testPlatform()
@@ -208,7 +208,7 @@ func newCollectorEnvWith(t *testing.T, fourcatEnabled bool, fill func(*Deps)) *c
 
 // doMethod sends a gated request; a POST carries Sec-Fetch-Site: same-origin,
 // as the collector page's own fetch() does.
-func doMethod(t *testing.T, srv *http.Server, method, user, roles, path string) *httptest.ResponseRecorder {
+func doMethod(t testing.TB, srv *http.Server, method, user, roles, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
 	access.SetTestHeaders(req, user, roles, testGate)
@@ -220,17 +220,17 @@ func doMethod(t *testing.T, srv *http.Server, method, user, roles, path string) 
 	return rec
 }
 
-func (e *collectorEnv) get(t *testing.T, user, roles, path string) *httptest.ResponseRecorder {
+func (e *collectorEnv) get(t testing.TB, user, roles, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	return doMethod(t, e.srv, http.MethodGet, user, roles, path)
 }
 
-func (e *collectorEnv) post(t *testing.T, user, roles, path string) *httptest.ResponseRecorder {
+func (e *collectorEnv) post(t testing.TB, user, roles, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	return doMethod(t, e.srv, http.MethodPost, user, roles, path)
 }
 
-func writeProvisionState(t *testing.T, root, user string, steps map[string]string) {
+func writeProvisionState(t testing.TB, root, user string, steps map[string]string) {
 	t.Helper()
 	if err := writeStateFile(root, user, steps); err != nil {
 		t.Fatalf("write provision state: %v", err)
@@ -259,7 +259,7 @@ func allDoneSteps() map[string]string {
 
 // makeTemplateDir creates <root>/templates/release/<generation>/ so the
 // home handler's first check passes.
-func makeTemplateDir(t *testing.T, e *collectorEnv) {
+func makeTemplateDir(t testing.TB, e *collectorEnv) {
 	t.Helper()
 	dir := filepath.Join(e.root, "templates", "release", render.Generation(e.cfg))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -546,47 +546,59 @@ func TestHomeGoneRefresh(t *testing.T) {
 }
 
 // readyPageEnv returns an env whose home renders the collector page for alice.
-func readyPageEnv(t *testing.T, fourcatEnabled bool) *collectorEnv {
+func readyPageEnv(t testing.TB, fourcatEnabled bool) *collectorEnv {
 	t.Helper()
-	e := newCollectorEnv(t, fourcatEnabled)
+	return readyPageEnvWith(t, fourcatEnabled, nil)
+}
+
+// readyPageEnvWith is readyPageEnv with fill free to set further Deps.
+func readyPageEnvWith(t testing.TB, fourcatEnabled bool, fill func(*Deps)) *collectorEnv {
+	t.Helper()
+	e := newCollectorEnvWith(t, fourcatEnabled, fill)
 	makeTemplateDir(t, e)
 	writeProvisionState(t, e.root, "alice", allDoneSteps())
 	e.sess.startResult = session.Started
 	return e
 }
 
+// The page reads the same with the pool read on every view and through the
+// cache; the second view of the cached way reuses the first's snapshot.
 func TestHomePageRendersRows(t *testing.T) {
-	e := readyPageEnv(t, true)
-	writePool(t, e, "id,kind,bucket,note\n111,video,b1,First clip\n222,video,b1,Second clip\n333,video,b2,\n444,video,b2,\n")
-	if err := e.log.Append(
-		desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""},
-		desklog.Event{T: 2, User: "alice", Action: "claim", Kind: "video", ID: "222", Batch: 1, Code: ""},
-		desklog.Event{T: 3, User: "alice", Action: "open", Kind: "video", ID: "111", Code: "", ExecRC: intPtr(0)},
-		desklog.Event{T: 4, User: "alice", Action: "open", Kind: "video", ID: "222", Code: "", ExecRC: intPtr(0)},
-	); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	rec := e.get(t, "alice", collectorRole, "/desk/")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	b := rec.Body.String()
-	for _, want := range []string{
-		"First clip",
-		"Second clip",
-		"Open next video",
-		`<option value="NOT_FOUND">Not found</option>`,
-		`<option value="OTHER">Other</option>`,
-		"Get 5 more videos",
-		"Get 10 more videos",
-		"upload them to 4CAT", // the footer hint, FourcatEnabled
-		`<ul class="rows">`,
-		`data-state="done"`,
-	} {
-		if !strings.Contains(b, want) {
-			t.Errorf("page lacks %q", want)
+	poolWays(t, 4, func(t *testing.T, fill func(*Deps)) {
+		e := readyPageEnvWith(t, true, fill)
+		writePool(t, e, "id,kind,bucket,note\n111,video,b1,First clip\n222,video,b1,Second clip\n333,video,b2,\n444,video,b2,\n")
+		if err := e.log.Append(
+			desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""},
+			desklog.Event{T: 2, User: "alice", Action: "claim", Kind: "video", ID: "222", Batch: 1, Code: ""},
+			desklog.Event{T: 3, User: "alice", Action: "open", Kind: "video", ID: "111", Code: "", ExecRC: intPtr(0)},
+			desklog.Event{T: 4, User: "alice", Action: "open", Kind: "video", ID: "222", Code: "", ExecRC: intPtr(0)},
+		); err != nil {
+			t.Fatalf("append: %v", err)
 		}
-	}
+		for view := 1; view <= 2; view++ {
+			rec := e.get(t, "alice", collectorRole, "/desk/")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("view %d: status = %d, want 200", view, rec.Code)
+			}
+			b := rec.Body.String()
+			for _, want := range []string{
+				"First clip",
+				"Second clip",
+				"Open next video",
+				`<option value="NOT_FOUND">Not found</option>`,
+				`<option value="OTHER">Other</option>`,
+				"Get 5 more videos",
+				"Get 10 more videos",
+				"upload them to 4CAT", // the footer hint, FourcatEnabled
+				`<ul class="rows">`,
+				`data-state="done"`,
+			} {
+				if !strings.Contains(b, want) {
+					t.Errorf("view %d: page lacks %q", view, want)
+				}
+			}
+		}
+	})
 }
 
 func TestHomePageFooterHintOnlyWhenFourcatEnabled(t *testing.T) {
@@ -776,8 +788,14 @@ func TestStatusNotReadyWhenFirefoxExited(t *testing.T) {
 	}
 }
 
+// Claims answer the same with the pool read on every claim and through the
+// cache, which validates the six rows once for all the claims.
 func TestClaimValidation(t *testing.T) {
-	e := newCollectorEnv(t, true)
+	poolWays(t, 6, claimValidation)
+}
+
+func claimValidation(t *testing.T, fill func(*Deps)) {
+	e := newCollectorEnvWith(t, true, fill)
 	makeTemplateDir(t, e)
 	// Six rows: alice's busy claim below takes 111, bob claims the other five.
 	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n222,video,b1,\n333,video,b1,\n444,video,b1,\n555,video,b1,\n666,video,b1,\n")

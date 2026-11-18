@@ -154,12 +154,7 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 		evs = nil
 	}
 	view := h.deskLog.ViewOf(user, evs)
-	rows := h.poolRows()
-
-	notes := make(map[desklog.Key]string, len(rows))
-	for _, r := range rows {
-		notes[desklog.Key{Kind: r.Kind, ID: r.ID}] = r.Note
-	}
+	snap := h.poolSnapshot()
 
 	latest := 0
 	for _, c := range view.Claims {
@@ -199,7 +194,7 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 				msg += ": " + html.EscapeString(pr.Note)
 			}
 		}
-		title := notes[k]
+		title, _ := snap.Note(k.Kind, k.ID)
 		if title == "" {
 			title = capitalize(k.Kind) + " " + strconv.Itoa(n+1)
 		}
@@ -236,7 +231,7 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 	switch {
 	case unfinished:
 		body.WriteString(`<p class="hint">Finish these first: open each one, or mark a problem. Then you can get more.</p>`)
-	case anyUntaken(rows, taken):
+	case anyUntaken(snap.Valid, taken):
 		body.WriteString(`<div class="more" id="getmore">`)
 		for _, n := range h.cfg.BatchSizes {
 			body.WriteString(`<button onclick="more(` + strconv.Itoa(n) + `)">Get ` + strconv.Itoa(n) + ` more ` + noun + `s</button>`)
@@ -301,27 +296,32 @@ func (h *handler) problemByCode(code string) (platform.Problem, bool) {
 }
 
 // poolRows returns the pool rows this platform can open, in file order:
-// unknown kinds and id mismatches are dropped.
+// unknown kinds and id mismatches are dropped. The slice is the snapshot's,
+// shared and read-only.
 func (h *handler) poolRows() []pool.Row {
-	rows, err := pool.Read(filepath.Join(h.cfg.DeskRoot, "pool.csv"), h.platform.DefaultKind)
+	return h.poolSnapshot().Valid
+}
+
+// poolSnapshot returns the pool as it is now, through Deps.Pool, or read
+// from pool.csv on the spot when none is wired. An unreadable pool is logged
+// and empty.
+func (h *handler) poolSnapshot() *pool.Snapshot {
+	c := h.pool
+	if c == nil {
+		c = &pool.Cache{Path: filepath.Join(h.cfg.DeskRoot, "pool.csv"), DefaultKind: h.platform.DefaultKind, Valid: h.kinds.valid}
+	}
+	s, err := c.Snapshot()
 	if err != nil {
 		log.Printf("web: pool.csv: %v", err)
-		return nil
+		return &pool.Snapshot{}
 	}
-	out := make([]pool.Row, 0, len(rows))
-	for _, r := range rows {
-		if h.valid(r.Kind, r.ID) {
-			out = append(out, r)
-		}
-	}
-	return out
+	return s
 }
 
 // valid reports whether kind is known and id matches its pattern, anchored
 // to the whole id.
 func (h *handler) valid(kind, id string) bool {
-	re, ok := h.kinds.Kind(kind)
-	return ok && re.MatchString(id)
+	return h.kinds.valid(kind, id)
 }
 
 func anyUntaken(rows []pool.Row, taken map[desklog.Key]bool) bool {

@@ -18,6 +18,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
@@ -98,6 +99,21 @@ type Deps struct {
 	AdminSessions adminSessions
 	// Seats are the figures behind the running cap, for the admin page.
 	Seats SeatFigures
+	// Pool is the parsed pool, kept until pool.csv changes (NewPoolCache),
+	// shared by the claims, the collector page and the admin page; nil: every
+	// request reads pool.csv itself.
+	Pool *pool.Cache
+}
+
+// NewPoolCache returns the cache of <desk root>/pool.csv for Deps.Pool: its
+// Valid keeps the rows the platform can open (known kind, id matching the
+// kind's anchored pattern).
+func NewPoolCache(cfg *config.Config, p *platform.Platform) *pool.Cache {
+	return &pool.Cache{
+		Path:        filepath.Join(cfg.DeskRoot, "pool.csv"),
+		DefaultKind: p.DefaultKind,
+		Valid:       newPlatformKinds(p).valid,
+	}
 }
 
 // New returns the gated listener's server. Every request goes through the
@@ -124,6 +140,7 @@ func New(d Deps) *http.Server {
 		activity: d.Activity,
 		members:  d.Members,
 		kinds:    newPlatformKinds(d.Platform),
+		pool:     d.Pool,
 		now:      d.Now,
 		lastSlot: map[string]int64{},
 		uploads:  newUploadStates(d),
@@ -202,6 +219,7 @@ type handler struct {
 	activity *Activity      // per-user input and screen clocks, nil → nothing recorded
 	members  membersView    // the CO poll's view, nil → nobody absent
 	kinds    *platformKinds // the pool.Kinds adapter over the platform
+	pool     *pool.Cache    // the parsed pool; nil → pool.csv read per request (poolSnapshot)
 
 	now      func() time.Time // the clock of the marks and the times shown
 	slotMu   sync.Mutex       // guards lastSlot

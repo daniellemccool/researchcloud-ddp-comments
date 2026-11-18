@@ -368,9 +368,14 @@ func TestAdminUploadNotices(t *testing.T) {
 }
 
 // TestAdminCollectionSection: the collection's two lines under the
-// platform's name, the upload form as it was, and no placeholder sentence.
+// platform's name, the upload form as it was, and no placeholder sentence;
+// the same with the pool read on every view and through the cache.
 func TestAdminCollectionSection(t *testing.T) {
-	srv, root := newAdminServer(t)
+	poolWays(t, 3, adminCollectionSection)
+}
+
+func adminCollectionSection(t *testing.T, fill func(*Deps)) {
+	srv, root := newAdminServerWith(t, fill)
 	poolPath := filepath.Join(root, "pool.csv")
 	if err := os.WriteFile(poolPath, []byte("id,kind,bucket,note\n1,video,,a\n2,video,,b\n3,video,,c\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -415,6 +420,11 @@ func TestAdminCollectionSection(t *testing.T) {
 			t.Errorf("section %q is missing or out of order (at %d, after %d)", h, i, last)
 		}
 		last = i
+	}
+	// A second view of the unchanged pool reads the same.
+	queue := `<p>Queue 3 videos · unclaimed 1 · claimed 2 · done 1 (1 problem) · open 1</p>`
+	if b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String(); !strings.Contains(b, queue) {
+		t.Errorf("second view lacks %q:\n%s", queue, b)
 	}
 
 	// An unreadable pool.csv shows the error line instead of the queue line;

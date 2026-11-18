@@ -244,6 +244,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		Relay:    relay,
 		Activity: activity,
 		Members:  poller,
+		// One parsed pool for the claims and both pages, read again only
+		// when pool.csv changes (ruling F124).
+		Pool: web.NewPoolCache(cfg, p),
 	}
 	// The idle stop (the reaper) runs for the serve lifetime: serveCtx is
 	// cancelled on every way out of serve. desk_idle_seconds = 0 turns it off.
