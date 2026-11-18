@@ -28,15 +28,29 @@ func keysOfRows(keys []Key) []string {
 	return ids
 }
 
-func wantKeys(t *testing.T, got []Key, wantIDs ...string) {
+// wantDrawn checks a claim's keys without their order (the draw is random,
+// ADR-0026): n of them, each a row of rows, none twice and none in not.
+func wantDrawn(t *testing.T, got []Key, n int, rows []pool.Row, not ...Key) {
 	t.Helper()
-	if len(got) != len(wantIDs) {
-		t.Fatalf("keys = %v, want %v", keysOfRows(got), wantIDs)
+	if len(got) != n {
+		t.Fatalf("keys = %v, want %d", keysOfRows(got), n)
 	}
-	for i, id := range wantIDs {
-		if got[i] != (Key{Kind: "video", ID: id}) {
-			t.Fatalf("keys[%d] = %v, want {video %s}", i, got[i], id)
+	inRows := make(map[Key]bool, len(rows))
+	for _, row := range rows {
+		inRows[Key{Kind: row.Kind, ID: row.ID}] = true
+	}
+	seen := make(map[Key]bool, len(got)+len(not))
+	for _, k := range not {
+		seen[k] = true
+	}
+	for _, k := range got {
+		if !inRows[k] {
+			t.Fatalf("key %v is not a pool row", k)
 		}
+		if seen[k] {
+			t.Fatalf("keys = %v: %v repeats or was excluded", keysOfRows(got), k)
+		}
+		seen[k] = true
 	}
 }
 
@@ -48,65 +62,73 @@ func openOK(l *Log, user, id string) {
 
 func intPtr(v int) *int { return &v }
 
-func TestClaimTakesNextUnclaimedInOrder(t *testing.T) {
+// TestClaimSecondUserGetsTheRest: alice draws 5 of 7 rows, bob the other 2,
+// each in batch 1.
+func TestClaimSecondUserGetsTheRest(t *testing.T) {
 	l := newTestLog(t)
 	rows := videoRows(7)
-	keys, err := l.Claim("alice", 5, rows)
+	alice, err := l.Claim("alice", 5, rows)
 	if err != nil {
 		t.Fatalf("alice claim: %v", err)
 	}
-	wantKeys(t, keys, "1", "2", "3", "4", "5")
-	keys, err = l.Claim("bob", 5, rows)
+	wantDrawn(t, alice, 5, rows)
+	bob, err := l.Claim("bob", 5, rows)
 	if err != nil {
 		t.Fatalf("bob claim: %v", err)
 	}
-	wantKeys(t, keys, "6", "7")
+	wantDrawn(t, bob, 2, rows, alice...)
 	evs, err := l.Read()
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if got := l.ViewOf("alice", evs).Claims; len(got) != 5 || got[0].Batch != 1 {
-		t.Fatalf("alice claims = %+v, want 5 claims batch 1", got)
-	}
-	if got := l.ViewOf("bob", evs).Claims; len(got) != 2 || got[0].Batch != 1 {
-		t.Fatalf("bob claims = %+v, want 2 claims batch 1", got)
+	for user, want := range map[string]int{"alice": 5, "bob": 2} {
+		got := l.ViewOf(user, evs).Claims
+		if len(got) != want {
+			t.Fatalf("%s claims = %+v, want %d", user, got, want)
+		}
+		for _, c := range got {
+			if c.Batch != 1 {
+				t.Fatalf("%s claims = %+v, want batch 1", user, got)
+			}
+		}
 	}
 }
 
 func TestClaimBusyUntilDone(t *testing.T) {
 	l := newTestLog(t)
 	rows := videoRows(7)
-	keys, err := l.Claim("alice", 2, rows)
+	first, err := l.Claim("alice", 2, rows)
 	if err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
-	wantKeys(t, keys, "1", "2")
+	wantDrawn(t, first, 2, rows)
+	a, b := first[0], first[1]
 	if _, err := l.Claim("alice", 2, rows); !errors.Is(err, ErrBusy) {
 		t.Fatalf("second claim err = %v, want ErrBusy", err)
 	}
 	// an open with a non-zero exit code marks nothing
-	if err := l.Append(Event{T: fixedNow, User: "alice", Action: "open", Kind: "video", ID: "1", Code: "", ExecRC: intPtr(1)}); err != nil {
+	if err := l.Append(Event{T: fixedNow, User: "alice", Action: "open", Kind: "video", ID: a.ID, Code: "", ExecRC: intPtr(1)}); err != nil {
 		t.Fatalf("append open rc=1: %v", err)
 	}
 	if _, err := l.Claim("alice", 2, rows); !errors.Is(err, ErrBusy) {
 		t.Fatalf("claim after failed open err = %v, want ErrBusy", err)
 	}
 	// an open with no exec_rc marks nothing either
-	if err := l.Append(Event{T: fixedNow, User: "alice", Action: "open", Kind: "video", ID: "1", Code: ""}); err != nil {
+	if err := l.Append(Event{T: fixedNow, User: "alice", Action: "open", Kind: "video", ID: a.ID, Code: ""}); err != nil {
 		t.Fatalf("append open without exec_rc: %v", err)
 	}
 	if _, err := l.Claim("alice", 2, rows); !errors.Is(err, ErrBusy) {
 		t.Fatalf("claim after open without exec_rc err = %v, want ErrBusy", err)
 	}
-	openOK(l, "alice", "1")
-	if err := l.Append(Event{T: fixedNow, User: "alice", Action: "problem", Kind: "video", ID: "2", Code: "U", Note: "broken"}); err != nil {
+	openOK(l, "alice", a.ID)
+	if err := l.Append(Event{T: fixedNow, User: "alice", Action: "problem", Kind: "video", ID: b.ID, Code: "U", Note: "broken"}); err != nil {
 		t.Fatalf("append problem: %v", err)
 	}
-	keys, err = l.Claim("alice", 2, rows)
+	second, err := l.Claim("alice", 2, rows)
 	if err != nil {
 		t.Fatalf("claim after done: %v", err)
 	}
-	wantKeys(t, keys, "3", "4")
+	wantDrawn(t, second, 2, rows, first...)
 	evs, err := l.Read()
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -118,10 +140,10 @@ func TestClaimBusyUntilDone(t *testing.T) {
 	if v.Claims[2].Batch != 2 || v.Claims[3].Batch != 2 {
 		t.Fatalf("second batch = %d, %d, want 2, 2", v.Claims[2].Batch, v.Claims[3].Batch)
 	}
-	if !v.Done[Key{Kind: "video", ID: "1"}] || !v.Done[Key{Kind: "video", ID: "2"}] {
-		t.Fatalf("done = %v, want keys 1 and 2 done", v.Done)
+	if !v.Done[a] || !v.Done[b] {
+		t.Fatalf("done = %v, want keys %s and %s done", v.Done, a.ID, b.ID)
 	}
-	if v.Problems[Key{Kind: "video", ID: "2"}] != (Problem{Code: "U", Note: "broken"}) {
+	if v.Problems[b] != (Problem{Code: "U", Note: "broken"}) {
 		t.Fatalf("problems = %v", v.Problems)
 	}
 }
@@ -323,7 +345,7 @@ func TestClaimAfterUnfinishedTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim after an unfinished tail: %v", err)
 	}
-	wantKeys(t, keys, "2")
+	wantDrawn(t, keys, 1, videoRows(3), Key{Kind: "video", ID: "1"})
 	data, err := os.ReadFile(l.Path)
 	if err != nil {
 		t.Fatal(err)

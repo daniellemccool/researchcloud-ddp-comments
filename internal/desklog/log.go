@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,15 @@ type Log struct {
 	// unfinished last line off the file. It is called under the log's
 	// mutex and must not call back into the log.
 	Warn func(format string, args ...any)
+	// Age is the age in seconds a row is weighted by in Claim's draw
+	// (ADR-0026), normally (*platform.Draw).Age. nil weighs every row the
+	// same: a uniform draw, still never in file order.
+	Age func(kind, id string, now int64) float64
+	// Rand returns u in (0, 1] for Claim's draw. nil means a math/rand/v2
+	// ChaCha8 source seeded from crypto/rand once per Log. It is called
+	// under the log's mutex.
+	Rand func() float64
+	rng  *rand.Rand // the default source behind a nil Rand, made on first use
 	mu   sync.Mutex
 }
 

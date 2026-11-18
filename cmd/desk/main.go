@@ -127,6 +127,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// The claim draw's setting (ADR-0026); a missing draw.json is nil and
+	// draws uniformly. Every error from LoadDraw names the file.
+	draw, err := platform.LoadDraw(filepath.Join(*repo, "platforms", cfg.Platform, "draw.json"), p.ItemKinds)
+	if err != nil {
+		return 0, err
+	}
 
 	// The desk cannot run without Docker: a client error is fatal.
 	dc, err := docker.New()
@@ -170,6 +176,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	prov := &provision.Provisioner{Cfg: cfg, Reg: reg, Fourcat: fc, Locks: lockSet, Members: poller}
 	logger := log.New(stderr, "desk: ", log.LstdFlags)
 	dlog := &desklog.Log{Path: filepath.Join(cfg.DeskRoot, "state", "desk-log.ndjson"), DefaultKind: p.DefaultKind, Warn: logger.Printf}
+	if draw != nil { // a nil draw stays a nil Age: no method value on a nil pointer
+		dlog.Age = draw.Age
+		_, _ = fmt.Fprintf(stderr, "desk: claims drawn by age, floor %d days\n", draw.FloorSeconds/86400)
+	} else {
+		_, _ = fmt.Fprintln(stderr, "desk: claims drawn uniformly")
+	}
 	mgr := &session.Manager{
 		Cfg:    cfg,
 		Docker: dc,
