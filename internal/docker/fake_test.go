@@ -269,6 +269,44 @@ func TestFakeExecResults(t *testing.T) {
 	}
 }
 
+// TestFakeExecScript: a scripted key answers its steps one call at a time, a
+// step may fail the call, and once the script is used up ExecResults (or the
+// zero answer) applies again. Every call is still recorded.
+func TestFakeExecScript(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	if _, err := f.ContainerCreate(ctx, ContainerSpec{Name: "c-alice", Image: "img:1"}); err != nil {
+		t.Fatalf("ContainerCreate: %v", err)
+	}
+	if err := f.ContainerStart(ctx, "c-alice"); err != nil {
+		t.Fatalf("ContainerStart: %v", err)
+	}
+	boom := errors.New("boom")
+	f.ExecResults["ps -o"] = Exec{Stdout: "fallback"}
+	f.ExecScript["ps -o"] = []ExecStep{{Exec: Exec{Stdout: "first"}}, {Err: boom}, {Exec: Exec{ExitCode: 2, Stdout: "third"}}}
+	ps := []string{"ps", "-o", "etime,args"}
+
+	if ex, err := f.Exec(ctx, "c-alice", ps, nil, nil); err != nil || ex.Stdout != "first" {
+		t.Errorf("call 1 = %+v, %v; want stdout first", ex, err)
+	}
+	if _, err := f.Exec(ctx, "c-alice", ps, nil, nil); !errors.Is(err, boom) {
+		t.Errorf("call 2 err = %v, want the scripted error", err)
+	}
+	if ex, err := f.Exec(ctx, "c-alice", ps, nil, nil); err != nil || ex.ExitCode != 2 || ex.Stdout != "third" {
+		t.Errorf("call 3 = %+v, %v; want exit 2, stdout third", ex, err)
+	}
+	if ex, err := f.Exec(ctx, "c-alice", ps, nil, nil); err != nil || ex.Stdout != "fallback" {
+		t.Errorf("call 4 = %+v, %v; want ExecResults once the script is used up", ex, err)
+	}
+	// Another key is untouched by the script.
+	if ex, err := f.Exec(ctx, "c-alice", []string{"other", "cmd"}, nil, nil); err != nil || ex != (Exec{}) {
+		t.Errorf("unscripted call = %+v, %v; want the zero answer", ex, err)
+	}
+	if len(f.Execs) != 5 {
+		t.Errorf("Execs len = %d, want all 5 calls recorded", len(f.Execs))
+	}
+}
+
 func TestFakeExecValidation(t *testing.T) {
 	ctx := context.Background()
 	f := NewFake()

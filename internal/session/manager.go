@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -110,21 +111,43 @@ func (m *Manager) IsRunning(ctx context.Context, user string) bool {
 	return running[user]
 }
 
-// Ready reports whether user's pair is fully running (both containers) and
-// the Firefox's noVNC port answers.
+// Ready reports whether user's pair is fully running (both containers), the
+// Firefox's noVNC port answers, and the collector's own Firefox is up
+// (browserUp). When the browser check cannot be made, Ready logs one line
+// and answers from noVNC alone, so a broken exec never hides the screen for
+// good.
 func (m *Manager) Ready(ctx context.Context, user string) bool {
 	if !m.IsRunning(ctx, user) {
 		return false
 	}
-	return m.probe(ctx, "http://desk-firefox-"+user+":5800/")
+	if !m.probe(ctx, "http://desk-firefox-"+user+":5800/") {
+		return false
+	}
+	up, err := m.browserUp(ctx, user)
+	if err != nil {
+		m.logf("session: ready %s: browser check failed, answering from noVNC alone: %v", user, err)
+		return true
+	}
+	return up
 }
 
 // OpenURL opens url in the user's Firefox via su-exec inside the firefox
 // container. It returns the command's exit code and the last 200 bytes of
-// its stderr; a transport error returns (-1, "", err).
+// its stderr; a transport error returns (-1, "", err). Before that it checks
+// that the collector's own Firefox is up (browserUp); when it is not, or the
+// check fails, nothing runs and the answer is (-1, "", ErrBrowserStarting),
+// because an open command would itself start a Firefox that takes the
+// profile from the supervisor's.
 func (m *Manager) OpenURL(ctx context.Context, user, url string) (rc int, stderr string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	up, err := m.browserUp(ctx, user)
+	if err != nil {
+		return -1, "", fmt.Errorf("%w (browser check: %v)", ErrBrowserStarting, err)
+	}
+	if !up {
+		return -1, "", ErrBrowserStarting
+	}
 	argv := []string{"su-exec", "1000:1000", "/usr/lib/firefox/firefox", "--profile", "/config/profile", url}
 	env := []string{
 		"DISPLAY=:0",

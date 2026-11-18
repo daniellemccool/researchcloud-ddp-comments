@@ -104,7 +104,7 @@ setInterval(async()=>{if(stopped)return;const hadInput=sawInput;sawInput=false;
   if(!r.ok){if(hadInput)sawInput=true;return;}
   const j=await r.json();showFigures(j);
   if(hadInput){if(!j.running)showStopped();}
-  else if(j.ready)wasReady=true;else if(wasReady)showStopped();
+  else if(j.ready)wasReady=true;else if(wasReady&&j.running===false)showStopped();
  }catch(e){if(hadInput)sawInput=true;}},60000);
 function q(l){return 'id='+encodeURIComponent(l.dataset.id)+'&kind='+encodeURIComponent(l.dataset.kind);}
 function setMsg(l,text,warn){const m=l.querySelector('.msg');m.textContent=text;m.className='msg'+(warn?' warn':'');}
@@ -118,6 +118,7 @@ function current(l){document.querySelectorAll('li.current').forEach(x=>x.classLi
  l.classList.add('current');if(SECONDS>0)startTimer(l);}
 async function open_(l){const r=await fetch('open?'+q(l),{method:'POST'});
  if(r.ok){if(l.dataset.state!=='problem')l.dataset.state='done';l.classList.add('done');setMsg(l,'');current(l);refresh();}
+ else if(r.status===503){setMsg(l,'the browser is still starting; try again in a moment',true);}
  else{setMsg(l,'could not open; tell the operator',true);}}
 function openNext(){const n=document.querySelector('ul.rows li[data-state=todo]');if(n)open_(n);}
 async function problem(sel){const l=sel.closest('li'),k=sel.value;if(!k)return;let note='';

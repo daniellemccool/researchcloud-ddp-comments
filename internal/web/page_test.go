@@ -163,6 +163,46 @@ func TestPageHeartbeatScript(t *testing.T) {
 	}
 }
 
+// TestPageOpenStartingMessage: a 503 from open shows the retry text in the
+// row's message and does nothing else (the row is not marked done); other
+// failures keep the operator message.
+func TestPageOpenStartingMessage(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15})
+	i := strings.Index(out, "async function open_(l)")
+	if i < 0 {
+		t.Fatal("page has no open_ function")
+	}
+	fn, _, found := strings.Cut(out[i:], "\nfunction openNext")
+	if !found {
+		t.Fatal("page has no openNext after open_")
+	}
+	branch := `else if(r.status===503){setMsg(l,'the browser is still starting; try again in a moment',true);}`
+	if !strings.Contains(fn, branch) {
+		t.Errorf("open_ lacks the 503 branch %q:\n%s", branch, fn)
+	}
+	if !strings.Contains(fn, "could not open; tell the operator") {
+		t.Errorf("open_ lost the operator message for other failures:\n%s", fn)
+	}
+}
+
+// TestPageStoppedBannerNeedsAStoppedPair: on a check-in without input the
+// stopped banner follows the pair (running strictly false), not a screen
+// that is briefly not ready; the input branch is unchanged.
+func TestPageStoppedBannerNeedsAStoppedPair(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15})
+	for _, want := range []string{
+		"if(hadInput){if(!j.running)showStopped();}",
+		"else if(j.ready)wasReady=true;else if(wasReady&&j.running===false)showStopped();",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("check-in lacks %q", want)
+		}
+	}
+	if strings.Contains(out, "else if(wasReady)showStopped();") {
+		t.Error("the no-input check-in still shows the banner on ready alone")
+	}
+}
+
 func TestPageReattachesListenersOnIframeLoad(t *testing.T) {
 	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15})
 	i := strings.Index(out, `.addEventListener('load'`)

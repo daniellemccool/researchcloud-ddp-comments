@@ -9,6 +9,13 @@ import (
 	"time"
 )
 
+// ExecStep is one scripted Exec answer: Err fails the call, otherwise Exec is
+// the result.
+type ExecStep struct {
+	Exec Exec
+	Err  error
+}
+
 // ExecCall is one recorded Exec invocation with its full argv, env and stdin.
 type ExecCall struct {
 	Container string
@@ -18,12 +25,14 @@ type ExecCall struct {
 
 // Fake is an in-memory Client for other packages' tests. It records every
 // call in Calls (before any injected failure is applied), can fail selected
-// calls through Fail, and hands out canned Exec results through ExecResults.
+// calls through Fail, and hands out canned Exec results through ExecResults,
+// or one call at a time through ExecScript.
 // All state is guarded by a mutex, so tests may drive it from goroutines.
 type Fake struct {
 	Calls       []string                 // one entry per method call, carrying names not ids
 	Fail        map[string]error         // key "<Method> <name>"; when present the method returns it and does nothing
 	ExecResults map[string]Exec          // key cmd[0]+" "+cmd[1]; missing key -> Exec{ExitCode: 0}
+	ExecScript  map[string][]ExecStep    // key as ExecResults; each call takes the next step, then ExecResults applies
 	Execs       []ExecCall               // every Exec call in order, with its full argv
 	Created     []ContainerSpec          // every created spec, in creation order
 	Specs       map[string]ContainerSpec // created specs by name, removed on ContainerRemove
@@ -60,6 +69,7 @@ func NewFake() *Fake {
 	return &Fake{
 		Fail:        map[string]error{},
 		ExecResults: map[string]Exec{},
+		ExecScript:  map[string][]ExecStep{},
 		Specs:       map[string]ContainerSpec{},
 		networks:    map[string]*fakeNetwork{},
 		containers:  map[string]*fakeContainer{},
@@ -471,7 +481,15 @@ func (f *Fake) Exec(ctx context.Context, containerName string, cmd []string, env
 	if !c.running {
 		return Exec{}, fmt.Errorf("%w: container %s is not running", ErrConflict, containerName)
 	}
-	if ex, ok := f.ExecResults[strings.Join(words, " ")]; ok {
+	key := strings.Join(words, " ")
+	if steps := f.ExecScript[key]; len(steps) > 0 {
+		f.ExecScript[key] = steps[1:]
+		if steps[0].Err != nil {
+			return Exec{}, steps[0].Err
+		}
+		return steps[0].Exec, nil
+	}
+	if ex, ok := f.ExecResults[key]; ok {
 		return ex, nil
 	}
 	return Exec{ExitCode: 0}, nil

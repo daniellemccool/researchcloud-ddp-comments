@@ -27,8 +27,9 @@ func TestReadyNeedsRunningAndProbe(t *testing.T) {
 	if f.m.Ready(ctx, "alice") {
 		t.Error("Ready = true with only the firefox running, want false")
 	}
-	// Both containers running + healthy probe.
+	// Both containers running + healthy probe + the collector's Firefox up.
 	f.startBare(t, "desk-proxy-alice", "proxy", "alice")
+	f.fake.ExecResults["ps -o"] = psOut("    0:30 " + supervisedFF)
 	if !f.m.Ready(ctx, "alice") {
 		t.Error("Ready = false with both containers running and a healthy probe, want true")
 	}
@@ -45,6 +46,7 @@ func TestOpenURLCommand(t *testing.T) {
 	f := newFixture(t, 4, "alice")
 	ctx := context.Background()
 	f.startFirefox(t, "alice")
+	f.fake.ExecResults["ps -o"] = psOut("    0:30 " + supervisedFF)
 	f.fake.ExecResults["su-exec 1000:1000"] = docker.Exec{ExitCode: 7, Stderr: strings.Repeat("x", 300)}
 
 	rc, stderr, err := f.m.OpenURL(ctx, "alice", "https://example.org/watch?v=1")
@@ -54,10 +56,11 @@ func TestOpenURLCommand(t *testing.T) {
 	if stderr != strings.Repeat("x", 200) {
 		t.Errorf("stderr tail = %d bytes, want the last 200", len(stderr))
 	}
-	if len(f.fake.Execs) != 1 {
-		t.Fatalf("Execs = %+v, want exactly one entry", f.fake.Execs)
+	// The browser check first, then the open command.
+	if len(f.fake.Execs) != 2 || f.fake.Execs[0].Cmd[0] != "ps" {
+		t.Fatalf("Execs = %+v, want the ps check then the open command", f.fake.Execs)
 	}
-	ex := f.fake.Execs[0]
+	ex := f.fake.Execs[1]
 	if ex.Container != "desk-firefox-alice" {
 		t.Errorf("Exec container = %q, want desk-firefox-alice", ex.Container)
 	}
@@ -75,11 +78,12 @@ func TestOpenURLCommand(t *testing.T) {
 		t.Errorf("Exec env = %v, want %v", ex.Env, wantEnv)
 	}
 
-	// A transport error maps to (-1, "", err).
-	f.fake.Fail["Exec desk-firefox-alice"] = errors.New("transport boom")
+	// A transport error of the open command maps to (-1, "", err), and is not
+	// ErrBrowserStarting: the browser was up and the command was sent.
+	f.fake.ExecScript["su-exec 1000:1000"] = []docker.ExecStep{{Err: errors.New("transport boom")}}
 	rc, stderr, err = f.m.OpenURL(ctx, "alice", "https://example.org/")
-	if rc != -1 || stderr != "" || err == nil {
-		t.Errorf("transport error = %d, %q, %v; want -1, \"\", err", rc, stderr, err)
+	if rc != -1 || stderr != "" || err == nil || errors.Is(err, ErrBrowserStarting) {
+		t.Errorf("transport error = %d, %q, %v; want -1, \"\", the transport error", rc, stderr, err)
 	}
 }
 

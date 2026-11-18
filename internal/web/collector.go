@@ -17,6 +17,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/provision"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 )
 
 // identity returns the request's identity from the context (the gate
@@ -27,16 +28,20 @@ func identity(r *http.Request) access.Identity {
 }
 
 // serveStatus is GET /desk/status, the check-in without input:
-// {"ready":true|false} from Sessions.Ready, plus the display text a page
-// left open keeps current ("worked", the time line).
+// {"ready":true|false} from Sessions.Ready and {"running":true|false} from
+// Sessions.IsRunning, so the page shows the stopped banner only for a pair
+// that is gone and not while the image's Firefox restarts, plus the display
+// text a page left open keeps current ("worked", the time line).
 func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 	user := identity(r).User
-	ready := false
+	ready, running := false, false
 	if h.sessions != nil {
+		running = h.sessions.IsRunning(r.Context(), user)
 		ready = h.sessions.Ready(r.Context(), user)
 	}
 	ans := h.figures(r.Context(), user)
 	ans["ready"] = ready
+	ans["running"] = running
 	body, err := json.Marshal(ans)
 	if err != nil {
 		log.Printf("web: status: %v", err)
@@ -186,7 +191,8 @@ func (h *handler) serveClaim(w http.ResponseWriter, r *http.Request) {
 // serveOpen is POST /desk/open: the item must be valid
 // and among this user's claims; OpenURL runs, the event is appended, 204 on
 // rc 0 else 500. A failed append is a 500: the Python raised and the client
-// never saw success.
+// never saw success. ErrBrowserStarting (nothing was opened) is a 503 with
+// the retry text and appends nothing.
 func (h *handler) serveOpen(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
 	// Sessions is nil until a later task wires it; guard before anything else
@@ -212,6 +218,13 @@ func (h *handler) serveOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rc, stderr, err := h.sessions.OpenURL(r.Context(), id.User, url)
+	if errors.Is(err, session.ErrBrowserStarting) {
+		// The collector's own Firefox is not up yet, so nothing ran and
+		// nothing is recorded; the page asks to try again.
+		log.Printf("web: open %s: %v", id.User, err)
+		plain(w, http.StatusServiceUnavailable, "the browser is still starting; try again in a moment")
+		return
+	}
 	if err != nil {
 		// The transport error's message names the docker call; it carries no
 		// secret, so it is recorded as exec_err.

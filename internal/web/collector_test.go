@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -746,6 +747,23 @@ func TestStatusJSON(t *testing.T) {
 	}
 }
 
+// TestStatusCarriesRunning: the check-in without input also says whether
+// the pair runs, so the page tells a stopped desk from a screen that is
+// briefly not ready (the image's Firefox restarting).
+func TestStatusCarriesRunning(t *testing.T) {
+	for _, running := range []bool{true, false} {
+		e := newCollectorEnv(t, true)
+		e.sess.ready, e.sess.running = false, running
+		ans := checkInBody(t, e.get(t, "alice", collectorRole, "/desk/status"))
+		if got, ok := ans["running"].(bool); !ok || got != running {
+			t.Errorf("running %v: body running = %#v, want %v", running, ans["running"], running)
+		}
+		if ans["ready"] != false {
+			t.Errorf("running %v: body ready = %#v, want false", running, ans["ready"])
+		}
+	}
+}
+
 func TestStatusNotReadyWhenFirefoxExited(t *testing.T) {
 	e := newCollectorEnv(t, true)
 	e.sess.ready = false
@@ -962,6 +980,41 @@ func TestOpenTransportErrorRecordsErr(t *testing.T) {
 	last := evs[len(evs)-1]
 	if last.Action != "open" || last.ExecRC == nil || *last.ExecRC != -1 || last.ExecErr != "docker exec failed: boom" {
 		t.Errorf("last event = %+v, want open with exec_rc -1 and exec_err the transport error", last)
+	}
+}
+
+// TestOpenBrowserStarting503: an Open while the collector's own Firefox is
+// still starting is a 503 with the retry text, and records nothing, because
+// nothing was opened.
+func TestOpenBrowserStarting503(t *testing.T) {
+	for _, openErr := range []error{
+		session.ErrBrowserStarting,
+		fmt.Errorf("%w (browser check: transport boom)", session.ErrBrowserStarting),
+	} {
+		e := newCollectorEnv(t, true)
+		makeTemplateDir(t, e)
+		writeProvisionState(t, e.root, "alice", allDoneSteps())
+		writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n")
+		if err := e.log.Append(desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		e.sess.openRC, e.sess.openErr = -1, openErr
+		rec := e.post(t, "alice", collectorRole, "/desk/open?id=111")
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("%v: status = %d, want 503", openErr, rec.Code)
+		}
+		if b := rec.Body.String(); b != "the browser is still starting; try again in a moment" {
+			t.Errorf("%v: body = %q, want the retry text", openErr, b)
+		}
+		evs, err := e.log.Read()
+		if err != nil {
+			t.Fatalf("read log: %v", err)
+		}
+		for _, ev := range evs {
+			if ev.Action == "open" {
+				t.Errorf("%v: open event recorded although nothing was opened: %+v", openErr, ev)
+			}
+		}
 	}
 }
 
