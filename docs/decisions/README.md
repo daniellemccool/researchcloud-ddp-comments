@@ -47,3 +47,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0018 — Never modify or reload nginx from the running desk](./0018-never-modify-or-reload-nginx-from-the-running-desk.md)
 - [0019 — Ship no Python outside archive/](./0019-ship-no-python-in-the-product-tree.md)
 - [0020 — Take every image and template pin from the checked-out release, never from the catalog item](./0020-take-every-image-and-template-pin-from-the-checked-out-release-never-from-the-catalog-item.md)
+
+### Pool
+
+- [0026 — Draw each claim at random, weighted by age, never by donor](./0026-draw-each-claim-at-random-weighted-by-age-never-by-donor.md)
