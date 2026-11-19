@@ -95,6 +95,7 @@ type adminHandler struct {
 	// (adminStatusLimit; shortened by the tests).
 	statusLimit time.Duration
 	seats       SeatFigures
+	retention   retentionView // nil → no retention line
 	now         func() time.Time
 	records     recordCounter
 
@@ -121,6 +122,7 @@ func NewAdmin(d Deps) http.Handler {
 		now:      d.Now,
 		notices:  make(map[string]string),
 
+		retention:   d.Retention,
 		statusLimit: adminStatusLimit,
 	}
 	if a.now == nil {
@@ -360,14 +362,15 @@ func (a *adminHandler) problemLabel(code string) string {
 	return code
 }
 
-// healthSection is the Health section: the CO poll line, the seats line
-// and, with 4CAT enabled, the links to 4CAT's own pages.
+// healthSection is the Health section: the CO poll line, the seats line,
+// with 4CAT enabled the links to 4CAT's own pages, and the snapshot
+// retention line.
 func (a *adminHandler) healthSection(sd seatData) string {
 	s := `<h2>Health</h2>` + a.pollLine() + a.seatsLine(sd)
 	if a.cfg.FourcatEnabled {
 		s += `<p>4CAT: <a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></p>`
 	}
-	return s
+	return s + a.retentionLine()
 }
 
 // pollLine is the CO poll's status line (ADR-0005), shown as a warning
@@ -379,6 +382,20 @@ func (a *adminHandler) pollLine() string {
 	line := a.members.StatusLine()
 	class := ""
 	if strings.HasPrefix(line, "ALARM") {
+		class = ` class="warn"`
+	}
+	return `<p` + class + `>` + html.EscapeString(line) + `</p>`
+}
+
+// retentionLine is the snapshot retention pass's line (ADR-0027), shown as a
+// warning after a failed pass; "" without the pass.
+func (a *adminHandler) retentionLine() string {
+	if a.retention == nil {
+		return ""
+	}
+	line, failed := a.retention.StatusLine()
+	class := ""
+	if failed {
 		class = ` class="warn"`
 	}
 	return `<p` + class + `>` + html.EscapeString(line) + `</p>`

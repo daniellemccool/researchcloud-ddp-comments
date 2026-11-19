@@ -878,6 +878,59 @@ func TestAdminOverviewShowsPollLine(t *testing.T) {
 	}
 }
 
+// fakeRetention is the retention pass's view: a fixed line and its failure.
+type fakeRetention struct {
+	line   string
+	failed bool
+}
+
+func (f fakeRetention) StatusLine() (string, bool) { return f.line, f.failed }
+
+// The snapshot retention line closes Health, escaped and as a warning after
+// a failed pass; there is no line at all without the pass.
+func TestAdminOverviewShowsRetentionLine(t *testing.T) {
+	newServer := func(r retentionView) *http.Server {
+		root := t.TempDir()
+		plat := testPlatform()
+		d := Deps{
+			Cfg:       &config.Config{DeskRoot: root, CollectorRole: collectorRole, AdminRole: adminRole, Contact: testContact, Platform: "test"},
+			Access:    access.Config{CollectorRole: collectorRole, AdminRole: adminRole, GateSecret: testGate},
+			Platform:  plat,
+			LogPath:   filepath.Join(root, "state", "access.ndjson"),
+			Log:       &desklog.Log{Path: filepath.Join(root, "state", "desk-log.ndjson"), DefaultKind: plat.DefaultKind},
+			Members:   fakeMembers{line: "CO poll: last good 12:34, 0 failures"},
+			Retention: r,
+		}
+		d.Admin = NewAdmin(d)
+		return New(d)
+	}
+	for _, c := range []struct {
+		r    fakeRetention
+		want string
+	}{
+		{fakeRetention{line: "Snapshot retention: not run yet"},
+			`<p>CO poll: last good 12:34, 0 failures</p><p>Snapshot retention: not run yet</p>`},
+		{fakeRetention{line: "Snapshot retention: last run 2026-11-18 12:00, 9 snapshots read, 3 marked to expire, 2 unmarked"},
+			`<p>Snapshot retention: last run 2026-11-18 12:00, 9 snapshots read, 3 marked to expire, 2 unmarked</p>`},
+		{fakeRetention{line: "Snapshot retention: failed at 2026-11-18 12:00 <x>", failed: true},
+			`<p class="warn">Snapshot retention: failed at 2026-11-18 12:00 &lt;x&gt;</p>`},
+		{fakeRetention{line: "Snapshot retention (dry run): last run 2026-11-18 12:00, 9 snapshots read, 3 would be marked to expire, 2 would be unmarked"},
+			`<p>CO poll: last good 12:34, 0 failures</p><p>Snapshot retention (dry run): last run 2026-11-18 12:00, 9 snapshots read, 3 would be marked to expire, 2 would be unmarked</p>`},
+		{fakeRetention{line: "Snapshot retention (dry run): failed at 2026-11-18 12:00", failed: true},
+			`<p class="warn">Snapshot retention (dry run): failed at 2026-11-18 12:00</p>`},
+	} {
+		b := getAdmin(t, newServer(c.r), "root", adminRole, "/desk/admin/").Body.String()
+		if !strings.Contains(b, c.want) {
+			t.Errorf("overview lacks %q:\n%s", c.want, b)
+		}
+	}
+
+	b := getAdmin(t, newServer(nil), "root", adminRole, "/desk/admin/").Body.String()
+	if strings.Contains(b, "Snapshot retention") || !strings.Contains(b, "<h2>Health</h2>") {
+		t.Errorf("overview without the pass shows a retention line:\n%s", b)
+	}
+}
+
 // postStop sends POST /desk/admin/stop with the form body as user with
 // roles and the extra headers.
 func postStop(t *testing.T, srv *http.Server, user, roles string, hdrs map[string]string, form string) *httptest.ResponseRecorder {

@@ -33,6 +33,7 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/reaper"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/registry"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/render"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/retention"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/session"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/web"
 )
@@ -292,6 +293,15 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		go study.Run(serveCtx, time.Minute)
 		deps.Uploads = fc // only here: a nil *fourcat.Client must not become a non-nil interface
+		// The snapshot retention pass (ADR-0027): now, then every 15 minutes,
+		// or 10 minutes after a failed pass. It writes to 4CAT only while
+		// state/retention-on exists, looked at on every pass; any stat error
+		// is a dry run.
+		retentionOn := filepath.Join(cfg.DeskRoot, "state", "retention-on")
+		ret := &retention.Runner{Store: fc, Now: time.Now, Logf: mgr.Log.Printf,
+			Enabled: func() bool { _, err := os.Stat(retentionOn); return err == nil }}
+		go ret.Run(serveCtx)
+		deps.Retention = ret
 	}
 	deps.FourcatProxy = fourcatProxy(cfg, study, prov)
 	deps.AdminSessions = mgr

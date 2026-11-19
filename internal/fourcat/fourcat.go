@@ -2,11 +2,13 @@
 // bundled 4CAT: it creates accounts by running 4CAT's own helper script in
 // the backend container, asserts the study's settings and removes the admin
 // tag it once wrote through psql in the database container (deleting 4CAT's
-// memcached keys after), detects whether an admin has completed 4CAT's
-// first-run setup, and obtains a collector's API token by logging in and
-// asking 4CAT's own token route over the compose network (ADR-0009). All
-// container access goes through internal/docker; the only HTTP client is the
-// one on Client, which never follows redirects.
+// memcached keys after), adds and removes a snapshot's `expires-after` and
+// `desk-retention` parameters there for the retention pass (ADR-0027),
+// detects whether an admin has completed 4CAT's first-run setup, and
+// obtains a collector's API token by logging in and asking 4CAT's own token
+// route over the compose network (ADR-0009). All container access goes
+// through internal/docker; the only HTTP client is the one on Client, which
+// never follows redirects.
 package fourcat
 
 import (

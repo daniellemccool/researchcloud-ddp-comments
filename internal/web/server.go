@@ -71,6 +71,13 @@ type membersView interface {
 	Members() (map[string][]string, bool)
 }
 
+// retentionView is what the admin page needs of the snapshot retention pass
+// (*retention.Runner, ADR-0027): its status line, counts and a time only,
+// and whether the last pass failed.
+type retentionView interface {
+	StatusLine() (line string, failed bool)
+}
+
 // Deps are the gated listener's dependencies. Prov and Sessions may be nil
 // until a later task wires them; the home handler then answers the 503
 // not-ready message. FourcatProxy, Relay and Admin are nil until a later
@@ -99,6 +106,9 @@ type Deps struct {
 	AdminSessions adminSessions
 	// Seats are the figures behind the running cap, for the admin page.
 	Seats SeatFigures
+	// Retention is the snapshot retention pass (*retention.Runner); nil when
+	// 4CAT is disabled, and the admin page then has no retention line.
+	Retention retentionView
 	// Pool is the parsed pool, kept until pool.csv changes (NewPoolCache),
 	// shared by the claims, the collector page and the admin page; nil: every
 	// request reads pool.csv itself.
