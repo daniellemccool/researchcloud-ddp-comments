@@ -1,6 +1,7 @@
 /* Installed by make-sessions.sh as <profile>/chrome/userContent.css in every desk session.
    Students collect comments without seeing the videos: on tiktok.com, video players are
-   replaced by a grey "Video hidden" panel and every image is blurred. The page still loads
+   replaced by a grey panel saying the video is hidden on purpose, so collectors do not
+   take it for a broken video, and every image is blurred. The page still loads
    and plays as usual (nothing looks different to TikTok); only what is drawn changes.
    Comment text stays readable. Selectors match TikTok's generated class-name prefixes and
    may need updating when TikTok changes its markup. */
@@ -17,10 +18,11 @@
   }
   [class*="DivBasicPlayerWrapper"]::after,
   [class*="DivVideoWrapper"]::after {
-    content: "Video hidden";
+    content: "Video hidden on purpose by the comment collection app\A\AIf the comments load, all is well.";
+    white-space: pre-line; text-align: center; padding: 16px;
     position: absolute; inset: 0; z-index: 5; pointer-events: none;
     display: flex; align-items: center; justify-content: center;
-    font: 600 18px system-ui, sans-serif; color: #555;
+    font: 600 18px/1.4 system-ui, sans-serif; color: #555;
     background: #d9dde2;
   }
 
