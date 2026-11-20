@@ -133,6 +133,34 @@ network with Docker's isolated gateway mode
 requirement. A launch installs current docker-ce; check an existing host with
 `docker version --format '{{.Server.Version}} {{.Server.APIVersion}}'`.
 
+## Running desk: a platform-file fix between releases
+
+A file under `platforms/<platform>/` that the desk reads at run time, such as
+`userContent.css`, can reach a running workspace before the next release.
+Commit and push it first, then run these on the workspace in bash, as a user
+with sudo. The wrapper `/usr/local/bin/desk` holds the plugin directory's real
+path:
+
+```
+REPO=$(sed -n 's/.*-f "\(.*\)\/deploy\/compose.yml".*/\1/p' /usr/local/bin/desk)
+DR=$(sudo sed -n 's/^DESK_ROOT=//p' "$REPO/deploy/.env")
+sudo curl -fsSL https://raw.githubusercontent.com/daniellemccool/researchcloud-ddp-comments/<commit>/platforms/<platform>/<file> -o "$REPO/platforms/<platform>/<file>"
+sudo "$REPO/deploy/init.sh" apply
+```
+
+`apply` makes the desk copy `platforms/<platform>/` to `$DR/platform/`. New
+collectors get the new file from there. A collector's profile takes
+`userContent.css` only once, at their first visit, so for each name in
+`sudo ls "$DR/state/firefox/"` also run
+`sudo cp "$DR/platform/userContent.css" "$DR/state/firefox/<user>/profile/chrome/userContent.css"`
+(copying onto the existing file keeps its owner, uid 1000, and its 0644 mode).
+Firefox reads the stylesheet at start, so stop any running pair
+(`sudo docker exec desk-desk-1 desk stop <user>`, or Stop on the admin page).
+
+The workspace's checkout now differs from its release. Reattaching or updating
+it to that same release brings the old file back; the next release from `main`
+carries the fix.
+
 ## First release only
 
 GHCR packages start private. In the GitHub package settings, set `desk`,
