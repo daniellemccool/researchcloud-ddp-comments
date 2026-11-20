@@ -1,4 +1,5 @@
-/* Installed by make-sessions.sh as <profile>/chrome/userContent.css in every desk session.
+/* Installed as <profile>/chrome/userContent.css by the provisioning template step
+   (internal/provision/steps.go, stepTemplate) when desk_hide_media is on.
    Students collect comments without seeing the videos: on tiktok.com, video players are
    replaced by a grey panel saying the video is hidden on purpose, so collectors do not
    take it for a broken video, and every image is blurred. The page still loads
