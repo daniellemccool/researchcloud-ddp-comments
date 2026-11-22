@@ -28,8 +28,9 @@ import (
 // html.EscapeString.
 
 // PAGE is the two-pane desk page: the header with the count and the two
-// folds (Earlier days, How to collect), then the sidebar beside the streamed
-// browser. The sidebar is a route: its head names it (Your queue, the page's
+// folds (Earlier days, How to collect), then the sidebar and the streamed
+// browser; the sidebar comes first in the markup and the stylesheet puts it
+// on the browser's right. The sidebar is a route: its head names it (Your queue, the page's
 // name on every platform) and holds the next action, the queue runs down a line with a node per item, and the
 // upload note closes it. A stopped or signed-out desk fills the browser's
 // pane with its message. %%NAME%% slots are substituted by deskPage.
@@ -286,7 +287,7 @@ func howToHTML(noun string, timer, open bool) string {
 	}
 	return `<li><details class="fold" name="fold"` + attr + `><summary class="site-nav__link">How to collect</summary>` +
 		`<div class="panel"><ol class="howto">` +
-		`<li>Click <b>Open next ` + noun + `</b>, or a ` + noun + ` in the list. It opens in the browser on the right.</li>` +
+		`<li>Click <b>Open next ` + noun + `</b>, or a ` + noun + ` in the list. It opens in the browser on the left.</li>` +
 		`<li>Open the comments and scroll until no more load` + timerHelp + `. Don't open replies.</li>` +
 		`<li>If the ` + noun + ` won't show or the comments won't load, pick what happened under <b>Report a problem</b>.</li>` +
 		`<li>When every ` + noun + ` is done, get more.</li>` +

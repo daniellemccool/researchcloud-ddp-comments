@@ -106,9 +106,12 @@ body { margin:0; background:var(--surface); color:var(--text); font:var(--text-b
 .days li { display:flex; justify-content:space-between; padding:var(--space-8) 0; border-bottom:1px solid var(--border); }
 .days span { color:var(--heading); font-weight:700; }
 
-/* --- the collector page: the sidebar is a route -------------------------- */
-.panes { flex:1; display:flex; min-height:0; }
-.side { flex:none; width:var(--side); display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--border); }
+/* --- the collector page: the sidebar is a route --------------------------
+   The queue sits on the browser's right, beside where the collector works in
+   it; the markup keeps the queue first (keyboard and screen-reader order), so
+   the panes are laid out in reverse. */
+.panes { flex:1; display:flex; flex-direction:row-reverse; min-height:0; }
+.side { flex:none; width:var(--side); display:flex; flex-direction:column; min-height:0; border-left:1px solid var(--border); }
 /* a stopped or signed-out desk: the message fills the browser's pane and the sidebar dims */
 body:has(#stopped:not([hidden])) .side, body:has(#denied:not([hidden])) .side { opacity:.35; }
 .side__head { flex:none; position:relative; padding:18px var(--space-24) var(--space-16); background:var(--sky);
@@ -119,10 +122,11 @@ body:has(#stopped:not([hidden])) .side, body:has(#denied:not([hidden])) .side { 
 .side__title { margin:0 0 14px; font:var(--text-title-sm); letter-spacing:0; color:var(--on-sky); }
 .side__list { flex:1; min-height:0; overflow:auto; padding:0 var(--space-24) var(--space-16); }
 
-/* the next step: the arrow disc heads the line and points at the browser */
+/* the next step: the arrow disc heads the line and points at the browser,
+   which is on the left, so the shared arrow drawing is mirrored here alone */
 .next { display:flex; align-items:center; gap:var(--space-16); width:100%; margin:0; padding:0; border:0; background:none;
         cursor:pointer; text-align:left; font:var(--text-link); line-height:1.3; color:var(--heading); }
-.next__disc { flex:none; display:block; width:var(--disc-arrow); height:var(--disc-arrow); }
+.next__disc { flex:none; display:block; width:var(--disc-arrow); height:var(--disc-arrow); transform:scaleX(-1); }
 .next__label { text-decoration:underline dotted var(--on-sky); text-decoration-thickness:var(--line-underline);
                text-underline-offset:var(--line-underline-offset-title); }
 .next:disabled { cursor:default; color:var(--text); }

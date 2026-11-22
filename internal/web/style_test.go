@@ -359,3 +359,32 @@ func TestThousands(t *testing.T) {
 		}
 	}
 }
+
+// The queue sits on the right of the streamed browser, beside where the
+// collector works in it (a platform's comments open on the browser's right).
+// The markup keeps the queue first, so it also comes first for the keyboard
+// and a screen reader; the stylesheet alone puts it on the right, draws its
+// dividing line on the browser's side and turns the next action's arrow to
+// point at the browser.
+func TestQueueSitsRightOfTheBrowser(t *testing.T) {
+	for _, want := range []string{
+		`.panes { flex:1; display:flex; flex-direction:row-reverse; min-height:0; }`,
+		`.side { flex:none; width:var(--side); display:flex; flex-direction:column; min-height:0; border-left:1px solid var(--border); }`,
+		`.next__disc { flex:none; display:block; width:var(--disc-arrow); height:var(--disc-arrow); transform:scaleX(-1); }`,
+	} {
+		if !strings.Contains(pageCSS, want) {
+			t.Errorf("stylesheet lacks %q", want)
+		}
+	}
+	page := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video"})
+	side, screen := strings.Index(page, `<aside class="side">`), strings.Index(page, `<div class="screen-slot">`)
+	if side < 0 || screen < 0 || side > screen {
+		t.Errorf("the queue does not come before the browser in the markup (side at %d, screen at %d)", side, screen)
+	}
+	if want := `It opens in the browser on the left.`; !strings.Contains(page, want) {
+		t.Errorf("the help lacks %q", want)
+	}
+	if strings.Contains(page, "on the right") {
+		t.Errorf("the help still says the browser is on the right")
+	}
+}
