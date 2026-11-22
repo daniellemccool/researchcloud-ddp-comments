@@ -209,17 +209,16 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 	}
 
 	var body strings.Builder
-	next := "" // the next-item action, in the cutout under the sidebar's band
+	next := "" // the next action, in the sidebar's head
 	if len(shown) > 0 {
-		disabled := ""
-		if nDone == len(shown) {
-			disabled = " disabled"
-		}
-		next = `<button id="next" class="next" onclick="openNext()"` + disabled + `>Open next ` + noun + goMark + `</button>`
+		next = nextAction(noun, nDone == len(shown))
 		body.WriteString(`<ul class="rows">` + strings.Join(items, "") + `</ul>`)
 	}
+	// The queue's end: the ring node that closes the line, with what is
+	// behind the collector and what comes next beside it.
+	body.WriteString(`<div class="queue__end">`)
 	if earlier > 0 {
-		body.WriteString(`<p class="hint">` + strconv.Itoa(earlier) + ` done earlier</p>`)
+		body.WriteString(`<p>` + strconv.Itoa(earlier) + ` done earlier</p>`)
 	}
 	taken := h.deskLog.Taken(evs)
 	unfinished := false
@@ -231,16 +230,21 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 	}
 	switch {
 	case unfinished:
-		body.WriteString(`<p class="hint">Finish these first: open each one, or mark a problem. Then you can get more.</p>`)
+		body.WriteString(`<p>Finish these first: open each one, or mark a problem. Then you can get more.</p>`)
 	case anyUntaken(snap.Valid, taken):
-		body.WriteString(`<div class="more" id="getmore">`)
-		for _, n := range h.cfg.BatchSizes {
-			body.WriteString(`<button onclick="more(` + strconv.Itoa(n) + `)">Get ` + strconv.Itoa(n) + ` more ` + noun + `s` + goMark + `</button>`)
+		body.WriteString(`<div class="queue__more" id="getmore">`)
+		for i, n := range h.cfg.BatchSizes {
+			cls := "cmd cmd--sm"
+			if i == 0 {
+				cls += " cmd--main" // the first size is the usual one
+			}
+			body.WriteString(`<button class="` + cls + `" onclick="more(` + strconv.Itoa(n) + `)">Get ` + strconv.Itoa(n) + ` more ` + noun + `s</button>`)
 		}
 		body.WriteString(`</div>`)
 	default:
-		body.WriteString(`<p class="hint" id="getmore">No more ` + noun + `s right now; tell the operator.</p>`)
+		body.WriteString(`<p id="getmore">No more ` + noun + `s right now; tell the operator.</p>`)
 	}
+	body.WriteString(`</div>`)
 
 	progressHTML := ""
 	if len(shown) > 0 {

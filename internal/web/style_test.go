@@ -68,17 +68,85 @@ func TestPagesCarryTheLook(t *testing.T) {
 		{"not ready", "dmccool2", collectorRole, "Your desk"},
 	} {
 		b := do(t, srv, c.user, c.roles, testGate, "/desk/").Body.String()
-		for _, want := range []string{`<header class="site-header">`, "--font-serif:", `<div class="band">`, "<h1>" + c.heading + "</h1>"} {
+		for _, want := range []string{`<header class="site-header">`, "--font-serif:", `<div class="band">`, `<h1 class="band__title">` + c.heading + "</h1>"} {
 			if !strings.Contains(b, want) {
 				t.Errorf("%s page lacks %q", c.name, want)
 			}
 		}
 	}
 	m := message("Your desk", "TikTok comment collection", "hello", 0)
-	for _, want := range []string{`<header class="site-header">`, "<h1>Your desk</h1>", `<p class="say">hello</p>`, "TikTok comment collection"} {
+	for _, want := range []string{`<header class="site-header">`, `<h1 class="band__title">Your desk</h1>`, `<p class="say">hello</p>`, "TikTok comment collection"} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message page lacks %q", want)
 		}
+	}
+}
+
+// The band carries its heading as the page's h1 and, in the middle of its
+// line, the mark of the infrastructure the suite works with, named for
+// assistive technology; the other two pictures are decoration.
+func TestBandCarriesTheIntegrationMark(t *testing.T) {
+	b := bandHTML("X &amp; Y") // the caller escapes, as pageTop does
+	for _, want := range []string{
+		`<h1 class="band__title">X &amp; Y</h1>`,
+		`class="band__mark"`,
+		`<img src="/desk/assets/zeeschuimer-64.png" alt="Works with Zeeschuimer"`,
+		`src="/desk/assets/network/consent-badge.svg" alt=""`,
+		`src="/desk/assets/network/globe.svg" alt=""`,
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("band lacks %q:\n%s", want, b)
+		}
+	}
+}
+
+// The stylesheet keys every state on a hook the page script sets, and the
+// parts round 2 built by overriding one another are gone.
+func TestStylesheetKnowsTheScriptHooks(t *testing.T) {
+	for _, want := range []string{
+		".rows li[data-state=done]", ".rows li[data-state=problem]", ".rows li.current",
+		".msg.warn", ".timer.up", ".next:disabled", ".halt[hidden]", "#screen",
+	} {
+		if !strings.Contains(pageCSS, want) {
+			t.Errorf("the stylesheet lacks %q", want)
+		}
+	}
+	for _, gone := range []string{".notice", ".late", ".figures", ".sideband"} {
+		if strings.Contains(pageCSS, gone) {
+			t.Errorf("the stylesheet still names %q", gone)
+		}
+	}
+}
+
+// The arrow disc and the link that ends in it: the label and the address
+// are escaped.
+func TestActionLinkEscapes(t *testing.T) {
+	got := actionLink(`/a?b="c"`, "Go <on>")
+	want := `<a class="action" href="/a?b=&#34;c&#34;">Go &lt;on&gt;<i class="action__dots"></i>` + arrow("action__disc") + `</a>`
+	if got != want {
+		t.Errorf("actionLink = %q, want %q", got, want)
+	}
+	if a := arrow("next__disc"); !strings.HasPrefix(a, `<svg class="disc next__disc" viewBox="-18 -18 36 36" aria-hidden="true">`) {
+		t.Errorf("arrow = %q", a)
+	}
+}
+
+// The header's row is full width on the collector page and in the centred
+// column elsewhere; the current link says so to assistive technology.
+func TestHeaderLinksAndWidth(t *testing.T) {
+	links := []navLink{{Label: "Your <videos>", Href: "/desk/", Current: true}, {Label: "Admin", Href: "/desk/admin/"}}
+	wide := headerHTML("sub", "", links, "<li>FOLD</li>", true)
+	for _, want := range []string{
+		`<div class="site-header__inner site-header__inner--wide">`,
+		`<li><a class="site-nav__link is-current" href="/desk/" aria-current="page">Your &lt;videos&gt;</a></li><li>FOLD</li>`,
+		`<li><a class="site-nav__link" href="/desk/admin/">Admin</a></li>`,
+	} {
+		if !strings.Contains(wide, want) {
+			t.Errorf("wide header lacks %q:\n%s", want, wide)
+		}
+	}
+	if narrow := headerHTML("sub", "", nil, "", false); !strings.Contains(narrow, `<div class="site-header__inner">`) || strings.Contains(narrow, "<nav") {
+		t.Errorf("narrow header without links = %q", narrow)
 	}
 }
 

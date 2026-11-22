@@ -458,7 +458,7 @@ func TestHomeSetupFailedHealsOnNextVisit(t *testing.T) {
 	if strings.Contains(b2, "Setup failed") {
 		t.Errorf("second visit still shows the failure")
 	}
-	if !strings.Contains(b2, "<h1>Your videos</h1>") {
+	if !strings.Contains(b2, `<h1 class="side__title">Your videos</h1>`) {
 		t.Errorf("second visit did not render the collector page")
 	}
 	if n := e.sess.startCount(); n != 1 {
@@ -587,8 +587,9 @@ func TestHomePageRendersRows(t *testing.T) {
 				"Open next video",
 				`<option value="NOT_FOUND">Not found</option>`,
 				`<option value="OTHER">Other</option>`,
-				"Get 5 more videos",
-				"Get 10 more videos",
+				`<div class="queue__end"><div class="queue__more" id="getmore">` +
+					`<button class="cmd cmd--sm cmd--main" onclick="more(5)">Get 5 more videos</button>` +
+					`<button class="cmd cmd--sm" onclick="more(10)">Get 10 more videos</button></div></div>`,
 				"upload them to 4CAT", // the footer hint, FourcatEnabled
 				`<ul class="rows">`,
 				`data-state="done"`,
@@ -631,7 +632,7 @@ func TestHomePageNoMore(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if b := rec.Body.String(); !strings.Contains(b, "No more videos right now; tell the operator.") {
+	if b := rec.Body.String(); !strings.Contains(b, `<p id="getmore">No more videos right now; tell the operator.</p>`) {
 		t.Errorf("page lacks the no-more hint")
 	}
 }
@@ -654,8 +655,8 @@ func TestHomePageEarlierBatchAndFinishHint(t *testing.T) {
 	}
 	b := rec.Body.String()
 	for _, want := range []string{
-		"2 done earlier",
-		"Finish these first: open each one, or mark a problem. Then you can get more.",
+		`</ul><div class="queue__end"><p>2 done earlier</p>` +
+			`<p>Finish these first: open each one, or mark a problem. Then you can get more.</p></div>`,
 		"Video 1", // no pool note → "<Kind> <n>" title
 	} {
 		if !strings.Contains(b, want) {
@@ -686,7 +687,7 @@ func TestHomePageProblemMessageAndDisabledNext(t *testing.T) {
 	for _, want := range []string{
 		`<div class="msg warn">Other: some &lt;note&gt;</div>`, // the problem message, escaped
 		`data-state="problem"`,
-		`<button id="next" class="next" onclick="openNext()" disabled>Open next video` + goMark + `</button>`, // all shown done
+		nextAction("video", true), // all shown done
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q", want)
@@ -702,15 +703,26 @@ func TestHomePageHelpOpenOnlyWhenNoClaims(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if b := rec.Body.String(); !strings.Contains(b, `<details open><summary>How to collect</summary>`) {
+	b := rec.Body.String()
+	if !strings.Contains(b, `<details class="fold" name="fold" open><summary class="site-nav__link">How to collect</summary>`) {
 		t.Errorf("page without claims lacks the open help details")
+	}
+	// Nothing claimed: no list and no next action, and the queue's end
+	// still offers more.
+	for _, gone := range []string{`id="next"`, `<ul class="rows">`} {
+		if strings.Contains(b, gone) {
+			t.Errorf("page without claims has %q", gone)
+		}
+	}
+	if want := `<div class="side__list"><div class="queue__end"><div class="queue__more" id="getmore">`; !strings.Contains(b, want) {
+		t.Errorf("page without claims lacks %q", want)
 	}
 
 	if err := e.log.Append(desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	rec2 := e.get(t, "alice", collectorRole, "/desk/")
-	if b := rec2.Body.String(); !strings.Contains(b, `<details><summary>How to collect</summary>`) {
+	if b := rec2.Body.String(); !strings.Contains(b, `<details class="fold" name="fold"><summary class="site-nav__link">How to collect</summary>`) {
 		t.Errorf("page with claims lacks the closed help details")
 	}
 }
@@ -739,7 +751,7 @@ func TestAdminGetsCollectorPageWithAdminLink(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("second visit: status = %d, want 200", rec2.Code)
 	}
-	if b := rec2.Body.String(); !strings.Contains(b, `<li class="site-nav__item"><a href="/desk/admin/">Admin</a></li>`) {
+	if b := rec2.Body.String(); !strings.Contains(b, `<li><a class="site-nav__link" href="/desk/admin/">Admin</a></li>`) {
 		t.Errorf("admin page lacks the admin link")
 	}
 }

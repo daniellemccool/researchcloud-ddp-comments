@@ -57,15 +57,15 @@ func (h *handler) workedOf(user string) desklog.Worked {
 	return workedFrom(evs, user, h.now())
 }
 
-// workedHTML is the header's time line, the one the check-ins keep current
-// (id "worked").
+// workedHTML is the time line of the header's count, the one the check-ins
+// keep current (id "worked").
 func workedHTML(w desklog.Worked, _ time.Time) string {
-	return `<div class="worked"><span id="worked">` + html.EscapeString(workedLine(w)) + `</span></div>`
+	return `<span class="count__time"><span id="worked">` + html.EscapeString(workedLine(w)) + `</span></span>`
 }
 
 // earlierDaysHTML is the header's Earlier days fold, when an earlier day has
-// time: one line per such day, newest first, in a panel under the header.
-// "" when no earlier day has time.
+// time: one line per such day, newest first, the day in full and its time at
+// the right, in a panel under the header. "" when no earlier day has time.
 func earlierDaysHTML(w desklog.Worked, now time.Time) string {
 	today := now.In(deskZone).Format("2006-01-02")
 	var earlier []string
@@ -75,13 +75,13 @@ func earlierDaysHTML(w desklog.Worked, now time.Time) string {
 		}
 		label := d.Day
 		if t, err := time.ParseInLocation("2006-01-02", d.Day, deskZone); err == nil {
-			label = t.Format("Mon 2 Jan")
+			label = t.Format("Monday 2 January")
 		}
-		earlier = append(earlier, `<li>`+html.EscapeString(label+" "+hm(d.Minutes))+`</li>`)
+		earlier = append(earlier, `<li>`+html.EscapeString(label)+`<span>`+hm(d.Minutes)+`</span></li>`)
 	}
 	if len(earlier) == 0 {
 		return ""
 	}
-	return `<li class="site-nav__item"><details class="days"><summary>Earlier days</summary>` +
-		`<div class="hdr-panel"><h2>Earlier days</h2><ul class="daylist">` + strings.Join(earlier, "") + `</ul></div></details></li>`
+	return `<li><details class="fold" name="fold"><summary class="site-nav__link">Earlier days</summary>` +
+		`<div class="panel"><ul class="days">` + strings.Join(earlier, "") + `</ul></div></details></li>`
 }

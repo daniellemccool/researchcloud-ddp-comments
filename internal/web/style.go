@@ -12,8 +12,8 @@ import (
 
 // This file is the desk's share of the D3I look (datadonation.eu's design
 // system 2): assets/ holds the system's tokens.css, two of its faces with
-// their licences and three pieces of its network drawing, all verbatim, and
-// the desk's own stylesheet, assets/desk.css. Every page carries the
+// their licences, two pieces of its network drawing and Zeeschuimer's mark,
+// all verbatim, and the desk's own stylesheet, assets/desk.css. Every page carries the
 // stylesheets inline, so it renders even where a request for a stylesheet
 // would be refused (the 403 page); the faces and the pieces are served from
 // /desk/assets/ behind the gate like every other desk path.
@@ -61,8 +61,24 @@ func serveAsset(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
-// goMark ends an action: a short dotted line and the arrow disc, as on
-// datadonation.eu's "More" links. It goes last inside a button.
+// arrow is the arrow disc, the system's mark for the one next step and for
+// a link that goes somewhere. cls names the part it belongs to (next__disc,
+// action__disc); the stylesheet sizes and colours it there. Commands
+// (Upload, Stop, Get more) never carry it.
+func arrow(cls string) string {
+	return `<svg class="disc ` + cls + `" viewBox="-18 -18 36 36" aria-hidden="true"><circle r="18"/>` +
+		`<path d="M-8 0 h16 M1.5 -6.5 l6.5 6.5 l-6.5 6.5"/></svg>`
+}
+
+// actionLink is a link that goes somewhere: the label, a short dotted line
+// and the arrow disc. href and label are plain text and are escaped.
+func actionLink(href, label string) string {
+	return `<a class="action" href="` + html.EscapeString(href) + `">` + html.EscapeString(label) +
+		`<i class="action__dots"></i>` + arrow("action__disc") + `</a>`
+}
+
+// goMark is round 2's ending of an action; the admin's Upload and Stop are
+// its last uses.
 const goMark = `<i class="more__dots"></i><svg class="go" width="24" height="24" viewBox="-18 -18 36 36" aria-hidden="true">` +
 	`<circle r="18"/><path d="M-8 0 h16 M1.5 -6.5 l6.5 6.5 l-6.5 6.5"/></svg>`
 
@@ -80,10 +96,17 @@ type navLink struct {
 
 // headerHTML is the header: the desk's name over subtitle (already HTML),
 // extra (already HTML, between the name and the links; the collector's
-// count) and the links. Labels and hrefs are escaped.
-func headerHTML(subtitle, extra string, links []navLink, folds string) string {
+// count), the links, and folds (already HTML, list items that go after the
+// first link). Labels and hrefs are escaped. wide runs the row the full
+// width of the window, for the collector page; elsewhere it keeps to the
+// centred column.
+func headerHTML(subtitle, extra string, links []navLink, folds string, wide bool) string {
 	var b strings.Builder
-	b.WriteString(`<header class="site-header"><div class="site-header__inner">`)
+	inner := "site-header__inner"
+	if wide {
+		inner += " site-header__inner--wide"
+	}
+	b.WriteString(`<header class="site-header"><div class="` + inner + `">`)
 	b.WriteString(`<a class="site-header__brand" href="/desk/"><span class="site-header__name">Comment desk</span>`)
 	if subtitle != "" {
 		b.WriteString(`<span class="site-header__subtitle">` + subtitle + `</span>`)
@@ -92,11 +115,11 @@ func headerHTML(subtitle, extra string, links []navLink, folds string) string {
 	if len(links) > 0 || folds != "" {
 		b.WriteString(`<nav class="site-nav" aria-label="Desk"><ul class="site-nav__list">`)
 		for i, l := range links {
-			cls, cur := "site-nav__item", ""
+			cls, cur := "site-nav__link", ""
 			if l.Current {
-				cls, cur = "site-nav__item is-active", ` aria-current="page"`
+				cls, cur = "site-nav__link is-current", ` aria-current="page"`
 			}
-			b.WriteString(`<li class="` + cls + `"><a href="` + html.EscapeString(l.Href) + `"` + cur + `>` + html.EscapeString(l.Label) + `</a></li>`)
+			b.WriteString(`<li><a class="` + cls + `" href="` + html.EscapeString(l.Href) + `"` + cur + `>` + html.EscapeString(l.Label) + `</a></li>`)
 			if i == 0 {
 				b.WriteString(folds)
 			}
@@ -107,17 +130,19 @@ func headerHTML(subtitle, extra string, links []navLink, folds string) string {
 	return b.String()
 }
 
-// bandHTML is the title band, the front page's band in small: heading
-// (already HTML) on a white line between two nodes, Zeeschuimer's mark in a
-// white disc, the consent badge and the globe on that line, and the stepped
-// lower edge. The drawing is decoration, hidden from assistive technology.
+// bandHTML is the title band of a reading page, ddp-inspector's: heading
+// (already HTML) on a white line between two nodes; the line runs on, drops
+// past the step to the consent badge and ends at the globe. In the middle of
+// the title's line sits the integration mark: the logo of the infrastructure
+// this suite works with, Zeeschuimer's, unaltered in a white disc. The mark
+// is named for assistive technology; the rest of the drawing is decoration.
 func bandHTML(heading string) string {
 	return `<div class="band"><i class="band__deep" aria-hidden="true"></i><div class="band__row">` +
-		`<i class="band__lead" aria-hidden="true"></i><div class="band__main"><h1>` + heading + `</h1>` +
-		`<div class="band__thread" aria-hidden="true"><i class="band__line band__line--title"></i>` +
-		`<svg class="band__drop" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M0 0 C50 0 50 100 100 100" vector-effect="non-scaling-stroke"/></svg>` +
-		`<i class="band__line band__line--deep"></i>` +
-		`<span class="band__piece band__piece--zee"><img src="/desk/assets/zeeschuimer-64.png" alt="" width="24" height="24"></span>` +
+		`<i class="band__lead" aria-hidden="true"></i><div class="band__main"><h1 class="band__title">` + heading + `</h1>` +
+		`<div class="band__thread"><i class="band__line band__line--title" aria-hidden="true"></i>` +
+		`<svg class="band__drop" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 C50 0 50 100 100 100" vector-effect="non-scaling-stroke"/></svg>` +
+		`<i class="band__line band__line--deep" aria-hidden="true"></i>` +
+		`<span class="band__mark"><img src="/desk/assets/zeeschuimer-64.png" alt="Works with Zeeschuimer" width="28" height="28"></span>` +
 		`<img class="band__piece band__piece--badge" src="/desk/assets/network/consent-badge.svg" alt="" width="52" height="52">` +
 		`<img class="band__piece band__piece--globe" src="/desk/assets/network/globe.svg" alt="" width="40" height="40">` +
 		`</div></div></div><div class="band__step" aria-hidden="true">` + stepSVG + `</div></div>`
@@ -130,7 +155,7 @@ func pageTop(title, meta, subtitle string, links []navLink, heading string) stri
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
 		`<meta name="viewport" content="width=device-width, initial-scale=1">` + meta +
 		`<title>` + html.EscapeString(title) + `</title><style>` + pageCSS + `</style></head>` +
-		`<body class="page">` + headerHTML(subtitle, "", links, "") +
+		`<body class="page">` + headerHTML(subtitle, "", links, "", false) +
 		`<main>` + bandHTML(html.EscapeString(heading)) + `<div class="wrap">`
 }
 

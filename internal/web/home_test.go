@@ -286,7 +286,7 @@ func TestHomePassesContactToPage(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("home = %d, want 200", rec.Code)
 	}
-	want := "If it keeps failing, contact " + testContact + "."
+	want := "<p>If reloading keeps failing, contact " + testContact + ".</p>"
 	if b := rec.Body.String(); !strings.Contains(b, want) {
 		t.Errorf("page lacks %q", want)
 	}

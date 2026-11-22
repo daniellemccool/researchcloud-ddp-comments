@@ -24,9 +24,16 @@ import (
 // html.EscapeString.
 
 // PAGE is the two-pane desk page: the header with the count and the two
-// folds (Earlier days, How to collect), then the sidebar (the small band
-// with the next item in the cutout under it, the queue, the upload footer)
-// beside the streamed browser. %%NAME%% slots are substituted by deskPage.
+// folds (Earlier days, How to collect), then the sidebar beside the streamed
+// browser. The sidebar is a route: its head names the items and holds the
+// next action, the queue runs down a line with a node per item, and the
+// upload note closes it. A stopped or signed-out desk fills the browser's
+// pane with its message. %%NAME%% slots are substituted by deskPage.
+//
+// The script finds its parts by id (prog, barfill, next, getmore, worked,
+// upload, stopped, denied, screen, starting), by ul.rows li with data-state,
+// data-kind and data-id, and by the classes msg, timer and current; the
+// stylesheet keys every state on those same hooks.
 const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>%%TITLE%%</title>
 <style>
@@ -35,16 +42,17 @@ const PAGE = `<!doctype html>
 <body class="desk">
 %%HEADER%%
 <div class="panes">
-<aside>
-<div class="sideband"><h1>Your %%NOUN%%s</h1><svg class="sideband__drop" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 C50 0 50 100 100 100" vector-effect="non-scaling-stroke"/></svg><i class="sideband__line" aria-hidden="true"></i><i class="sideband__deep" aria-hidden="true"></i><div class="sideband__step" aria-hidden="true">%%STEP%%</div></div>
-<div class="sideniche">%%NEXT%%</div>
-<div class="list">%%BODY%%</div>
+<aside class="side">
+<div class="side__head"><h1 class="side__title">Your %%NOUN%%s</h1>%%NEXT%%</div>
+<div class="side__list">%%BODY%%</div>
 %%FOOTER%%</aside>
-<div id="starting">Starting your browser…</div>
-<iframe id="screen" style="display:none" allow="clipboard-read; clipboard-write"></iframe>
+<div class="screen-slot">
+<div id="starting" class="starting">Starting your browser…</div>
+<iframe id="screen" title="Your browser" style="display:none" allow="clipboard-read; clipboard-write"></iframe>
+<div id="stopped" hidden class="halt"><div class="stop"><span class="bang" aria-hidden="true">!</span><div><p class="lede">Your desk was stopped after %%IDLE_MINUTES%% minutes without activity.</p>%%RELOAD_CONTINUE%%</div></div></div>
+<div id="denied" hidden class="halt"><div class="stop"><span class="bang" aria-hidden="true">!</span><div><p class="lede">You are signed out, or your access to the desk was removed.</p><p>If reloading keeps failing, contact %%CONTACT%%.</p>%%RELOAD_PAGE%%</div></div></div>
 </div>
-<div id="stopped" hidden class="warn">Your desk was stopped after %%IDLE_MINUTES%% minutes without activity. Reload to continue.</div>
-<div id="denied" hidden class="warn">You are signed out, or your access to the desk was removed. Reload this page. If it keeps failing, contact %%CONTACT%%.</div>
+</div>
 <script>
 const SECONDS=%%SECONDS%%,NOTE_CODES=%%NOTE_CODES%%;let timer=null,wasReady=false,sawInput=false,stopped=false;
 async function waitScreen(){try{const r=await fetch('status');if(r.ok&&(await r.json()).ready){
@@ -74,7 +82,7 @@ function startTimer(l){if(timer)clearInterval(timer.h);document.querySelectorAll
  const t=l.querySelector('.timer');const end=Date.now()+SECONDS*1000;t.className='timer';
  const tick=()=>{const s=Math.max(0,Math.round((end-Date.now())/1000));
   t.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
-  if(s===0){clearInterval(timer.h);t.textContent='time’s up — next one';t.className='timer up';}};
+  if(s===0){clearInterval(timer.h);t.textContent='Time’s up. Open the next one.';t.className='timer up';}};
  timer={h:setInterval(tick,1000)};tick();}
 function current(l){document.querySelectorAll('li.current').forEach(x=>x.classList.remove('current'));
  l.classList.add('current');if(SECONDS>0)startTimer(l);}
@@ -114,15 +122,28 @@ func message(heading, subtitle, text string, refresh int) string {
 // problemOptions is the problem <select> of every row.
 func problemOptions(problems []platform.Problem) string {
 	var b strings.Builder
-	b.WriteString(`<option value="">Problem…</option>`)
+	b.WriteString(`<option value="">Report a problem…</option>`)
 	for _, p := range problems {
 		b.WriteString(`<option value="` + html.EscapeString(p.Code) + `">` + html.EscapeString(p.Label) + `</option>`)
 	}
 	return b.String()
 }
 
-// row renders one queue row. msg is already-escaped HTML
-// (or "").
+// nextAction is the sidebar's next step: the arrow disc heading the queue's
+// line, and its label. noun is already escaped; off disables it (nothing
+// left to open).
+func nextAction(noun string, off bool) string {
+	disabled := ""
+	if off {
+		disabled = " disabled"
+	}
+	return `<button id="next" class="next" onclick="openNext()"` + disabled + `>` + arrow("next__disc") +
+		`<span class="next__label">Open next ` + noun + `</span></button>`
+}
+
+// row renders one queue row: a node on the queue's line, the title that
+// opens the item, the timer's place, the item's id and its problem control,
+// which names the item it is about. msg is already-escaped HTML (or "").
 func row(kind, itemID, state string, opened bool, title, msg, options string, timer bool) string {
 	cls := ""
 	if opened {
@@ -135,7 +156,8 @@ func row(kind, itemID, state string, opened bool, title, msg, options string, ti
 	if timer {
 		b.WriteString(`<span class="timer"></span>`)
 	}
-	b.WriteString(`</div><div class="sub"><span>` + i + `</span><select onchange="problem(this)">` + options + `</select></div>`)
+	b.WriteString(`</div><div class="sub"><span>` + i + `</span><select class="pick" aria-label="Report a problem with ` + html.EscapeString(title) +
+		`" onchange="problem(this)">` + options + `</select></div>`)
 	warn := ""
 	if msg != "" {
 		warn = " warn"
@@ -149,8 +171,8 @@ func row(kind, itemID, state string, opened bool, title, msg, options string, ti
 // even, as Python's round does.
 func progress(nDone, n int) string {
 	pct := pyRound(100 * float64(nDone) / float64(n))
-	return `<span id="prog">` + strconv.Itoa(nDone) + ` of ` + strconv.Itoa(n) + ` done</span>` +
-		`<div class="bar"><i id="barfill" style="width:` + strconv.Itoa(pct) + `%"></i></div>`
+	return `<span id="prog" class="count__done">` + strconv.Itoa(nDone) + ` of ` + strconv.Itoa(n) + ` done</span>` +
+		`<div class="count__bar"><i id="barfill" class="count__fill" style="width:` + strconv.Itoa(pct) + `%"></i></div>`
 }
 
 // pyRound rounds half to even like Python's round for the positive values
@@ -179,7 +201,7 @@ type pageParams struct {
 	Seconds       int    // the per-item timer, TimerMinutes*60
 	NoteCodes     []string
 	ProgressHTML  string // already HTML
-	Next          string // already HTML: the next-item action, in the cutout under the band; "" without items
+	Next          string // already HTML: the next action (nextAction), in the sidebar's head; "" without items
 	Body          string // already HTML
 	OpenHelp      bool
 	Footer        *string        // the footer's inner HTML (uploadFooter); nil hides the footer
@@ -195,9 +217,9 @@ type pageParams struct {
 func deskPage(p pageParams) string {
 	footer := ""
 	if p.Footer != nil {
-		cls := "notice"
+		cls := "upload"
 		if p.FooterWarn {
-			cls = "notice warn"
+			cls = "upload warn" // the class the script toggles; the note's own alert says it
 		}
 		footer = `<footer id="upload" class="` + cls + `">` + *p.Footer + "</footer>\n"
 	}
@@ -214,15 +236,14 @@ func deskPage(p pageParams) string {
 	if p.Admin {
 		links = append(links, navLink{Label: "Admin", Href: "/desk/admin/"})
 	}
-	count := `<div class="hdr-progress">` + p.ProgressHTML + workedHTML(p.Worked, p.Now) + `</div>`
+	count := `<div class="count">` + p.ProgressHTML + workedHTML(p.Worked, p.Now) + `</div>`
 	folds := earlierDaysHTML(p.Worked, p.Now) + howToHTML(noun, p.Seconds > 0, p.OpenHelp)
 	subtitle := platformLine(p.PlatformLabel) + " · " + html.EscapeString(p.User)
 	return strings.NewReplacer(
 		"%%TITLE%%", html.EscapeString(p.PlatformLabel)+" desk — "+html.EscapeString(p.User),
 		"%%CSS%%", pageCSS,
-		"%%HEADER%%", headerHTML(subtitle, count, links, folds),
+		"%%HEADER%%", headerHTML(subtitle, count, links, folds, true),
 		"%%NOUN%%", noun,
-		"%%STEP%%", stepSVG,
 		"%%NEXT%%", p.Next,
 		"%%BODY%%", p.Body,
 		"%%FOOTER%%", footer,
@@ -230,12 +251,15 @@ func deskPage(p pageParams) string {
 		"%%NOTE_CODES%%", noteCodes,
 		"%%IDLE_MINUTES%%", strconv.Itoa(max(p.IdleMinutes, 1)),
 		"%%CONTACT%%", html.EscapeString(p.Contact),
+		"%%RELOAD_CONTINUE%%", actionLink("/desk/", "Reload to continue"),
+		"%%RELOAD_PAGE%%", actionLink("/desk/", "Reload this page"),
 	).Replace(PAGE)
 }
 
-// howToHTML is the header's How to collect fold: the four steps on one
-// line, numbered in discs. noun is already escaped; open opens the fold
-// (a student with nothing claimed yet).
+// howToHTML is the header's How to collect fold: the four steps down one
+// line, numbered in discs, in a panel under the header. noun is already
+// escaped; open opens the fold (a student with nothing claimed yet). The
+// folds share a name, so opening one closes the other.
 func howToHTML(noun string, timer, open bool) string {
 	attr, timerHelp := "", ""
 	if open {
@@ -244,11 +268,11 @@ func howToHTML(noun string, timer, open bool) string {
 	if timer {
 		timerHelp = ", or until the timer reaches 0:00"
 	}
-	return `<li class="site-nav__item"><details` + attr + `><summary>How to collect</summary>` +
-		`<div class="hdr-panel"><h2>How to collect</h2><ol class="howto">` +
-		`<li>Click <b>Open next ` + noun + `</b> (or an item in the list). It opens in the browser on the right.</li>` +
+	return `<li><details class="fold" name="fold"` + attr + `><summary class="site-nav__link">How to collect</summary>` +
+		`<div class="panel"><ol class="howto">` +
+		`<li>Click <b>Open next ` + noun + `</b>, or a ` + noun + ` in the list. It opens in the browser on the right.</li>` +
 		`<li>Open the comments and scroll until no more load` + timerHelp + `. Don't open replies.</li>` +
-		`<li>If the item won't show or comments won't load, pick what happened under <b>Problem…</b>.</li>` +
-		`<li>When every item is done, get more.</li>` +
+		`<li>If the ` + noun + ` won't show or the comments won't load, pick what happened under <b>Report a problem</b>.</li>` +
+		`<li>When every ` + noun + ` is done, get more.</li>` +
 		`</ol></div></details></li>`
 }

@@ -29,7 +29,7 @@ func TestProblemOptions(t *testing.T) {
 		{Code: "NOT_FOUND", Label: "Not found"},
 		{Code: "OTHER", Label: "Other", Note: true},
 	})
-	want := `<option value="">Problem…</option>` +
+	want := `<option value="">Report a problem…</option>` +
 		`<option value="NOT_FOUND">Not found</option>` +
 		`<option value="OTHER">Other</option>`
 	if got != want {
@@ -44,7 +44,7 @@ func TestRowEscapesAndMarks(t *testing.T) {
 		`<li id="r111" data-state="todo" data-kind="video" data-id="111">`,
 		`onclick="open_(this.closest('li'));return false">a&lt;b&gt;</a>`,
 		`<span class="timer"></span>`,
-		`<select onchange="problem(this)">` + options + `</select>`,
+		`<select class="pick" aria-label="Report a problem with a&lt;b&gt;" onchange="problem(this)">` + options + `</select>`,
 		`<div class="msg"></div>`,
 	} {
 		if !strings.Contains(got, want) {
@@ -65,7 +65,7 @@ func TestRowEscapesAndMarks(t *testing.T) {
 
 func TestProgress(t *testing.T) {
 	got := progress(1, 4)
-	if !strings.Contains(got, `<span id="prog">1 of 4 done</span>`) {
+	if !strings.Contains(got, `<span id="prog" class="count__done">1 of 4 done</span><div class="count__bar"><i id="barfill" class="count__fill" style="width:25%"></i></div>`) {
 		t.Errorf("progress lacks the counter:\n%s", got)
 	}
 	if !strings.Contains(got, `style="width:25%"`) {
@@ -88,13 +88,13 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 	})
 	for _, want := range []string{
 		"<title>TestTube desk — alice</title>",
-		`<h1>Your videos</h1>`, // header noun slot
+		`<h1 class="side__title">Your videos</h1>`, // the sidebar's heading follows the noun
 		`<span class="site-header__subtitle">TestTube comment collection · alice</span>`,
-		`<details open>`,
+		`<details class="fold" name="fold" open><summary class="site-nav__link">How to collect</summary>`,
 		", or until the timer reaches 0:00",
 		"const SECONDS=120,NOTE_CODES=[\"OTHER\"]",
 		`<p>%%USER%% stays literal</p>`, // one pass: substituted text is never rescanned
-		`<footer id="upload" class="notice">Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>`,
+		`<footer id="upload" class="upload">Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>`,
 		`fetch('status')`,
 		`f.src='/desk/vnc/?resize=remote'`, // the remote browser follows the frame's size
 	} {
@@ -137,7 +137,7 @@ func TestDeskPageAdminLinkAndNoFooter(t *testing.T) {
 		NoteCodes:     nil,
 		Body:          "",
 	})
-	if !strings.Contains(out, `<li class="site-nav__item"><a href="/desk/admin/">Admin</a></li>`) {
+	if !strings.Contains(out, `<li><a class="site-nav__link" href="/desk/admin/">Admin</a></li>`) {
 		t.Errorf("admin page lacks the Admin link in the header")
 	}
 	if strings.Contains(out, "<footer") {
@@ -154,7 +154,7 @@ func TestPageHeartbeatScript(t *testing.T) {
 		`fetch('active',{method:'POST',redirect:'manual'})`,
 		"'pointerdown'", "'pointermove'", "'keydown'", "'wheel'", "'touchstart'",
 		`id="stopped" hidden`,
-		"Your desk was stopped after 15 minutes without activity. Reload to continue.",
+		`<p class="lede">Your desk was stopped after 15 minutes without activity.</p>` + actionLink("/desk/", "Reload to continue"),
 		"setInterval(",
 	} {
 		if !strings.Contains(out, want) {
@@ -221,12 +221,12 @@ func TestPageDeniedBanner(t *testing.T) {
 	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15, Contact: `help <desk> & "co"`})
 	for _, want := range []string{
 		`id="denied" hidden`,
-		"You are signed out, or your access to the desk was removed. Reload this page. If it keeps failing, contact help &lt;desk&gt; &amp; &#34;co&#34;.",
+		`<p class="lede">You are signed out, or your access to the desk was removed.</p><p>If reloading keeps failing, contact help &lt;desk&gt; &amp; &#34;co&#34;.</p>` + actionLink("/desk/", "Reload this page"),
 		`fetch('active',{method:'POST',redirect:'manual'})`,
 		`fetch('status',{redirect:'manual'})`,
 		"r.status===401", "r.status===403", "r.type==='opaqueredirect'",
 		"function showDenied()",
-		"#stopped[hidden], #denied[hidden] { display:none; }",
+		".halt[hidden] { display:none; }",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("page lacks %q", want)
@@ -248,5 +248,115 @@ func TestPageKeepsInputAfterFailedCheckIn(t *testing.T) {
 	tick := out[i:]
 	if n := strings.Count(tick, "if(hadInput)sawInput=true;"); n != 2 {
 		t.Errorf("input is restored in %d places of the check-in, want 2 (non-ok answer and thrown fetch)", n)
+	}
+}
+
+// The script finds the page's parts by these ids and by ul.rows; the look
+// may change around them, they may not.
+func TestDeskPageKeepsTheScriptHooks(t *testing.T) {
+	footer := "f"
+	options := problemOptions(nil)
+	out := deskPage(pageParams{
+		User: "alice", PlatformLabel: "T", Noun: "video", Seconds: 60, IdleMinutes: 15,
+		ProgressHTML: progress(1, 2),
+		Next:         nextAction("video", false),
+		Body:         `<ul class="rows">` + row("video", "1", "done", true, "Video 1", "", options, true) + row("video", "2", "todo", false, "Video 2", "", options, true) + `</ul>`,
+		Footer:       &footer,
+	})
+	for _, want := range []string{
+		`id="prog"`, `id="barfill"`, `id="next"`, `id="worked"`, `id="upload"`,
+		`id="stopped" hidden`, `id="denied" hidden`, `id="screen"`, `id="starting"`,
+		`<ul class="rows">`,
+		`<footer id="upload" class="upload">f</footer>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	// A due upload: the class the script toggles is on the footer from the start.
+	due := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", Footer: &footer, FooterWarn: true})
+	if want := `<footer id="upload" class="upload warn">f</footer>`; !strings.Contains(due, want) {
+		t.Errorf("page with a due upload lacks %q", want)
+	}
+}
+
+// Round 3 changes one string of the script, the text when the time is up.
+// The heartbeat of ADR-0024 is as it was.
+func TestPageScriptChangesOnlyTimesUp(t *testing.T) {
+	for _, want := range []string{
+		`t.textContent='Time’s up. Open the next one.'`,
+		`const INPUT_EVENTS=['pointerdown','pointermove','keydown','wheel','touchstart'];`,
+		`fetch('active',{method:'POST',redirect:'manual'})`,
+	} {
+		if !strings.Contains(PAGE, want) {
+			t.Errorf("PAGE lacks %q", want)
+		}
+	}
+	if strings.Contains(PAGE, "next one'") && strings.Contains(PAGE, "time’s up —") {
+		t.Error("PAGE keeps the old time's-up text")
+	}
+}
+
+// The problem control of a row says which item it is about, since only the
+// open row shows it beside its title.
+func TestRowNamesItsProblemControl(t *testing.T) {
+	opts := problemOptions(nil)
+	if !strings.HasPrefix(opts, `<option value="">Report a problem…</option>`) {
+		t.Errorf("problemOptions = %q", opts)
+	}
+	got := row("video", "1", "todo", false, "Video 4", "", opts, true)
+	if want := `<select class="pick" aria-label="Report a problem with Video 4" onchange="problem(this)">`; !strings.Contains(got, want) {
+		t.Errorf("row lacks %q:\n%s", want, got)
+	}
+}
+
+// Every label that names the item follows the platform's noun.
+func TestDeskPageFollowsTheNoun(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "post", Seconds: 60, Next: nextAction("post", false)})
+	for _, want := range []string{
+		`<h1 class="side__title">Your posts</h1>`,
+		`<a class="site-nav__link is-current" href="/desk/" aria-current="page">Your posts</a>`,
+		`<span class="next__label">Open next post</span>`,
+		`Click <b>Open next post</b>, or a post in the list.`,
+		`If the post won't show or the comments won't load, pick what happened under <b>Report a problem</b>.`,
+		`When every post is done, get more.`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	// The stylesheet's comments are not the page's words: look from <body> on.
+	if _, body, ok := strings.Cut(out, "<body"); !ok || strings.Contains(body, "video") {
+		t.Error("a page for posts still says video")
+	}
+}
+
+// A collector with nothing claimed: no list and no next action, and the
+// queue's end still offers more.
+func TestDeskPageWithNothingClaimed(t *testing.T) {
+	out := deskPage(pageParams{
+		User: "alice", PlatformLabel: "T", Noun: "video", OpenHelp: true,
+		Body: `<div class="queue__end"><div class="queue__more" id="getmore"><button class="cmd cmd--sm cmd--main" onclick="more(5)">Get 5 more videos</button></div></div>`,
+	})
+	for _, gone := range []string{`id="next"`, `<ul class="rows">`, `id="prog"`} {
+		if strings.Contains(out, gone) {
+			t.Errorf("page with nothing claimed has %q", gone)
+		}
+	}
+	for _, want := range []string{`id="getmore"`, `<div class="side__head"><h1 class="side__title">Your videos</h1></div>`, `<div class="count"><span class="count__time"><span id="worked">`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("page with nothing claimed lacks %q", want)
+		}
+	}
+}
+
+// The next action is the arrow disc and its label; with nothing left to
+// open it is disabled.
+func TestNextAction(t *testing.T) {
+	if got, want := nextAction("video", false), `<button id="next" class="next" onclick="openNext()">`+arrow("next__disc")+`<span class="next__label">Open next video</span></button>`; got != want {
+		t.Errorf("nextAction = %q, want %q", got, want)
+	}
+	if got := nextAction("video", true); !strings.HasPrefix(got, `<button id="next" class="next" onclick="openNext()" disabled>`) {
+		t.Errorf("disabled nextAction = %q", got)
 	}
 }
