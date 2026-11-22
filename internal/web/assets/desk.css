@@ -1,0 +1,343 @@
+/* The comment desk, in the datadonation.eu look.
+
+   The look is D3I's design system 2 ("datadonation.eu 2026"): a white page,
+   dark ink, blue as the one working colour, Nunito Sans for everything read,
+   a condensed serif for headings, square corners, hairlines, and lines that
+   start and end at nodes. Its brand book is docs/design-system-2/project/README.md
+   in the d3i-website.github.io repository.
+
+   tokens.css, fonts/ and network/ beside this file are verbatim copies from
+   that system (docs/design-system-2/project/, as of 1eef4e3, 2026-11-21); the
+   two OFL texts come with the fonts, and zeeschuimer-64.png is Zeeschuimer's
+   own mark. Nothing in them is edited here; the page layer (style.go) points
+   tokens.css's font URLs at /desk/assets/fonts/.
+
+   The header and the title band follow ddp-inspector's public/assets/style.css,
+   which draws the system's components in plain markup. The desk's own parts:
+   the collector page, whose sidebar is one of the system's routes (the arrow
+   disc heads a blue line, every item is a node on it, a ring node closes it),
+   and the patterns the system lacked for a tool: the readout (a number that is
+   watched, in the sans with tabular figures), the flow (where every item is,
+   on a line), message text, the note and the integration mark. The approved
+   boards are round 3 of the claude.ai canvas "Comment desk restyle".
+
+   Three rules hold for every part below.
+   1. One class per part, at one level of specificity. A state is a selector
+      on a hook the page script sets (data-state, the current class, disabled,
+      hidden, the timer's and the message's class), never one part undoing
+      another.
+   2. Coral is for attention only: the alert's node, the exclamation disc and
+      the band's own step node. The words beside it are ink set bold.
+   3. The arrow disc is for the one next step and for links that go
+      somewhere. Commands (Upload, Stop, Get more, Choose file) are square
+      hairline buttons.
+   The serif is for headings only (the band's title, the sidebar's title, the
+   section headings) and for the step numbers in their discs. */
+
+*, *::before, *::after { box-sizing:border-box; }
+body { margin:0; background:var(--surface); color:var(--text); font:var(--text-body); -webkit-font-smoothing:antialiased; }
+:root { --edge:var(--gutter); --side:340px; --rail:18px; --indent:52px; }
+:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+
+.desk { width:100vw; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+.page { min-height:100vh; }
+.vh { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.num { font-variant-numeric:tabular-nums; }
+.muted { color:var(--text-muted); }
+/* a link in running text: one without a part's class of its own. It is
+   set in the system's link style (tokens.css's .link), larger and bolder
+   than the text around it. */
+.wrap a:not([class]), .panel a:not([class]) {
+  font:var(--text-link); letter-spacing:0; color:inherit; text-decoration:underline dotted var(--sky);
+  text-decoration-thickness:var(--line-underline); text-underline-offset:var(--line-underline-offset); }
+.wrap a:not([class]):hover, .panel a:not([class]):hover { text-decoration-style:solid; }
+
+/* --- header: 58px on every page, with or without links ------------------- */
+.site-header { position:relative; flex:none; z-index:40; background:var(--surface);
+               border-bottom:1px solid color-mix(in srgb, var(--heading) 6%, transparent); }
+.site-header__inner { display:flex; align-items:center; max-width:var(--site-width); min-height:57px; margin:0 auto;
+                      padding:16px var(--edge) 0; line-height:1; }
+.site-header__inner--wide { max-width:none; }
+.site-header__brand { color:var(--ink); text-decoration:none; }
+.site-header__name { display:block; font:800 16px/1 var(--font-sans); }
+.site-header__subtitle { display:block; margin-top:3px; color:var(--nav-text); font:400 14px/1 var(--font-sans); }
+.site-nav { margin-left:auto; }
+.site-nav__list { display:flex; list-style:none; margin:0 -14px 0 0; padding:0; }
+/* a link, or the summary of a fold */
+.site-nav__link { display:block; position:relative; padding:13px 14px; border:0; background:none; cursor:pointer;
+                  color:var(--nav-text); font:500 15px/1 var(--font-sans); text-decoration:none;
+                  transition:color .2s ease-in-out; }
+.site-nav__link::-webkit-details-marker { display:none; }
+.site-nav__link::before { content:""; position:absolute; left:14px; right:14px; bottom:6px; height:4px;
+                          background:var(--blue); transform:scaleX(0); transition:transform .2s ease-in-out; }
+.site-nav__link:hover, .site-nav__link:focus-visible { color:var(--blue); }
+.site-nav__link:hover::before, .site-nav__link:focus-visible::before { transform:scaleX(1); }
+.site-nav__link.is-current, details[open] > .site-nav__link { color:var(--heading); }
+.site-nav__link.is-current::before, details[open] > .site-nav__link::before { transform:scaleX(1); }
+/* while a fold is open its link takes the bar from the page's own */
+.site-nav__list:has(details[open]) .is-current { color:var(--nav-text); }
+.site-nav__list:has(details[open]) .is-current::before { transform:scaleX(0); }
+
+/* the count: done of shown on its line, and the time worked */
+.count { display:grid; grid-template-columns:auto 96px; align-items:center; gap:2px var(--space-12); margin-left:var(--space-48);
+         font:var(--text-caption); color:var(--nav-text); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.count__done { font:700 14px/1.2 var(--font-sans); color:var(--heading); }
+.count__time { grid-column:1 / 3; line-height:1.2; }
+.count__bar { position:relative; height:var(--line-page); margin-right:6px; background:var(--border); }
+.count__bar::after { content:""; position:absolute; right:-5px; top:-4.75px; width:11px; height:11px;
+                     border:1.4px solid var(--border-strong); border-radius:var(--radius-circle); background:var(--surface); }
+.count__fill { position:relative; z-index:1; display:block; height:100%; background:var(--blue); }
+.count__fill::after { content:""; position:absolute; right:-4.5px; top:-3.75px; width:var(--node); height:var(--node);
+                      border-radius:var(--radius-circle); background:var(--blue); }
+
+/* a fold's panel, under the header at its right edge; the folds share a
+   name, so one is open at a time */
+.panel { position:absolute; top:100%; right:var(--edge); z-index:41; width:380px; padding:var(--space-24);
+         border:1px solid var(--border); border-top:0; background:var(--surface); font:var(--text-small); color:var(--text); }
+.howto { position:relative; list-style:none; margin:0; padding:0; counter-reset:step; }
+.howto::before { content:""; position:absolute; left:13.25px; top:14px; bottom:14px; width:var(--line-page); background:var(--blue); }
+.howto li { position:relative; min-height:28px; padding:4px 0 var(--space-16) 44px; counter-increment:step; }
+.howto li:last-child { padding-bottom:0; }
+.howto li::before { content:counter(step, decimal-leading-zero); position:absolute; left:0; top:0; width:28px; height:28px;
+                    display:grid; place-items:center; border-radius:var(--radius-circle); background:var(--blue);
+                    color:var(--on-sky); font:420 15px/1 var(--font-serif); }
+.howto b { color:var(--heading); font-weight:800; }
+.days { list-style:none; margin:0; padding:0; border-top:1px solid var(--border); font-variant-numeric:tabular-nums; }
+.days li { display:flex; justify-content:space-between; padding:var(--space-8) 0; border-bottom:1px solid var(--border); }
+.days span { color:var(--heading); font-weight:700; }
+
+/* --- the collector page: the sidebar is a route -------------------------- */
+.panes { flex:1; display:flex; min-height:0; }
+.side { flex:none; width:var(--side); display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--border); }
+/* a stopped or signed-out desk: the message fills the browser's pane and the sidebar dims */
+body:has(#stopped:not([hidden])) .side, body:has(#denied:not([hidden])) .side { opacity:.35; }
+.side__head { flex:none; position:relative; padding:18px var(--space-24) var(--space-16); background:var(--sky);
+              border-bottom:var(--line-page) solid var(--blue); }
+/* the line leaves the disc in white, as on the band, and turns blue below the head */
+.side__head:has(.next)::after { content:""; position:absolute; left:calc(var(--space-24) + var(--rail) - .5px); bottom:0;
+                                width:var(--line-band); height:var(--space-16); background:var(--on-sky); }
+.side__title { margin:0 0 14px; font:var(--text-title-sm); letter-spacing:0; color:var(--on-sky); }
+.side__list { flex:1; min-height:0; overflow:auto; padding:0 var(--space-24) var(--space-16); }
+
+/* the next step: the arrow disc heads the line and points at the browser */
+.next { display:flex; align-items:center; gap:var(--space-16); width:100%; margin:0; padding:0; border:0; background:none;
+        cursor:pointer; text-align:left; font:var(--text-link); line-height:1.3; color:var(--heading); }
+.next__disc { flex:none; display:block; width:var(--disc-arrow); height:var(--disc-arrow); }
+.next__label { text-decoration:underline dotted var(--on-sky); text-decoration-thickness:var(--line-underline);
+               text-underline-offset:var(--line-underline-offset-title); }
+.next:disabled { cursor:default; color:var(--text); }
+.next:disabled .next__label { text-decoration:none; }
+.disc circle { fill:var(--blue); }
+.disc path { fill:none; stroke:var(--on-accent); stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+.next__disc circle { fill:var(--on-sky); }
+.next__disc path { stroke:var(--blue); }
+.next:disabled .next__disc path { stroke:var(--border-strong); }
+
+/* the queue: a node per item on the line, a ring node at its end */
+.rows { position:relative; list-style:none; margin:0; padding:6px 0 0; }
+.rows::before { content:""; position:absolute; left:calc(var(--rail) - .75px); top:0; bottom:0; width:var(--line-page); background:var(--blue); }
+.rows li { position:relative; padding:8px 0 8px var(--indent); }
+.row { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 var(--space-8); }
+.row a { flex:1; min-width:0; font:var(--text-row-title); line-height:1.4; color:var(--heading);
+         text-decoration:underline dotted var(--sky); text-decoration-thickness:var(--line-underline);
+         text-underline-offset:var(--line-underline-offset-title); }
+.sub { display:flex; flex-wrap:wrap; align-items:center; gap:0 var(--space-8); margin-top:2px;
+       font:var(--text-caption); color:var(--text-muted); font-variant-numeric:tabular-nums; }
+.mark { position:absolute; left:var(--rail); top:19px; width:var(--node-edge); height:var(--node-edge); transform:translate(-50%, -50%);
+        border:1.5px solid var(--blue); border-radius:var(--radius-circle); background:var(--surface); }
+/* the node's state in words, for assistive technology */
+.mark::after { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.rows li[data-state=todo] .mark::after { content:"To do"; }
+.rows li[data-state=done] .mark::after { content:"Done"; }
+.rows li[data-state=problem] .mark::after { content:"Problem reported"; }
+/* state is the node's fill: a ring to do, blue done, grey set aside with a reported problem */
+.rows li[data-state=done] .mark { background:var(--blue); }
+.rows li[data-state=problem] .mark { border-color:var(--border-strong); background:var(--border-strong); }
+.rows li[data-state=done] .row a, .rows li[data-state=problem] .row a { color:var(--text-muted); }
+/* the item that is open: a larger node, the timer as a readout, the problem control */
+.rows li.current { padding-top:14px; padding-bottom:14px; }
+.rows li.current .mark { top:26px; width:var(--disc-arrow-sm); height:var(--disc-arrow-sm);
+                         background:radial-gradient(circle, var(--blue) 0 5px, var(--surface) 5.6px); }
+.rows li.current .mark::after { content:"Open now"; }
+.rows li.current .row a { font-weight:800; color:var(--heading); }
+/* the timer is a readout while it runs; when the time is up the same element
+   is the alert, on its own line (below). Only the open row's timer has text. */
+.timer:not(.up) { flex:none; font:800 20px/1.2 var(--font-sans); color:var(--heading); font-variant-numeric:tabular-nums; }
+.timer.up { flex-basis:100%; margin-top:2px; }
+.timer:empty { display:none; }
+/* the problem control: under the open row; on any other row it comes up at
+   the right on hover or keyboard focus */
+.pick { margin:0; padding:0 var(--space-8); border:1px solid var(--border-strong); border-radius:0;
+        background:var(--surface); color:var(--heading); font:700 14px/1 var(--font-sans); }
+.rows li.current .pick { width:100%; height:32px; margin-top:var(--space-8); }
+/* off the open row it sits on the title's line, clear of the id under it */
+.rows li:not(.current) .pick { position:absolute; right:0; top:6px; width:auto; max-width:170px; height:26px; }
+.rows li:not(.current):not(:hover):not(:focus-within) .pick { display:none; }
+/* a row's message: the reason of a reported problem, or an error (an alert) */
+.rows li[data-state=problem] .msg { margin-top:2px; font:var(--text-caption); color:var(--text-muted); }
+.msg:empty { display:none; }
+
+/* needs attention: a coral node and ink set bold, never coral text. The
+   alert is one part with three hooks: the class, a row's error message and
+   the timer when the time is up. */
+.alert, .rows li:not([data-state=problem]) .msg.warn, .timer.up { font:var(--text-label); line-height:1.4; color:var(--heading); }
+.alert::before, .rows li:not([data-state=problem]) .msg.warn::before, .timer.up::before {
+  content:""; display:inline-block; width:var(--node); height:var(--node); margin-right:var(--space-8);
+  border-radius:var(--radius-circle); background:var(--coral); }
+
+.queue__end { position:relative; padding:10px 0 0 var(--indent); font:var(--text-small); color:var(--text-muted); }
+.queue__end::before { content:""; position:absolute; left:calc(var(--rail) - .75px); top:0; height:20px; width:var(--line-page); background:var(--blue); }
+.queue__end::after { content:""; position:absolute; left:var(--rail); top:20px; width:var(--node-ring); height:var(--node-ring);
+                     transform:translate(-50%, -50%); border:1.4px solid var(--blue); border-radius:var(--radius-circle); background:var(--surface); }
+.queue__end p { margin:0 0 var(--space-8); }
+.queue__more { display:flex; flex-wrap:wrap; gap:6px; margin-top:var(--space-4); }
+
+/* the upload note at the sidebar's foot, on the note's paper; overdue, it opens with an alert */
+.upload { flex:none; padding:14px var(--space-24) var(--space-16); background:var(--paper); font:var(--text-small); color:var(--text); }
+.upload b { color:var(--heading); font-weight:800; }
+
+/* --- commands: square, a hairline, the label; never the arrow disc ------- */
+.cmd, ::file-selector-button {
+  display:inline-flex; align-items:center; min-height:32px; padding:0 var(--space-12); border:1px solid var(--border-strong);
+  border-radius:0; background:var(--surface); cursor:pointer; color:var(--heading); font:var(--text-label); text-decoration:none; }
+::file-selector-button { margin-right:var(--space-12); }
+.cmd--main { border:1.5px solid var(--blue); }
+.cmd--sm { min-height:28px; padding:0 10px; }
+
+/* --- links that go somewhere: the label, the dotted line, the arrow disc -- */
+.action { display:inline-flex; align-items:center; gap:var(--space-8); padding:6px 0; border:0; background:none; cursor:pointer;
+          color:var(--text); font:var(--text-label); line-height:1.3; text-decoration:none; }
+.action__dots { flex:none; width:28px; height:var(--line-dot-page);
+                background:radial-gradient(circle at 1px 1px, var(--sky) .95px, transparent 1.1px) 0 0 / var(--line-dot-spacing) var(--line-dot-page) repeat-x; }
+.action__disc { flex:none; display:block; width:var(--disc-arrow-sm); height:var(--disc-arrow-sm); }
+
+/* --- a note: a few words on the note's paper ------------------------------
+   No line and no nodes beside it. When it needs attention it holds an alert. */
+.note { width:fit-content; max-width:44rem; margin:0 0 var(--space-16); padding:10px var(--space-16); background:var(--paper);
+        font:var(--text-small); color:var(--heading); }
+
+/* --- a large message: the stopped desk, an error page ---------------------
+   Message text is information, not a heading: large so it is read first, but
+   in the sans, at the weight of prose. The system's exclamation disc heads a
+   message that needs attention; the disc and the words share a baseline. */
+.lede { max-width:40rem; margin:0 0 var(--space-8); font:400 22px/1.45 var(--font-sans); letter-spacing:0; color:var(--heading); }
+.stop { display:flex; align-items:baseline; gap:var(--space-16); max-width:44rem; }
+.bang { flex:none; position:relative; top:-1px; display:grid; place-items:center; width:var(--disc-arrow); height:var(--disc-arrow); border-radius:var(--radius-circle);
+        background:var(--coral); color:var(--on-accent); font:800 20px/1 var(--font-sans); }
+
+/* --- the browser's pane ---------------------------------------------------
+   The streamed browser fills it; until it is ready the pane says so, and a
+   stopped or signed-out desk covers it with its message. */
+.screen-slot { position:relative; flex:1; min-width:0; }
+#screen { position:absolute; inset:0; width:100%; height:100%; border:0; }
+.starting { position:absolute; inset:0; display:grid; place-items:center; font:400 22px/1.45 var(--font-sans); color:var(--text-muted); }
+.halt { position:absolute; inset:0; z-index:5; display:grid; place-items:center; padding:var(--space-48); background:var(--surface); }
+.halt[hidden] { display:none; }
+.halt p { margin:0 0 var(--space-8); }
+
+/* --- reading pages: admin and the message pages --------------------------
+   The title band is ddp-inspector's: the title on a white line between two
+   nodes; the line runs on, drops past the step to the consent badge and ends
+   at the globe. In the middle of the title's line sits the mark of the
+   infrastructure this suite works with (here Zeeschuimer), in a white disc.
+   The badge and the globe are both placed along the deep line, from where it
+   starts, so they keep their order and stay on it at any width. */
+:root { --tb-depth:84px; --tb-drop:44px; --tb-step:44px; --tb-deep:clamp(280px, 34vw, 640px);
+        --tb-run:calc(var(--tb-deep) - 96px);
+        --tb-globe:min(calc(var(--page-edge) + 20px), calc(var(--tb-run) - 160px));
+        --tb-badge:calc((var(--tb-run) + var(--tb-globe)) / 2); }
+.band { position:relative; background:var(--sky); overflow-x:clip; --tb-line:50%; }
+.band__row { display:grid; min-height:var(--tb-depth);
+             grid-template-columns:minmax(var(--edge), 1fr) minmax(0, calc(var(--site-width) - 2 * var(--edge))) minmax(var(--edge), 1fr); }
+.band__lead { grid-column:1; position:relative; margin-right:12px; }
+.band__main { grid-column:2 / 4; display:flex; align-items:center; min-width:0; }
+.band__lead::before, .band__line { content:""; position:absolute; height:var(--line-band); background:var(--on-sky); }
+.band__lead::before { left:0; right:0; top:var(--tb-line); }
+.band__lead::after, .band__thread::before { content:""; position:absolute; top:calc(var(--tb-line) - var(--node) / 2 + .5px);
+                                            width:var(--node); height:var(--node); border-radius:var(--radius-circle); background:var(--on-sky); }
+.band__lead::after { right:calc(var(--node) / -2); }
+.band__title { flex:0 1 auto; min-width:0; margin:0 12px 0 0; padding:var(--space-16) 0;
+               font:var(--text-title-md); letter-spacing:0; color:var(--on-sky); }
+.band__thread { flex:1; align-self:stretch; position:relative; min-width:0; }
+.band__thread::before { left:calc(var(--node) / -2); }
+.band__line--title { left:0; right:calc(var(--tb-deep) - 40px); top:var(--tb-line); }
+.band__drop { position:absolute; right:var(--tb-run); top:var(--tb-line); width:56px; height:calc(100% - var(--tb-line) + 8px);
+              overflow:visible; fill:none; stroke:var(--on-sky); stroke-width:var(--line-band); }
+.band__line--deep { right:0; width:var(--tb-run); top:calc(100% + 8px); }
+.band__piece { position:absolute; display:block; transform:translate(50%, -50%); }
+.band__piece--badge { right:var(--tb-badge); top:calc(100% + 8.5px); }
+.band__piece--globe { right:var(--tb-globe); top:calc(100% + 8.5px); }
+/* the integration mark: the other infrastructure's own logo, unaltered, in a
+   white disc at the middle of the title's line */
+.band__mark { position:absolute; left:calc((100% - var(--tb-deep) + 40px) / 2); top:calc(var(--tb-line) + .5px);
+              transform:translate(-50%, -50%); display:grid; place-items:center; width:48px; height:48px;
+              border-radius:var(--radius-circle); background:var(--on-sky); }
+.band__mark img { display:block; }
+.band__deep { position:absolute; right:0; top:calc(100% - 1px); width:calc(var(--tb-deep) + 1px); height:calc(var(--tb-drop) + 1px); background:var(--sky); }
+.band__deep::after { content:""; position:absolute; left:32%; bottom:-5.5px; width:var(--node-edge); height:var(--node-edge);
+                     border-radius:var(--radius-circle); background:var(--blue); }
+.band__step { position:absolute; right:var(--tb-deep); top:100%; width:var(--tb-step); height:var(--tb-drop); }
+.band__step svg { display:block; width:100%; height:100%; overflow:visible; }
+.band__step-sky { fill:var(--sky); }
+.band__edge { fill:none; stroke:var(--blue); stroke-width:var(--line-page); }
+.band__step::after { content:""; position:absolute; left:calc(50% - 5.5px); top:calc(50% - 5.5px); width:var(--node-edge); height:var(--node-edge);
+                     border-radius:var(--radius-circle); background:var(--coral); }
+@media (max-width:899px) { .band__mark { display:none; } }
+@media (max-width:767px) { .band__thread > *, .band__thread::before, .band__lead::before, .band__lead::after { display:none; } }
+
+/* The niche under the band's shallow side holds the page's first heading.
+   It rises into the niche only where the niche is wide enough for it; on a
+   narrower window it is an ordinary block under the band. */
+.niche { margin:0 0 var(--space-24); }
+@media (min-width:1100px) {
+  .niche { display:flex; align-items:center; height:var(--tb-drop); margin-top:calc(-1 * (var(--tb-drop) + var(--space-24)));
+           max-width:calc(100vw - var(--tb-deep) - var(--tb-step) - var(--space-16) - var(--page-edge)); white-space:nowrap; }
+}
+
+.wrap { max-width:var(--site-width); margin:0 auto; padding:calc(44px + var(--space-24)) var(--edge) var(--space-96); }
+.wrap p { margin:var(--space-8) 0; }
+.wrap .action { margin-top:var(--space-8); }
+.h2 { margin:var(--space-48) 0 var(--space-12); font:var(--text-card-heading); line-height:1.2; letter-spacing:0; color:var(--heading); }
+.niche .h2 { margin:0; }
+
+/* --- a readout: a number that is watched or compared ---------------------
+   New for tools. Nunito Sans at 800 with tabular figures, never the serif;
+   its label follows it in the muted small style. */
+.readout { font:800 20px/1.2 var(--font-sans); color:var(--heading); font-variant-numeric:tabular-nums; }
+
+/* --- a flow: where every item is, left to right ---------------------------
+   New for tools. One line with a node per stage, the stage's number under
+   it as a readout. The nodes are the collector's queue nodes: a ring is
+   waiting, the target is under way, blue is done, grey is set aside. */
+.flow { position:relative; display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:0 var(--space-24);
+        margin:var(--space-8) 0 var(--space-32); padding:0; list-style:none; }
+.flow::before { content:""; position:absolute; left:5px; right:calc(25% - 18px); top:12px; height:var(--line-page); background:var(--blue); }
+.flow__stage { position:relative; padding-top:36px; }
+.flow__node { position:absolute; left:0; top:12.75px; width:var(--node-edge); height:var(--node-edge); transform:translateY(-50%);
+              border:1.5px solid var(--blue); border-radius:var(--radius-circle); background:var(--surface); }
+.flow__node--now { width:var(--disc-arrow-sm); height:var(--disc-arrow-sm);
+                   background:radial-gradient(circle, var(--blue) 0 5px, var(--surface) 5.6px); }
+.flow__node--done { background:var(--blue); }
+.flow__stage .readout { display:block; }
+.flow__label { display:block; margin-top:2px; font:var(--text-small); color:var(--text); }
+.flow__sub { display:block; margin-top:2px; font:var(--text-caption); color:var(--text-muted); font-variant-numeric:tabular-nums; }
+.flow__aside { display:inline-block; width:var(--node); height:var(--node); margin-right:6px; border-radius:var(--radius-circle);
+               background:var(--border-strong); }
+
+/* --- forms, tables and facts on the admin page ---------------------------- */
+.field { display:block; margin:var(--space-24) 0 var(--space-8); font:var(--text-label); line-height:1.3; color:var(--heading); }
+.field small { display:block; margin-top:2px; font:var(--text-small); color:var(--text-muted); }
+.filerow { display:flex; flex-wrap:wrap; align-items:center; gap:var(--space-12); }
+/* the chosen file's name, beside the input's own Choose file command */
+.filerow input { font:var(--text-small); color:var(--text-muted); }
+.table { width:100%; margin:var(--space-12) 0 var(--space-24); border-collapse:collapse; font:var(--text-small); }
+.table th { padding:var(--space-8) var(--space-24) var(--space-8) 0; border-bottom:1px solid var(--border);
+            font:700 13px/1.3 var(--font-sans); color:var(--text-muted); text-align:left; vertical-align:bottom; }
+.table td { padding:10px var(--space-24) 10px 0; border-bottom:1px solid var(--border); text-align:left; vertical-align:middle; }
+.table .end { padding-right:0; text-align:right; }
+.facts { margin:var(--space-12) 0 0; border-top:1px solid var(--border); }
+.facts__row { display:grid; grid-template-columns:20rem minmax(0, 1fr); gap:var(--space-16); padding:10px 0; border-bottom:1px solid var(--border); }
+.facts dt { font:var(--text-label); line-height:1.5; color:var(--text-muted); }
+.facts dd { margin:0; font:var(--text-small); color:var(--text); font-variant-numeric:tabular-nums; }
+
+@media (prefers-reduced-motion:reduce) { *, *::before, *::after { transition:none !important; } }

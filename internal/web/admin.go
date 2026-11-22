@@ -30,30 +30,35 @@ import (
 // maxUploadBytes is the pool upload limit.
 const maxUploadBytes = 5 * 1024 * 1024
 
-// adminCSS is the admin page's stylesheet, kept verbatim from the prototype.
-const adminCSS = "body{font:14px/1.4 system-ui,sans-serif;margin:2em;max-width:70em;color:#1d2329}" +
-	"h2{margin:1.6em 0 .4em;border-bottom:1px solid #e3e6ea}table{border-collapse:collapse}" +
-	"td,th{padding:4px 8px;border-bottom:1px solid #e3e6ea;text-align:left;vertical-align:top}" +
-	".notice{background:#fff8e6;border:1px solid #e8d9a8;padding:8px 12px;border-radius:6px}" +
-	".warn{color:#b35900}form{display:inline}td form button{margin-right:4px}"
-
-// uploadForm is the pool upload form of the admin overview, kept verbatim from the prototype.
+// uploadForm is the pool upload form of the admin overview: the label over
+// the file control and the Upload command.
 const uploadForm = `<form method="post" action="/desk/admin/pool" enctype="multipart/form-data">` +
-	`<label>Add to the pool (CSV with an id column; kind, bucket, note optional): ` +
-	`<input type="file" name="file" accept=".csv,text/csv" required></label> <button>Upload</button></form>`
+	`<label class="field" for="poolfile">Add to the pool<small>A CSV with an id column; kind, bucket and note are optional.</small></label>` +
+	`<div class="filerow"><input id="poolfile" type="file" name="file" accept=".csv,text/csv" required>` +
+	`<button class="cmd cmd--main">Upload</button></div></form>`
 
-// adminShell wraps already-built HTML inner in an admin page; notice is plain text, shown in a box and escaped.
-func adminShell(title, inner, notice string, back bool) string {
-	box := ""
-	if notice != "" {
-		box = `<p class="notice" role="status">` + html.EscapeString(notice) + `</p>`
+// shell wraps already-built HTML inner in an admin page: the header with
+// the platform and user (plain text, escaped) under the desk's name and
+// Admin current, the band with title, then inner.
+func (a *adminHandler) shell(title, user, inner string) string {
+	links := []navLink{
+		{Label: "Your queue", Href: "/desk/"},
+		{Label: "Admin", Href: "/desk/admin/", Current: true},
 	}
-	link := ""
-	if back {
-		link = `<p><a href="/desk/admin/">back to the overview</a></p>`
-	}
-	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>` + html.EscapeString(title) + `</title>` +
-		`<style>` + adminCSS + `</style></head><body><h1>` + html.EscapeString(title) + `</h1>` + box + inner + link + `</body></html>`
+	subtitle := platformLine(a.platform.Label) + " · " + html.EscapeString(user)
+	return pageTop(title, "", subtitle, links, title) + inner + pageBottom
+}
+
+// noteHTML is a note: a few words (plain text, escaped) on the note's
+// paper, announced as a status. It says what was just done.
+func noteHTML(text string) string {
+	return `<p class="note" role="status">` + html.EscapeString(text) + `</p>`
+}
+
+// alertNoteHTML is a note that needs attention: its words (plain text,
+// escaped) open on the alert's node.
+func alertNoteHTML(text string) string {
+	return `<p class="note"><span class="alert">` + html.EscapeString(text) + `</span></p>`
 }
 
 // setAdminHeaders sets the framing and no-store headers every admin answer
@@ -152,7 +157,7 @@ func (a *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // notice taken for this user.
 func (a *adminHandler) serveOverview(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
-	body := a.overviewBody(r.Context(), a.takeNotice(id.User))
+	body := a.overviewBody(r.Context(), id.User, a.takeNotice(id.User))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
@@ -162,22 +167,27 @@ func (a *adminHandler) serveOverview(w http.ResponseWriter, r *http.Request) {
 // cannot be read.
 const logUnknown = "unknown: the desk log cannot be read"
 
-// overviewBody renders the admin page with the given notice (not stored):
+// overviewBody renders the admin page for user with the given notice (not stored):
 // the sections Collection, Students, Problems and Health, in that order.
-// The desk log is read once for the whole page, and the seats once
-// (seatsOf). When the log cannot be read, the page starts with a warning
-// and every figure from the log reads unknown; the error itself stays in
-// the container log, since it can quote part of a line.
-func (a *adminHandler) overviewBody(ctx context.Context, notice string) string {
+// The page's top is the collection's heading in the band's niche, then the
+// notice, then the collection. The desk log is read once for the whole
+// page, and the seats once (seatsOf). When the log cannot be read, a
+// warning says so before the collection and every figure from the log reads
+// unknown; the error itself stays in the container log, since it can quote
+// part of a line.
+func (a *adminHandler) overviewBody(ctx context.Context, user, notice string) string {
 	evs, err := a.readLog()
 	logKnown := err == nil
 	sd := a.seatsOf(ctx)
-	inner := ""
+	inner := a.collectionHead()
+	if notice != "" {
+		inner += noteHTML(notice)
+	}
 	if !logKnown {
-		inner = `<p class="warn">The desk log cannot be read, so the figures that come from it are unknown.</p>`
+		inner += alertNoteHTML("The desk log cannot be read, so the figures that come from it are unknown.")
 	}
 	inner += a.collectionSection(evs, logKnown) + a.studentsSection(ctx, evs, logKnown, sd) + a.problemsSection(evs, logKnown) + a.healthSection(sd)
-	return adminShell("Desk admin", inner, notice, false)
+	return a.shell("Desk admin", user, inner)
 }
 
 // seatData is what one page load knows of the seats: the session status
@@ -251,44 +261,101 @@ func (a *adminHandler) readLog() ([]desklog.Event, error) {
 	return evs, nil
 }
 
-// collectionSection is the Collection section: the queue line (or the
-// unreadable-pool line), the records line and the pool upload form. With
-// the desk log unknown (logKnown false), the queue's split and the collectors
-// read unknown; the queue total still shows.
+// collectionHead is the Collection section's heading, in the niche under
+// the band's shallow side.
+func (a *adminHandler) collectionHead() string {
+	return `<div class="niche"><h2 class="h2">Collection: ` + html.EscapeString(a.platform.Label) + `</h2></div>`
+}
+
+// collectionSection is the Collection section under its heading: the
+// unreadable-pool warning when there is one, the flow, then the pool upload
+// form. With the desk log unknown (logKnown false) or the pool unreadable,
+// the stages that need it read unknown (collectionFlow).
 func (a *adminHandler) collectionSection(evs []desklog.Event, logKnown bool) string {
-	queue := ""
+	unreadable := ""
 	var c collection
 	snap, err := a.poolSnapshot()
 	if err != nil {
-		queue = "pool.csv unreadable: " + html.EscapeString(err.Error())
+		unreadable = alertNoteHTML("pool.csv unreadable: " + err.Error())
 		c = collect(nil, evs, a.deskLog())
 	} else {
 		c = collect(snap.Valid, evs, a.deskLog())
-		problems := strconv.Itoa(c.Problems) + " problems"
-		if c.Problems == 1 {
-			problems = "1 problem"
-		}
-		queue = fmt.Sprintf("Queue %d %ss · unclaimed %d · claimed %d · done %d (%s) · open %d",
-			c.Queue, html.EscapeString(a.kinds.Default()), c.Queue-c.Claimed, c.Claimed, c.Done, problems, c.Claimed-c.Done)
-		if !logKnown {
-			queue = fmt.Sprintf("Queue %d %ss · unclaimed unknown · claimed unknown · done unknown (problems unknown) · open unknown",
-				c.Queue, html.EscapeString(a.kinds.Default()))
-		}
-	}
-	collectors := strconv.Itoa(c.Collectors)
-	if !logKnown {
-		collectors = "unknown"
 	}
 	captured := "unknown"
 	if n, err := a.records.Total(a.cfg.DeskRoot); err != nil {
 		log.Printf("web: admin: captures: %v", err)
 	} else {
-		captured = strconv.FormatInt(n, 10)
+		captured = thousands(n)
 	}
-	return `<h2>Collection: ` + html.EscapeString(a.platform.Label) + `</h2>` +
-		`<p>` + queue + `</p>` +
-		`<p>Records captured ` + captured + ` · collectors who took part ` + collectors + `</p>` +
-		uploadForm
+	return unreadable + collectionFlow(c, html.EscapeString(a.kinds.Default()), err == nil, logKnown, captured) + uploadForm
+}
+
+// collectionFlow is the collection as a flow: where every item of the pool
+// is, left to right, one stage per place with its number under its node.
+// Waiting in the pool (of the pool's size), with a collector now (claimed,
+// not finished), done (by how many collectors, with the problems among them
+// under it), and the records captured (captured, already text). The pool is
+// never exhausted, so nothing is drawn as a share of it.
+//
+// noun is the platform's item, already escaped. The first three numbers
+// need both the pool and the desk log: without either (poolKnown, logKnown)
+// they read unknown. The pool's size needs only the pool, and the
+// collectors only the log.
+func collectionFlow(c collection, noun string, poolKnown, logKnown bool, captured string) string {
+	waiting, now, done := "unknown", "unknown", "unknown"
+	if poolKnown && logKnown {
+		waiting, now, done = thousands(int64(c.Queue-c.Claimed)), thousands(int64(c.Claimed-c.Done)), thousands(int64(c.Done))
+	}
+	of := ""
+	if poolKnown {
+		of = "of " + thousands(int64(c.Queue)) + " " + noun + "s"
+	}
+	doneLabel, problems := "done", ""
+	if logKnown {
+		doneLabel = "done, by " + thousands(int64(c.Collectors)) + " collectors"
+		if c.Collectors == 1 {
+			doneLabel = "done, by 1 collector"
+		}
+		if poolKnown && c.Problems > 0 {
+			problems = `<i class="flow__aside"></i>` + thousands(int64(c.Problems)) + ` of them reported as a problem`
+		}
+	}
+	return `<ol class="flow">` +
+		flowStage("", waiting, "waiting in the pool", of) +
+		flowStage("now", now, "with a collector now", "claimed, not finished") +
+		flowStage("done", done, doneLabel, problems) +
+		flowStage("done", captured, "records captured", "") +
+		`</ol>`
+}
+
+// flowStage is one stage of a flow: its node ("" a ring, waiting; "now" the
+// target, under way; "done" filled), its number as a readout, its label and,
+// when not empty, a line under it. value, label and sub are already HTML.
+func flowStage(node, value, label, sub string) string {
+	cls := "flow__node"
+	if node != "" {
+		cls += " flow__node--" + node
+	}
+	s := `<li class="flow__stage"><i class="` + cls + `"></i><b class="readout">` + value + `</b><span class="flow__label">` + label + `</span>`
+	if sub != "" {
+		s += `<span class="flow__sub">` + sub + `</span>`
+	}
+	return s + `</li>`
+}
+
+// thousands writes n with a comma between each group of three digits:
+// 48112 is 48,112.
+func thousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	if neg {
+		return "-" + s
+	}
+	return s
 }
 
 // poolSnapshot returns the pool as it is now, through Deps.Pool (shared
@@ -309,7 +376,7 @@ func (a *adminHandler) poolSnapshot() (*pool.Snapshot, error) {
 // escaped. With the desk log unknown (logKnown false), one line says so.
 func (a *adminHandler) problemsSection(evs []desklog.Event, logKnown bool) string {
 	if !logKnown {
-		return `<h2>Problems</h2><p>` + logUnknown + `</p>`
+		return `<h2 class="h2">Problems</h2><p>` + logUnknown + `</p>`
 	}
 	var reports []desklog.Event
 	for i := len(evs) - 1; i >= 0; i-- {
@@ -318,18 +385,18 @@ func (a *adminHandler) problemsSection(evs []desklog.Event, logKnown bool) strin
 		}
 	}
 	if len(reports) == 0 {
-		return `<h2>Problems</h2><p>No problems reported.</p>`
+		return `<h2 class="h2">Problems</h2><p>No problems reported.</p>`
 	}
 	sort.SliceStable(reports, func(i, j int) bool { return reports[i].T > reports[j].T })
 	now := a.now()
 	var b strings.Builder
-	b.WriteString(`<h2>Problems</h2><table><tr><th>Item</th><th>Problem</th><th>Note</th><th>Student</th><th>When</th></tr>`)
+	b.WriteString(`<h2 class="h2">Problems</h2><table class="table"><tr><th>Item</th><th>Problem</th><th>Note</th><th>Student</th><th>When</th></tr>`)
 	for _, e := range reports {
 		b.WriteString(`<tr><td>` + a.itemCell(a.deskLog().KeyOf(e)) + `</td>` +
 			`<td>` + html.EscapeString(a.problemLabel(e.Code)) + `</td>` +
 			`<td>` + html.EscapeString(e.Note) + `</td>` +
 			`<td>` + html.EscapeString(e.User) + `</td>` +
-			`<td>` + html.EscapeString(when(time.Unix(e.T, 0), now)) + `</td></tr>`)
+			`<td class="num">` + html.EscapeString(when(time.Unix(e.T, 0), now)) + `</td></tr>`)
 	}
 	b.WriteString(`</table>`)
 	return b.String()
@@ -362,15 +429,38 @@ func (a *adminHandler) problemLabel(code string) string {
 	return code
 }
 
-// healthSection is the Health section: the CO poll line, the seats line,
-// with 4CAT enabled the links to 4CAT's own pages, and the snapshot
-// retention line.
+// healthSection is the Health section, as label and value rows: the CO
+// poll line, the seats line, with 4CAT enabled the links to 4CAT's own
+// pages, and the snapshot retention line.
 func (a *adminHandler) healthSection(sd seatData) string {
-	s := `<h2>Health</h2>` + a.pollLine() + a.seatsLine(sd)
+	s := a.pollLine() + a.seatsLine(sd)
 	if a.cfg.FourcatEnabled {
-		s += `<p>4CAT: <a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></p>`
+		s += `<div class="facts__row"><dt>4CAT</dt><dd><a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></dd></div>`
 	}
-	return s + a.retentionLine()
+	s += a.retentionLine()
+	if s == "" {
+		return `<h2 class="h2">Health</h2>`
+	}
+	return `<h2 class="h2">Health</h2><dl class="facts">` + s + `</dl>`
+}
+
+// fact is one label and value row of a status line (plain text, escaped):
+// the label is the line up to its first ": ", the value the rest. A leading
+// "ALARM: " stays with the value. warn sets the value as an alert.
+func fact(line string, warn bool) string {
+	alarm := ""
+	if rest, ok := strings.CutPrefix(line, "ALARM: "); ok {
+		alarm, line = "ALARM: ", rest
+	}
+	label, value, ok := strings.Cut(line, ": ")
+	if !ok {
+		label, value = "", line
+	}
+	v := html.EscapeString(alarm + value)
+	if warn {
+		v = `<span class="alert">` + v + `</span>`
+	}
+	return `<div class="facts__row"><dt>` + html.EscapeString(label) + `</dt><dd>` + v + `</dd></div>`
 }
 
 // pollLine is the CO poll's status line (ADR-0005), shown as a warning
@@ -380,11 +470,7 @@ func (a *adminHandler) pollLine() string {
 		return ""
 	}
 	line := a.members.StatusLine()
-	class := ""
-	if strings.HasPrefix(line, "ALARM") {
-		class = ` class="warn"`
-	}
-	return `<p` + class + `>` + html.EscapeString(line) + `</p>`
+	return fact(line, strings.HasPrefix(line, "ALARM"))
 }
 
 // retentionLine is the snapshot retention pass's line (ADR-0027), shown as a
@@ -394,11 +480,7 @@ func (a *adminHandler) retentionLine() string {
 		return ""
 	}
 	line, failed := a.retention.StatusLine()
-	class := ""
-	if failed {
-		class = ` class="warn"`
-	}
-	return `<p` + class + `>` + html.EscapeString(line) + `</p>`
+	return fact(line, failed)
 }
 
 // seatsLine is the seats line: the pairs running of the cap (Cfg.MaxRunning,
@@ -425,8 +507,8 @@ func (a *adminHandler) seatsLine(sd seatData) string {
 				live++
 			}
 		}
-		return fmt.Sprintf(`<p>Seats: %d of %d running %s · registered %d of %d</p>`,
-			running, a.cfg.MaxRunning, figures, live, a.cfg.MaxSessions)
+		return fact(fmt.Sprintf(`Seats: %d of %d running %s · registered %d of %d`,
+			running, a.cfg.MaxRunning, figures, live, a.cfg.MaxSessions), false)
 	}
 	registered := "unknown"
 	if sd.seatsErr == nil {
@@ -438,8 +520,8 @@ func (a *adminHandler) seatsLine(sd seatData) string {
 		}
 		registered = strconv.Itoa(live)
 	}
-	return fmt.Sprintf(`<p class="warn">Seats: the running count is unavailable; at most %d may run %s · registered %s of %d</p>`,
-		a.cfg.MaxRunning, figures, registered, a.cfg.MaxSessions)
+	return fact(fmt.Sprintf(`Seats: the running count is unavailable; at most %d may run %s · registered %s of %d`,
+		a.cfg.MaxRunning, figures, registered, a.cfg.MaxSessions), true)
 }
 
 // servePoolUpload is POST /desk/admin/pool : CSRF, size limits, the
@@ -498,7 +580,7 @@ func (a *adminHandler) servePoolUpload(w http.ResponseWriter, r *http.Request) {
 	added, _, err := pool.Add(a.poolPath, rows, a.kinds)
 	a.addMu.Unlock()
 	if err != nil {
-		body := a.overviewBody(r.Context(), "could not add to the pool: "+err.Error())
+		body := a.overviewBody(r.Context(), id.User, "could not add to the pool: "+err.Error())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(body))
@@ -680,7 +762,7 @@ func rejectText(rejects []pool.Reject) string {
 func (a *adminHandler) say(w http.ResponseWriter, status int, text string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(message(text, 0)))
+	_, _ = w.Write([]byte(message("Desk admin", bandName(a.cfg), platformLine(a.platform.Label), text, 0)))
 }
 
 // redirect answers 303 to the overview (a refresh repeats the GET, not the

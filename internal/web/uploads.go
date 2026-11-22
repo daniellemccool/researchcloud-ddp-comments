@@ -165,12 +165,13 @@ func when(t, now time.Time) string {
 
 // uploadFooter is the inner HTML of the student's footer for an upload
 // state. hint is the platform's upload_hint, trusted HTML, inserted as it
-// is; nothing a person typed goes in. Only uploadDue warns.
+// is; nothing a person typed goes in. Only uploadDue warns: its note opens
+// with an alert.
 func uploadFooter(hint string, st UploadState, now time.Time) string {
 	plain := "Before you leave: click <b>Z</b> in the browser's toolbar, " + hint + "."
 	switch st.Kind {
 	case uploadDue:
-		return "What you captured since " + html.EscapeString(when(st.At, now)) + " is not in 4CAT yet. " + plain
+		return `<span class="alert">What you captured since ` + html.EscapeString(when(st.At, now)) + ` is not in 4CAT yet.</span> ` + plain
 	case uploadDone:
 		return "Uploaded to 4CAT at " + html.EscapeString(when(st.At, now)) + "."
 	}

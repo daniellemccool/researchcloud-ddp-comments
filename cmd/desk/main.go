@@ -331,7 +331,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = gated.Shutdown(shutdownCtx)
 		_ = container.Shutdown(shutdownCtx)
 		select {
-		case <-ctlErr:
+		case sockErr := <-ctlErr:
+			// Wait for the operator socket to finish. After ctlCancel it
+			// returns nil; an error that races the shutdown is dropped.
+			_ = sockErr
 		case <-shutdownCtx.Done():
 		}
 		return 0, nil
@@ -350,7 +353,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		serveCancel()
 		ctlCancel()
 		select {
-		case <-ctlErr:
+		case sockErr := <-ctlErr:
+			// Wait for the operator socket to finish. After ctlCancel it
+			// returns nil; an error that races the shutdown is dropped.
+			_ = sockErr
 		case <-time.After(10 * time.Second):
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -369,6 +375,7 @@ func fourcatProxy(cfg *config.Config, study *fourcat.Study, prov *provision.Prov
 	return web.NewFourcatProxy(web.FourcatDeps{
 		FQDN:    cfg.FQDN,
 		Contact: cfg.Contact,
+		Band:    cfg.COName,
 		Study:   study,
 		Token: func(user string) (string, error) {
 			return provision.APIToken(cfg, user)

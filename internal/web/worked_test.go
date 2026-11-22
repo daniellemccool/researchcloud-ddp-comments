@@ -73,18 +73,18 @@ func TestPageShowsTimeWorked(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	b := rec.Body.String()
-	if want := `<span id="worked">Today 0:10 · this week 0:15</span>`; !strings.Contains(b, want) {
+	if want := `<span class="count__time"><span id="worked">Today 0:10 · this week 0:15</span></span>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q", want)
 	}
-	i := strings.Index(b, `<details class="days">`)
+	i := strings.Index(b, `<li><details class="fold" name="fold"><summary class="site-nav__link">Earlier days</summary>`)
 	if i < 0 {
 		t.Fatal("page has no fold of earlier days")
 	}
 	fold := b[i : i+strings.Index(b[i:], "</details>")]
-	if !strings.Contains(fold, "Mon 16 Nov 0:05") {
+	if !strings.Contains(fold, `<div class="panel"><ul class="days"><li>Monday 16 November<span>0:05</span></li></ul></div>`) {
 		t.Errorf("fold %q lacks the line for Monday", fold)
 	}
-	if strings.Contains(fold, "17 Nov") {
+	if strings.Contains(fold, "17 November") {
 		t.Errorf("fold %q lists today; it holds earlier days only", fold)
 	}
 
@@ -94,7 +94,7 @@ func TestPageShowsTimeWorked(t *testing.T) {
 	if want := `<span id="worked">Today 0:05 · this week 0:05</span>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q", want)
 	}
-	if strings.Contains(b, `<details class="days">`) {
+	if strings.Contains(b, "Earlier days") {
 		t.Error("page shows the fold although no earlier day has time")
 	}
 }
@@ -137,5 +137,20 @@ func TestPageCheckInUpdatesTimeLine(t *testing.T) {
 	}
 	if !strings.Contains(out, "getElementById('worked')") || !strings.Contains(out, "textContent=j.worked") {
 		t.Error("showFigures does not put the answer's line into the worked element")
+	}
+}
+
+// Earlier days shows each day in full with its time at the right, newest
+// first, and never today.
+func TestEarlierDaysFold(t *testing.T) {
+	now := time.Date(2026, 11, 21, 14, 0, 0, 0, deskZone)
+	w := desklog.Worked{Days: []desklog.DayMinutes{{Day: "2026-11-21", Minutes: 42}, {Day: "2026-11-20", Minutes: 53}, {Day: "2026-11-17", Minutes: 72}}}
+	want := `<li><details class="fold" name="fold"><summary class="site-nav__link">Earlier days</summary>` +
+		`<div class="panel"><ul class="days"><li>Friday 20 November<span>0:53</span></li><li>Tuesday 17 November<span>1:12</span></li></ul></div></details></li>`
+	if got := earlierDaysHTML(w, now); got != want {
+		t.Errorf("earlierDaysHTML = %q, want %q", got, want)
+	}
+	if got := earlierDaysHTML(desklog.Worked{Days: []desklog.DayMinutes{{Day: "2026-11-21", Minutes: 42}}}, now); got != "" {
+		t.Errorf("with today only, earlierDaysHTML = %q, want none", got)
 	}
 }

@@ -385,6 +385,7 @@ func (h *handler) serveFourcat(w http.ResponseWriter, r *http.Request) {
 func (h *handler) forbidden(w http.ResponseWriter) {
 	h.pages.render(w, http.StatusForbidden, "403", pageData{
 		Title:   "Not registered",
+		Band:    bandName(h.cfg),
 		Contact: h.cfg.Contact,
 	})
 }

@@ -14,17 +14,19 @@
   [class*="DivPlayerContainer"],
   [class*="DivVideoWrapper"],
   [class*="xgplayer"] {
-    background: #d9dde2 !important;
+    background: #f3f9fd !important;
     position: relative;
   }
   [class*="DivBasicPlayerWrapper"]::after,
   [class*="DivVideoWrapper"]::after {
     content: "Video hidden on purpose by the comment collection app\A\AIf the comments load, all is well.";
-    white-space: pre-line; text-align: center; padding: 16px;
+    white-space: pre-line; text-align: center; padding: 96px 24px 24px;
     position: absolute; inset: 0; z-index: 5; pointer-events: none;
     display: flex; align-items: center; justify-content: center;
-    font: 600 18px/1.4 system-ui, sans-serif; color: #555;
-    background: #d9dde2;
+    font: 700 18px/1.4 "Nunito Sans", system-ui, sans-serif; color: #252a34;
+    /* the D3I look (datadonation.eu design system 2): paper ground, heading ink,
+       the video piece of its network drawing in a white disc ringed in blue */
+    background: #f3f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-20 -20 40 40'%3E%3Ccircle r='18.5' fill='%23fff' stroke='%234272ef' stroke-width='1.5'/%3E%3Cg fill='none' stroke='%234272ef' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='-8.5' y='-6' width='17' height='12' rx='2.6'/%3E%3Cpath d='M-2.2 -3 L3.4 0 L-2.2 3 Z' fill='%234272ef' stroke-width='1.2'/%3E%3C/g%3E%3C/svg%3E") no-repeat center calc(50% - 56px) / 56px 56px;
   }
 
   img, picture, canvas, svg image, [style*="background-image"] {

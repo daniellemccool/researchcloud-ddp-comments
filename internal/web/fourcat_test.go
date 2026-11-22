@@ -35,6 +35,7 @@ func newTestServerWith(t *testing.T, fill func(*Deps)) *http.Server {
 		AdminRole:     adminRole,
 		Contact:       testContact,
 		Platform:      "test",
+		COName:        testProject,
 	}
 	d := Deps{
 		Cfg:      cfg,
@@ -178,6 +179,7 @@ func newFourcatRig(t *testing.T) *fourcatRig {
 	rig.fp = NewFourcatProxy(FourcatDeps{
 		FQDN:    "desk.example.org",
 		Contact: testContact,
+		Band:    testProject,
 		Study:   rig.study,
 		Token: func(user string) (string, error) {
 			rig.mu.Lock()
@@ -667,5 +669,30 @@ func TestTechAdminReachesAdminAndDesk(t *testing.T) {
 	defer mu.Unlock()
 	if after := reached["admin"] + reached["relay"] + reached["fourcat"]; after != before {
 		t.Errorf("a member with no standing reached a handler: %v", reached)
+	}
+}
+
+// The proxy's three refusal pages sit under the band named for the project
+// (FourcatDeps.Band); the one for a link from elsewhere leads to the start
+// page with an action link.
+func TestFourcatPagesCarryTheProjectName(t *testing.T) {
+	band := `<h1 class="band__title">` + testProject + `</h1>`
+
+	rig := newFourcatRig(t)
+	rig.setToken("alice", tokenFor("alice"))
+	elsewhere := doReq(t, rig.srv, http.MethodGet, "alice", adminRole, "/fourcat/results/", nil, map[string]string{"Sec-Fetch-Site": "cross-site"}).Body.String()
+	for _, want := range []string{band, `<a class="action" href="/">Open the start page`, "<title>Open 4CAT from the desk</title>"} {
+		if !strings.Contains(elsewhere, want) {
+			t.Errorf("elsewhere page lacks %q", want)
+		}
+	}
+
+	if b := doReq(t, rig.srv, http.MethodGet, "dmccool2", collectorRole, "/fourcat/", nil, fromOwnPages).Body.String(); !strings.Contains(b, band) {
+		t.Errorf("the proxy's 403 page lacks %q", band)
+	}
+
+	rig.study.ready.Store(false)
+	if b := doReq(t, rig.srv, http.MethodGet, "alice", adminRole, "/fourcat/", nil, fromOwnPages).Body.String(); !strings.Contains(b, band) {
+		t.Errorf("the proxy's not-ready page lacks %q", band)
 	}
 }

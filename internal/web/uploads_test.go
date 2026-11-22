@@ -277,7 +277,7 @@ func TestUploadFooterStates(t *testing.T) {
 		st   UploadState
 		want string
 	}{
-		{"due", UploadState{Kind: uploadDue, At: at}, "What you captured since 14:02 is not in 4CAT yet. " + plain},
+		{"due", UploadState{Kind: uploadDue, At: at}, `<span class="alert">What you captured since 14:02 is not in 4CAT yet.</span> ` + plain},
 		{"done", UploadState{Kind: uploadDone, At: at}, "Uploaded to 4CAT at 14:02."},
 		{"nothing captured", UploadState{Kind: uploadNone}, plain},
 		{"unknown", UploadState{Kind: uploadUnknown}, plain},
@@ -318,7 +318,7 @@ func footerEnv(t *testing.T, reader *fakeUploads) *collectorEnv {
 
 const (
 	plainFooter = "Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT."
-	dueFooter   = "What you captured since 09:40 is not in 4CAT yet. " + plainFooter
+	dueFooter   = `<span class="alert">What you captured since 09:40 is not in 4CAT yet.</span> ` + plainFooter
 	doneFooter  = "Uploaded to 4CAT at 09:45."
 )
 
@@ -334,13 +334,13 @@ func uploadedAfter() fourcat.Uploads {
 func TestPageFooterWarnsWhenDue(t *testing.T) {
 	e := footerEnv(t, &fakeUploads{ups: fourcat.Uploads{}})
 	b := e.get(t, "alice", collectorRole, "/desk/").Body.String()
-	if want := `<footer id="upload" class="warn">` + dueFooter + `</footer>`; !strings.Contains(b, want) {
+	if want := `<footer id="upload" class="upload warn">` + dueFooter + `</footer>`; !strings.Contains(b, want) {
 		t.Errorf("captures newer than the uploads: page lacks %q", want)
 	}
 
 	e = footerEnv(t, &fakeUploads{ups: uploadedAfter()})
 	b = e.get(t, "alice", collectorRole, "/desk/").Body.String()
-	if want := `<footer id="upload">` + doneFooter + `</footer>`; !strings.Contains(b, want) {
+	if want := `<footer id="upload" class="upload">` + doneFooter + `</footer>`; !strings.Contains(b, want) {
 		t.Errorf("uploads newer than the capture: page lacks %q", want)
 	}
 
@@ -407,20 +407,21 @@ func TestCheckInSurvivesUploadFailure(t *testing.T) {
 		t.Errorf("4CAT was asked %d times by two check-ins within a minute, want 1", reader.reads)
 	}
 	b := e.get(t, "alice", collectorRole, "/desk/").Body.String()
-	if want := `<footer id="upload">` + plainFooter + `</footer>`; !strings.Contains(b, want) {
+	if want := `<footer id="upload" class="upload">` + plainFooter + `</footer>`; !strings.Contains(b, want) {
 		t.Errorf("page with 4CAT down lacks %q", want)
 	}
 }
 
 // The check-in puts the answer's footer into the page and switches its
-// warning on and off.
+// warning on and off. The warning shows as the alert the due footer opens
+// with (uploadFooter), which the stylesheet draws; the class is the script's.
 func TestPageCheckInUpdatesFooter(t *testing.T) {
 	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", IdleMinutes: 15})
 	for _, want := range []string{
 		"getElementById('upload')",
 		"innerHTML=j.footer",
 		"classList.toggle('warn',j.footer_warn===true)",
-		"footer.warn{",
+		".alert::before",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("page lacks %q", want)

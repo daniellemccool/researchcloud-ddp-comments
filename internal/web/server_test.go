@@ -40,6 +40,7 @@ func newTestServer(t *testing.T) (*http.Server, string) {
 		AdminRole:     adminRole,
 		Contact:       testContact,
 		Platform:      "tiktok",
+		COName:        testProject,
 	}
 	logPath := filepath.Join(root, "state", "access.ndjson")
 	ac := access.Config{CollectorRole: collectorRole, AdminRole: adminRole, TechAdminRole: techAdminRole, GateSecret: testGate}

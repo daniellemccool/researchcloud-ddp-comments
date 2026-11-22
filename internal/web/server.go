@@ -165,6 +165,7 @@ func New(d Deps) *http.Server {
 	mux.HandleFunc("POST /desk/open", sameOrigin(h.serveOpen))       // open one claimed item
 	mux.HandleFunc("POST /desk/problem", sameOrigin(h.serveProblem)) // mark a problem on a claimed item
 	mux.HandleFunc("POST /desk/active", sameOrigin(h.serveActive))   // page heartbeat: input seen, is the pair running
+	mux.HandleFunc("GET /desk/assets/{path...}", serveAsset)         // the D3I look's faces and band pieces (style.go)
 	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)              // nil Admin handler → 404
 	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin)            // nil Admin handler → 404
 	mux.HandleFunc("POST /desk/admin/stop", h.serveAdmin)            // stop a hung pair; nil Admin handler → 404
@@ -252,8 +253,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// A member with none of the three standings gets the 403 page. Every
 	// standing is a collector (an admin is one, and a Tech Admin is an admin;
-	// access.FromRequest, ADR-0004), so the gate has no case per path.
+	// access.FromRequest, ADR-0004), so the gate has no case per standing.
+	// Its one case per path: such a member still gets the look's files
+	// under /desk/assets/, so the 403 page shows whole. They are public
+	// design material from the binary (style.go).
 	if !id.Collector {
+		if p, ok := assetRequest(r); ok {
+			writeAsset(w, r, p)
+			return
+		}
 		h.forbidden(w)
 		return
 	}
