@@ -109,19 +109,23 @@ func claimsAndRevokes(evs []desklog.Event) (claimed map[string]bool, revokedAt m
 // studentsSection is the Students section: the table of live seats and the
 // two member lists; logKnown is false when the desk log cannot be read.
 func (a *adminHandler) studentsSection(ctx context.Context, evs []desklog.Event, logKnown bool, sd seatData) string {
-	return `<h2>Students</h2>` + a.studentsTable(ctx, evs, logKnown, sd) + a.memberLists(evs, logKnown, sd)
+	return `<h2 class="h2">Students</h2>` + a.studentsTable(ctx, evs, logKnown, sd) + a.memberLists(evs, logKnown, sd)
 }
 
-// student is one row of the Students table: a live seat, its session cell
-// and whether its pair runs (it then has a Stop button).
+// student is one row of the Students table: a live seat, its session cell,
+// whether its pair runs (it then has a Stop command) and whether the seat is
+// broken (alert: its provisioning step holds an error), which sets the
+// session as an alert.
 type student struct {
 	user, session string
 	running       bool
+	alert         bool
 }
 
 // studentsTable is one row per live seat, in registry order: the name
 // (linked to the person's 4CAT datasets when 4CAT is enabled), this week,
-// total, the upload state (only with 4CAT) and the session. When the
+// total, the upload state (only with 4CAT), the session, and Stop in a
+// column of its own. A late upload and a broken seat carry the alert. When the
 // session status failed, the live seats come from the registry and the
 // session reads "unknown"; when the registry failed too, one line says the
 // students cannot be listed. When the desk log cannot be read (logKnown
@@ -136,7 +140,7 @@ func (a *adminHandler) studentsTable(ctx context.Context, evs []desklog.Event, l
 	case sd.statusErr == nil:
 		for _, r := range sd.rows {
 			if r.Live {
-				list = append(list, student{user: r.User, session: a.sessionCell(r, now), running: r.Running})
+				list = append(list, student{user: r.User, session: a.sessionCell(r, now), running: r.Running, alert: r.State.Error() != ""})
 			}
 		}
 	case sd.seatsErr == nil:
@@ -146,48 +150,57 @@ func (a *adminHandler) studentsTable(ctx context.Context, evs []desklog.Event, l
 			}
 		}
 	default:
-		return `<p class="warn">The students cannot be listed: the seat registry is unreadable.</p>`
+		return alertNoteHTML("The students cannot be listed: the seat registry is unreadable.")
 	}
 	if len(list) == 0 {
 		return `<p>No one has a seat yet.</p>`
 	}
 	slots := desklog.SlotsByUser(evs)
 	var b strings.Builder
-	b.WriteString(`<table><tr><th>Name</th><th>This week</th><th>Total</th>`)
+	b.WriteString(`<table class="table"><tr><th>Name</th><th>This week</th><th>Total</th>`)
 	if a.cfg.FourcatEnabled {
 		b.WriteString(`<th>Uploaded</th>`)
 	}
-	b.WriteString(`<th>Session</th></tr>`)
+	b.WriteString(`<th>Session</th><th class="end"><span class="vh">Stop the session</span></th></tr>`)
 	for _, s := range list {
 		week, total := "unknown", "unknown"
 		if logKnown {
 			w := desklog.WorkedOf(slots[s.user], now, deskZone)
 			week, total = hm(w.Week), hm(w.Total)
 		}
-		b.WriteString(`<tr><td>` + a.nameCell(s.user) + `</td><td>` + week + `</td><td>` + total + `</td>`)
+		b.WriteString(`<tr><td>` + a.nameCell(s.user) + `</td><td class="num">` + week + `</td><td class="num">` + total + `</td>`)
 		if a.cfg.FourcatEnabled {
 			st := a.uploads.Of(ctx, s.user)
 			cell := html.EscapeString(uploadCell(st, now))
-			if st.Kind == uploadDue {
-				cell = `<span class="late">` + cell + `</span>` // captures not in 4CAT yet: the coral node
+			switch st.Kind {
+			case uploadDue: // captures not in 4CAT yet
+				b.WriteString(`<td><span class="alert">` + cell + `</span></td>`)
+			case uploadNone:
+				b.WriteString(`<td class="muted">` + cell + `</td>`)
+			default:
+				b.WriteString(`<td>` + cell + `</td>`)
 			}
-			b.WriteString(`<td>` + cell + `</td>`)
 		}
-		b.WriteString(`<td>` + html.EscapeString(s.session) + stopButton(s) + `</td></tr>`)
+		sess := html.EscapeString(s.session)
+		if s.alert {
+			sess = `<span class="alert">` + sess + `</span>`
+		}
+		b.WriteString(`<td>` + sess + `</td><td class="end">` + stopButton(s) + `</td></tr>`)
 	}
 	b.WriteString(`</table>`)
 	return b.String()
 }
 
 // stopButton is the Stop form of a row whose pair runs (Row.Running, also
-// while its provisioning is not ready), after the session text; "" for any
-// other row, and for every row while the session status is unknown.
+// while its provisioning is not ready), in the row's last cell; "" for any
+// other row, and for every row while the session status is unknown. Stop is
+// a command, a square button.
 func stopButton(s student) string {
 	if !s.running {
 		return ""
 	}
-	return ` <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="` +
-		html.EscapeString(s.user) + `"><button>Stop` + goMark + `</button></form>`
+	return `<form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="` +
+		html.EscapeString(s.user) + `"><button class="cmd cmd--sm">Stop</button></form>`
 }
 
 // nameCell is the person's name, linked to /results/?user=<name> when 4CAT
@@ -274,6 +287,6 @@ func (a *adminHandler) memberLists(evs []desklog.Event, logKnown bool, sd seatDa
 			lost = strings.Join(names, ", ")
 		}
 	}
-	return `<dl class="facts"><div><dt>Hold the collector role, never claimed</dt><dd>` + never + `</dd></div>` +
-		`<div><dt>Worked here, no longer have access</dt><dd>` + lost + `</dd></div></dl>`
+	return `<dl class="facts"><div class="facts__row"><dt>Hold the collector role, never claimed</dt><dd>` + never + `</dd></div>` +
+		`<div class="facts__row"><dt>Worked here, no longer have access</dt><dd>` + lost + `</dd></div></dl>`
 }

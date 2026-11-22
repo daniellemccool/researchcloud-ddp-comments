@@ -308,6 +308,18 @@ func TestStylesheetKnowsTheScriptHooks(t *testing.T) {
 	}
 }
 
+// A link in running text (a name, an item, 4CAT's pages) is set in the
+// system's link style, larger and bolder than the text around it, with the
+// dotted underline; a link that is a part of its own (an action, a header
+// link) is left to that part.
+func TestRunningTextLinksTakeTheLinkStyle(t *testing.T) {
+	want := `.wrap a:not([class]), .panel a:not([class]) {
+  font:var(--text-link); letter-spacing:0; color:inherit; text-decoration:underline dotted var(--sky);`
+	if !strings.Contains(pageCSS, want) {
+		t.Errorf("the stylesheet lacks the running-text link rule:\n%s", want)
+	}
+}
+
 // The arrow disc and the link that ends in it: the label and the address
 // are escaped.
 func TestActionLinkEscapes(t *testing.T) {

@@ -1,11 +1,16 @@
 package web
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/desklog"
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/pool"
 )
 
@@ -97,5 +102,130 @@ func TestRecordCounterCountsAndRemembers(t *testing.T) {
 	}
 	if c.filesRead != 3 {
 		t.Errorf("files read = %d, want 3: only the file that grew", c.filesRead)
+	}
+}
+
+// wantStage is one stage of the collection's flow as the page must write
+// it, spelled out here so the tests do not lean on the code under test:
+// the node ("" a ring, "now" the target, "done" filled), the number, its
+// label and, when not empty, the line under it (already HTML).
+func wantStage(node, value, label, sub string) string {
+	cls := "flow__node"
+	if node != "" {
+		cls += " flow__node--" + node
+	}
+	s := `<li class="flow__stage"><i class="` + cls + `"></i><b class="readout">` + value + `</b><span class="flow__label">` + label + `</span>`
+	if sub != "" {
+		s += `<span class="flow__sub">` + sub + `</span>`
+	}
+	return s + `</li>`
+}
+
+// wantFlow is the flow of the given stages.
+func wantFlow(stages ...string) string {
+	return `<ol class="flow">` + strings.Join(stages, "") + `</ol>`
+}
+
+// The collection as a flow, on a platform whose item is a post: of a pool
+// of 12, 5 are claimed by 3 people, 4 of those are done and 2 of the done
+// were reported as a problem. Every label that names the item follows the
+// noun, and the stages come in the order an item moves through them.
+func TestCollectionFlow(t *testing.T) {
+	srv, root := newAdminServerWith(t, func(d *Deps) {
+		d.Platform.DefaultKind = "post"
+		d.Platform.ItemKinds = map[string]platform.ItemKind{"post": {URL: "https://example.org/p/{id}", ID: regexp.MustCompile(`^[0-9]{1,20}$`)}}
+		d.Log.DefaultKind = "post"
+	})
+	csv := "id,kind,bucket,note\n"
+	for i := 1; i <= 12; i++ {
+		csv += strconv.Itoa(i) + ",post,,\n"
+	}
+	if err := os.WriteFile(filepath.Join(root, "pool.csv"), []byte(csv), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appendLog(t, root,
+		desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "post", ID: "1", Batch: 1},
+		desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "post", ID: "2", Batch: 1},
+		desklog.Event{T: 1, User: "bob", Action: "claim", Kind: "post", ID: "3", Batch: 1},
+		desklog.Event{T: 1, User: "bob", Action: "claim", Kind: "post", ID: "4", Batch: 1},
+		desklog.Event{T: 1, User: "carol", Action: "claim", Kind: "post", ID: "5", Batch: 1},
+		desklog.Event{T: 2, User: "alice", Action: "open", Kind: "post", ID: "1", ExecRC: rc(0)},
+		desklog.Event{T: 2, User: "alice", Action: "problem", Kind: "post", ID: "2", Code: "NOT_FOUND"},
+		desklog.Event{T: 2, User: "bob", Action: "open", Kind: "post", ID: "3", ExecRC: rc(0)},
+		desklog.Event{T: 2, User: "bob", Action: "problem", Kind: "post", ID: "4", Code: "OTHER", Note: "x"},
+	)
+	rec := getAdmin(t, srv, "root", adminRole, "/desk/admin/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	b := rec.Body.String()
+	inOrder(t, b,
+		`<ol class="flow">`,
+		`>7</b><span class="flow__label">waiting in the pool</span><span class="flow__sub">of 12 posts</span>`,
+		`>1</b><span class="flow__label">with a collector now</span><span class="flow__sub">claimed, not finished</span>`,
+		`>4</b><span class="flow__label">done, by 3 collectors</span><span class="flow__sub"><i class="flow__aside"></i>2 of them reported as a problem</span>`,
+		`<span class="flow__label">records captured</span>`,
+		`</ol>`,
+	)
+	if strings.Contains(b, "video") {
+		t.Error("the admin page of a platform of posts says video")
+	}
+}
+
+// One collector and no problems: "by 1 collector", and no problems line
+// under it; one problem is "1 of them".
+func TestCollectionFlowSingulars(t *testing.T) {
+	one := collectionFlow(collection{Queue: 2400000, Claimed: 6447, Done: 6412, Problems: 0, Collectors: 1}, "video", true, true, "912,406")
+	want := wantFlow(
+		wantStage("", "2,393,553", "waiting in the pool", "of 2,400,000 videos"),
+		wantStage("now", "35", "with a collector now", "claimed, not finished"),
+		wantStage("done", "6,412", "done, by 1 collector", ""),
+		wantStage("done", "912,406", "records captured", ""))
+	if one != want {
+		t.Errorf("flow = %q\nwant   %q", one, want)
+	}
+	if strings.Contains(one, "flow__aside") {
+		t.Error("a collection without problems has a problems line")
+	}
+	p1 := collectionFlow(collection{Queue: 3, Claimed: 2, Done: 2, Problems: 1, Collectors: 2}, "video", true, true, "0")
+	if want := wantStage("done", "2", "done, by 2 collectors", `<i class="flow__aside"></i>1 of them reported as a problem`); !strings.Contains(p1, want) {
+		t.Errorf("flow with one problem lacks %q:\n%s", want, p1)
+	}
+}
+
+// An unreadable desk log: the stages that come from it read unknown, the
+// third label is "done" alone, and the pool's size and the records still
+// show. An unreadable pool leaves its size out too.
+func TestCollectionFlowUnknownLog(t *testing.T) {
+	got := collectionFlow(collection{Queue: 12}, "post", true, false, "40")
+	want := wantFlow(
+		wantStage("", "unknown", "waiting in the pool", "of 12 posts"),
+		wantStage("now", "unknown", "with a collector now", "claimed, not finished"),
+		wantStage("done", "unknown", "done", ""),
+		wantStage("done", "40", "records captured", ""))
+	if got != want {
+		t.Errorf("flow with an unknown log = %q\nwant %q", got, want)
+	}
+	noPool := collectionFlow(collection{Collectors: 2}, "post", false, true, "unknown")
+	want = wantFlow(
+		wantStage("", "unknown", "waiting in the pool", ""),
+		wantStage("now", "unknown", "with a collector now", "claimed, not finished"),
+		wantStage("done", "unknown", "done, by 2 collectors", ""),
+		wantStage("done", "unknown", "records captured", ""))
+	if noPool != want {
+		t.Errorf("flow with an unreadable pool = %q\nwant %q", noPool, want)
+	}
+}
+
+// flowStage writes a stage as wantStage spells it.
+func TestFlowStage(t *testing.T) {
+	for _, c := range [][4]string{
+		{"", "7", "waiting in the pool", "of 12 posts"},
+		{"now", "1", "with a collector now", "claimed, not finished"},
+		{"done", "4", "records captured", ""},
+	} {
+		if got, want := flowStage(c[0], c[1], c[2], c[3]), wantStage(c[0], c[1], c[2], c[3]); got != want {
+			t.Errorf("flowStage(%q) = %q, want %q", c, got, want)
+		}
 	}
 }

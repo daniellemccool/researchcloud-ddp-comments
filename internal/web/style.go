@@ -104,11 +104,6 @@ func actionLink(href, label string) string {
 		`<i class="action__dots"></i>` + arrow("action__disc") + `</a>`
 }
 
-// goMark is round 2's ending of an action; the admin's Upload and Stop are
-// its last uses.
-const goMark = `<i class="more__dots"></i><svg class="go" width="24" height="24" viewBox="-18 -18 36 36" aria-hidden="true">` +
-	`<circle r="18"/><path d="M-8 0 h16 M1.5 -6.5 l6.5 6.5 l-6.5 6.5"/></svg>`
-
 // stepSVG is the S-curve of a band's lower edge: sky above it, the blue
 // line along it.
 const stepSVG = `<svg viewBox="0 0 100 100" preserveAspectRatio="none">` +

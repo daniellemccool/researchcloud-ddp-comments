@@ -44,9 +44,11 @@ body { margin:0; background:var(--surface); color:var(--text); font:var(--text-b
 .vh { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
 .num { font-variant-numeric:tabular-nums; }
 .muted { color:var(--text-muted); }
-/* a link in running text: one without a part's class of its own */
+/* a link in running text: one without a part's class of its own. It is
+   set in the system's link style (tokens.css's .link), larger and bolder
+   than the text around it. */
 .wrap a:not([class]), .panel a:not([class]) {
-  color:inherit; font-weight:700; text-decoration:underline dotted var(--sky);
+  font:var(--text-link); letter-spacing:0; color:inherit; text-decoration:underline dotted var(--sky);
   text-decoration-thickness:var(--line-underline); text-underline-offset:var(--line-underline-offset); }
 .wrap a:not([class]):hover, .panel a:not([class]):hover { text-decoration-style:solid; }
 

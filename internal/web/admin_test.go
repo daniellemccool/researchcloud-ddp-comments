@@ -306,12 +306,12 @@ func TestAdminUploadNotices(t *testing.T) {
 		t.Errorf("Location = %q, want /desk/admin/", loc)
 	}
 	rec = getAdmin(t, srv, "root", adminRole, "/desk/admin/")
-	want := `<p class="notice" role="status">nothing added: line 1: header has no id column</p>`
+	want := `<p class="note" role="status">nothing added: line 1: header has no id column</p>`
 	if b := rec.Body.String(); !strings.Contains(b, want) {
 		t.Errorf("GET after bad header: body lacks %q:\n%s", want, b)
 	}
 	rec = getAdmin(t, srv, "root", adminRole, "/desk/admin/")
-	if b := rec.Body.String(); strings.Contains(b, `class="notice"`) {
+	if b := rec.Body.String(); strings.Contains(b, `class="note"`) {
 		t.Errorf("second GET still shows a notice: %q", b)
 	}
 
@@ -399,26 +399,28 @@ func adminCollectionSection(t *testing.T, fill func(*Deps)) {
 	}
 	b := rec.Body.String()
 	for _, want := range []string{
-		`<h2>Collection: TestTube</h2>`,
-		`<ul class="figures"><li><b>3</b><span>videos in the queue</span></li><li><b>1</b><span>unclaimed</span></li>` +
-			`<li><b>2</b><span>claimed</span></li><li><b>1</b><span>done, 1 problem</span></li><li><b>1</b><span>open</span></li>` +
-			`<li><b>4</b><span>records captured</span></li><li><b>2</b><span>collectors took part</span></li></ul>`,
+		`<h2 class="h2">Collection: TestTube</h2>`,
+		`<div class="niche"><h2 class="h2">Collection: TestTube</h2></div>` + wantFlow(
+			wantStage("", "1", "waiting in the pool", "of 3 videos"),
+			wantStage("now", "1", "with a collector now", "claimed, not finished"),
+			wantStage("done", "1", "done, by 2 collectors", `<i class="flow__aside"></i>1 of them reported as a problem`),
+			wantStage("done", "4", "records captured", "")),
 		`<form method="post" action="/desk/admin/pool" enctype="multipart/form-data">` +
 			`<label class="field" for="poolfile">Add to the pool<small>A CSV with an id column; kind, bucket and note are optional.</small></label>` +
 			`<div class="filerow"><input id="poolfile" type="file" name="file" accept=".csv,text/csv" required>` +
-			`<button>Upload` + goMark + `</button></div></form>`,
+			`<button class="cmd cmd--main">Upload</button></div></form>`,
 		`<title>Desk admin</title>`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("admin page lacks %q:\n%s", want, b)
 		}
 	}
-	if strings.Contains(b, "arrive in plan 2b") || strings.Contains(b, "<h2>Queue</h2>") || strings.Contains(b, "<h2>Members</h2>") {
+	if strings.Contains(b, "arrive in plan 2b") || strings.Contains(b, `<h2 class="h2">Queue</h2>`) || strings.Contains(b, `<h2 class="h2">Members</h2>`) {
 		t.Errorf("admin page still has the old headings or the placeholder sentence:\n%s", b)
 	}
 	// The sections come in a fixed order.
 	last := -1
-	for _, h := range []string{"<h2>Collection: ", "<h2>Problems</h2>", "<h2>Health</h2>"} {
+	for _, h := range []string{`<h2 class="h2">Collection: `, `<h2 class="h2">Problems</h2>`, `<h2 class="h2">Health</h2>`} {
 		i := strings.Index(b, h)
 		if i <= last {
 			t.Errorf("section %q is missing or out of order (at %d, after %d)", h, i, last)
@@ -426,8 +428,8 @@ func adminCollectionSection(t *testing.T, fill func(*Deps)) {
 		last = i
 	}
 	// A second view of the unchanged pool reads the same.
-	queue := `<li><b>3</b><span>videos in the queue</span></li><li><b>1</b><span>unclaimed</span></li>` +
-		`<li><b>2</b><span>claimed</span></li><li><b>1</b><span>done, 1 problem</span></li><li><b>1</b><span>open</span></li>`
+	queue := wantStage("", "1", "waiting in the pool", "of 3 videos") +
+		wantStage("now", "1", "with a collector now", "claimed, not finished")
 	if b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String(); !strings.Contains(b, queue) {
 		t.Errorf("second view lacks %q:\n%s", queue, b)
 	}
@@ -439,13 +441,22 @@ func adminCollectionSection(t *testing.T, fill func(*Deps)) {
 	}
 	rec = getAdmin(t, srv, "root", adminRole, "/desk/admin/")
 	b = rec.Body.String()
-	if !strings.Contains(b, `<p class="warn">pool.csv unreadable: pool.csv: unrecognised header [a b]</p>`) {
+	if !strings.Contains(b, `<p class="note"><span class="alert">pool.csv unreadable: pool.csv: unrecognised header [a b]</span></p>`) {
 		t.Errorf("unreadable pool line missing from:\n%s", b)
 	}
-	if strings.Contains(b, "videos in the queue") {
+	// The pool's stages read unknown and say nothing of its size; who took
+	// part and what was captured do not come from the pool.
+	if want := wantFlow(
+		wantStage("", "unknown", "waiting in the pool", ""),
+		wantStage("now", "unknown", "with a collector now", "claimed, not finished"),
+		wantStage("done", "unknown", "done, by 2 collectors", ""),
+		wantStage("done", "4", "records captured", "")); !strings.Contains(b, want) {
+		t.Errorf("with an unreadable pool the flow is not %q:\n%s", want, b)
+	}
+	if strings.Contains(b, "of 3 videos") {
 		t.Errorf("with an unreadable pool the queue's figures still show:\n%s", b)
 	}
-	if !strings.Contains(b, "<h2>Problems</h2>") || !strings.Contains(b, "<li><b>4</b><span>records captured</span></li>") {
+	if !strings.Contains(b, `<h2 class="h2">Problems</h2>`) || !strings.Contains(b, wantStage("done", "4", "records captured", "")) {
 		t.Errorf("with an unreadable pool the rest of the page is gone:\n%s", b)
 	}
 }
@@ -474,8 +485,8 @@ func logFailServer(t *testing.T, setLog func(t *testing.T, root string) string) 
 // which do not come from the log, still show. A readable empty log is no
 // failure: no warning, and the zeros stay.
 func TestAdminUnreadableDeskLog(t *testing.T) {
-	const warning = `<p class="warn">The desk log cannot be read, so the figures that come from it are unknown.</p>`
-	stop := `<form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop` + goMark + `</button></form>`
+	const warning = `<p class="note"><span class="alert">The desk log cannot be read, so the figures that come from it are unknown.</span></p>`
+	stop := `<form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button class="cmd cmd--sm">Stop</button></form>`
 	for _, tc := range []struct {
 		name   string
 		setLog func(t *testing.T, root string) string
@@ -507,16 +518,19 @@ func TestAdminUnreadableDeskLog(t *testing.T) {
 			}
 			b := rec.Body.String()
 			for _, want := range []string{
-				`<div class="wrap">` + warning + `<h2>Collection: `,
-				`<li><b>3</b><span>videos in the queue</span></li><li><b>unknown</b><span>unclaimed</span></li>` +
-					`<li><b>unknown</b><span>claimed</span></li><li><b>unknown</b><span>done, problems unknown</span></li>` +
-					`<li><b>unknown</b><span>open</span></li>`,
-				`<li><b>unknown</b><span>collectors took part</span></li>`,
-				`<h2>Problems</h2><p>unknown: the desk log cannot be read</p>`,
-				`<tr><td>alice</td><td>unknown</td><td>unknown</td><td>running ` + stop + `</td></tr>`,
-				`<div><dt>Hold the collector role, never claimed</dt><dd>unknown: the desk log cannot be read</dd></div>`,
-				`<div><dt>Worked here, no longer have access</dt><dd>unknown: the desk log cannot be read</dd></div>`,
-				`<h2>Health</h2>`,
+				// The page's top: the heading in the niche, the warning, then the flow.
+				`<div class="wrap"><div class="niche"><h2 class="h2">Collection: TestTube</h2></div>` + warning + `<ol class="flow">`,
+				// What comes from the log reads unknown; the pool's size still shows.
+				wantFlow(
+					wantStage("", "unknown", "waiting in the pool", "of 3 videos"),
+					wantStage("now", "unknown", "with a collector now", "claimed, not finished"),
+					wantStage("done", "unknown", "done", ""),
+					wantStage("done", "0", "records captured", "")),
+				`<h2 class="h2">Problems</h2><p>unknown: the desk log cannot be read</p>`,
+				`<tr><td>alice</td><td class="num">unknown</td><td class="num">unknown</td><td>running</td><td class="end">` + stop + `</td></tr>`,
+				`<div class="facts__row"><dt>Hold the collector role, never claimed</dt><dd>unknown: the desk log cannot be read</dd></div>`,
+				`<div class="facts__row"><dt>Worked here, no longer have access</dt><dd>unknown: the desk log cannot be read</dd></div>`,
+				`<h2 class="h2">Health</h2>`,
 			} {
 				if !strings.Contains(b, want) {
 					t.Errorf("page lacks %q:\n%s", want, b)
@@ -527,8 +541,8 @@ func TestAdminUnreadableDeskLog(t *testing.T) {
 					t.Errorf("page with an unreadable desk log has %q:\n%s", bad, b)
 				}
 			}
-			if n := strings.Count(b, `class="warn"`); n != 1 {
-				t.Errorf("page has %d warnings, want 1:\n%s", n, b)
+			if n := strings.Count(b, `class="alert"`); n != 1 {
+				t.Errorf("page has %d alerts, want 1:\n%s", n, b)
 			}
 		})
 	}
@@ -543,19 +557,21 @@ func TestAdminUnreadableDeskLog(t *testing.T) {
 		})
 		b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 		for _, want := range []string{
-			`<li><b>3</b><span>videos in the queue</span></li><li><b>3</b><span>unclaimed</span></li>` +
-				`<li><b>0</b><span>claimed</span></li><li><b>0</b><span>done, 0 problems</span></li><li><b>0</b><span>open</span></li>`,
-			`<li><b>0</b><span>collectors took part</span></li>`,
-			`<h2>Problems</h2><p>No problems reported.</p>`,
-			`<tr><td>alice</td><td>0:00</td><td>0:00</td><td>running ` + stop + `</td></tr>`,
-			`<div><dt>Hold the collector role, never claimed</dt><dd>chris</dd></div>`,
-			`<div><dt>Worked here, no longer have access</dt><dd>alice (removed)</dd></div>`,
+			wantFlow(
+				wantStage("", "3", "waiting in the pool", "of 3 videos"),
+				wantStage("now", "0", "with a collector now", "claimed, not finished"),
+				wantStage("done", "0", "done, by 0 collectors", ""),
+				wantStage("done", "0", "records captured", "")),
+			`<h2 class="h2">Problems</h2><p>No problems reported.</p>`,
+			`<tr><td>alice</td><td class="num">0:00</td><td class="num">0:00</td><td>running</td><td class="end">` + stop + `</td></tr>`,
+			`<div class="facts__row"><dt>Hold the collector role, never claimed</dt><dd>chris</dd></div>`,
+			`<div class="facts__row"><dt>Worked here, no longer have access</dt><dd>alice (removed)</dd></div>`,
 		} {
 			if !strings.Contains(b, want) {
 				t.Errorf("page lacks %q:\n%s", want, b)
 			}
 		}
-		if strings.Contains(b, "desk log cannot be read") || strings.Contains(b, `class="warn"`) {
+		if strings.Contains(b, "desk log cannot be read") || strings.Contains(b, `class="alert"`) {
 			t.Errorf("page with a readable empty desk log has a warning:\n%s", b)
 		}
 	})
@@ -567,7 +583,7 @@ func TestAdminUnreadableDeskLog(t *testing.T) {
 func TestAdminProblemsNewestFirst(t *testing.T) {
 	srv, root := newAdminServerWith(t, func(d *Deps) { d.Now = func() time.Time { return tueTenAmsterdam } })
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if !strings.Contains(b, "<h2>Problems</h2><p>No problems reported.</p>") {
+	if !strings.Contains(b, `<h2 class="h2">Problems</h2><p>No problems reported.</p>`) {
 		t.Errorf("page without reports lacks the empty problems line:\n%s", b)
 	}
 
@@ -577,8 +593,8 @@ func TestAdminProblemsNewestFirst(t *testing.T) {
 		desklog.Event{T: tueNine, User: "bob", Action: "open", Kind: "video", ID: "333", ExecRC: rc(0)},
 	)
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	newer := `<tr><td><a href="https://example.org/watch?v=222">video 222</a></td><td>Other</td><td>kept spinning</td><td>bob</td><td>09:00</td></tr>`
-	older := `<tr><td><a href="https://example.org/watch?v=111">video 111</a></td><td>Not found</td><td></td><td>alice</td><td>Mon 14:00</td></tr>`
+	newer := `<tr><td><a href="https://example.org/watch?v=222">video 222</a></td><td>Other</td><td>kept spinning</td><td>bob</td><td class="num">09:00</td></tr>`
+	older := `<tr><td><a href="https://example.org/watch?v=111">video 111</a></td><td>Not found</td><td></td><td>alice</td><td class="num">Mon 14:00</td></tr>`
 	i, j := strings.Index(b, newer), strings.Index(b, older)
 	if i < 0 || j < 0 {
 		t.Fatalf("problems table lacks a row (newer at %d, older at %d):\n%s", i, j, b)
@@ -594,7 +610,7 @@ func TestAdminProblemsNewestFirst(t *testing.T) {
 	// written last but timed Monday 13:00 comes last.
 	appendLog(t, root, desklog.Event{T: monAfternoon - 3600, User: "carol", Action: "problem", Kind: "video", ID: "444", Code: "NOT_FOUND"})
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	oldest := `<tr><td><a href="https://example.org/watch?v=444">video 444</a></td><td>Not found</td><td></td><td>carol</td><td>Mon 13:00</td></tr>`
+	oldest := `<tr><td><a href="https://example.org/watch?v=444">video 444</a></td><td>Not found</td><td></td><td>carol</td><td class="num">Mon 13:00</td></tr>`
 	if k := strings.Index(b, oldest); k < 0 || k < strings.Index(b, older) {
 		t.Errorf("the report timed Monday 13:00 is missing or not last (at %d):\n%s", k, b)
 	}
@@ -644,7 +660,7 @@ func TestAdminHealthSeatsLine(t *testing.T) {
 		d.Seats = seats
 	})
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<div><dt>Seats</dt><dd>1 of 3 running (configured 3; memory allows unknown) · registered 2 of 99</dd></div>`; !strings.Contains(b, want) {
+	if want := `<div class="facts__row"><dt>Seats</dt><dd>1 of 3 running (configured 3; memory allows unknown) · registered 2 of 99</dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 
@@ -655,7 +671,7 @@ func TestAdminHealthSeatsLine(t *testing.T) {
 		d.Seats = SeatFigures{Configured: 7, MemoryAllows: 3}
 	})
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<div><dt>Seats</dt><dd>1 of 3 running (configured 7; memory allows 3) · registered 2 of 99</dd></div>`; !strings.Contains(b, want) {
+	if want := `<div class="facts__row"><dt>Seats</dt><dd>1 of 3 running (configured 7; memory allows 3) · registered 2 of 99</dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 
@@ -671,10 +687,10 @@ func TestAdminHealthSeatsLine(t *testing.T) {
 	})
 	rec := getAdmin(t, srv, "root", adminRole, "/desk/admin/")
 	b = rec.Body.String()
-	if want := `<div><dt>Seats</dt><dd class="warn">the running count is unavailable; at most 3 may run (configured 3; memory allows unknown) · registered 2 of 99</dd></div>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
+	if want := `<div class="facts__row"><dt>Seats</dt><dd><span class="alert">the running count is unavailable; at most 3 may run (configured 3; memory allows unknown) · registered 2 of 99</span></dd></div>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
 		t.Errorf("status %d; page lacks %q:\n%s", rec.Code, want, b)
 	}
-	if !strings.Contains(b, "<h2>Collection: TestTube</h2>") || !strings.Contains(b, "<h2>Problems</h2>") {
+	if !strings.Contains(b, `<h2 class="h2">Collection: TestTube</h2>`) || !strings.Contains(b, `<h2 class="h2">Problems</h2>`) {
 		t.Errorf("with Docker not answering the rest of the page is gone:\n%s", b)
 	}
 
@@ -721,10 +737,10 @@ func TestAdminStatusHasATimeLimit(t *testing.T) {
 		t.Errorf("the page took %v: it waited for the request to end instead of its own time limit", took.Round(time.Millisecond))
 	}
 	b := rec.Body.String()
-	if want := `<div><dt>Seats</dt><dd class="warn">the running count is unavailable; at most 3 may run (configured 3; memory allows 3) · registered 1 of 99</dd></div>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
+	if want := `<div class="facts__row"><dt>Seats</dt><dd><span class="alert">the running count is unavailable; at most 3 may run (configured 3; memory allows 3) · registered 1 of 99</span></dd></div>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
 		t.Errorf("status %d; page lacks %q:\n%s", rec.Code, want, b)
 	}
-	for _, h := range []string{"<h2>Collection: TestTube</h2>", "<h2>Problems</h2>", "<h2>Health</h2>"} {
+	for _, h := range []string{`<h2 class="h2">Collection: TestTube</h2>`, `<h2 class="h2">Problems</h2>`, `<h2 class="h2">Health</h2>`} {
 		if !strings.Contains(b, h) {
 			t.Errorf("page lacks %q:\n%s", h, b)
 		}
@@ -734,7 +750,7 @@ func TestAdminStatusHasATimeLimit(t *testing.T) {
 func TestAdminFourcatLinksOnlyWhenEnabled(t *testing.T) {
 	srv, _ := newAdminServerWith(t, func(d *Deps) { d.Cfg.FourcatEnabled = true })
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<div><dt>4CAT</dt><dd><a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></dd></div>`; !strings.Contains(b, want) {
+	if want := `<div class="facts__row"><dt>4CAT</dt><dd><a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 	srv, _ = newAdminServer(t)
@@ -874,17 +890,17 @@ func TestAdminOverviewShowsPollLine(t *testing.T) {
 	}
 
 	b := getAdmin(t, newServer(fakeMembers{line: "CO poll: last good 12:34, 0 failures"}), "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<h2>Health</h2><dl class="facts"><div><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div>`; !strings.Contains(b, want) {
+	if want := `<h2 class="h2">Health</h2><dl class="facts"><div class="facts__row"><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("overview lacks %q:\n%s", want, b)
 	}
 
 	b = getAdmin(t, newServer(fakeMembers{line: "ALARM: CO poll: no good poll yet, 3 failures <x>"}), "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<h2>Health</h2><dl class="facts"><div><dt>CO poll</dt><dd class="warn">ALARM: no good poll yet, 3 failures &lt;x&gt;</dd></div>`; !strings.Contains(b, want) {
+	if want := `<h2 class="h2">Health</h2><dl class="facts"><div class="facts__row"><dt>CO poll</dt><dd><span class="alert">ALARM: no good poll yet, 3 failures &lt;x&gt;</span></dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("overview lacks the alarm line %q:\n%s", want, b)
 	}
 
 	b = getAdmin(t, newServer(nil), "root", adminRole, "/desk/admin/").Body.String()
-	if strings.Contains(b, "CO poll") || !strings.Contains(b, "<h2>Health</h2>") {
+	if strings.Contains(b, "CO poll") || !strings.Contains(b, `<h2 class="h2">Health</h2>`) {
 		t.Errorf("overview without a poller shows a poll line:\n%s", b)
 	}
 }
@@ -920,15 +936,15 @@ func TestAdminOverviewShowsRetentionLine(t *testing.T) {
 		want string
 	}{
 		{fakeRetention{line: "Snapshot retention: not run yet"},
-			`<div><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div><div><dt>Snapshot retention</dt><dd>not run yet</dd></div>`},
+			`<div class="facts__row"><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div><div class="facts__row"><dt>Snapshot retention</dt><dd>not run yet</dd></div>`},
 		{fakeRetention{line: "Snapshot retention: last run 2026-11-18 12:00, 9 snapshots read, 3 marked to expire, 2 unmarked"},
-			`<div><dt>Snapshot retention</dt><dd>last run 2026-11-18 12:00, 9 snapshots read, 3 marked to expire, 2 unmarked</dd></div>`},
+			`<div class="facts__row"><dt>Snapshot retention</dt><dd>last run 2026-11-18 12:00, 9 snapshots read, 3 marked to expire, 2 unmarked</dd></div>`},
 		{fakeRetention{line: "Snapshot retention: failed at 2026-11-18 12:00 <x>", failed: true},
-			`<div><dt>Snapshot retention</dt><dd class="warn">failed at 2026-11-18 12:00 &lt;x&gt;</dd></div>`},
+			`<div class="facts__row"><dt>Snapshot retention</dt><dd><span class="alert">failed at 2026-11-18 12:00 &lt;x&gt;</span></dd></div>`},
 		{fakeRetention{line: "Snapshot retention (dry run): last run 2026-11-18 12:00, 9 snapshots read, 3 would be marked to expire, 2 would be unmarked"},
-			`<div><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div><div><dt>Snapshot retention (dry run)</dt><dd>last run 2026-11-18 12:00, 9 snapshots read, 3 would be marked to expire, 2 would be unmarked</dd></div>`},
+			`<div class="facts__row"><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div><div class="facts__row"><dt>Snapshot retention (dry run)</dt><dd>last run 2026-11-18 12:00, 9 snapshots read, 3 would be marked to expire, 2 would be unmarked</dd></div>`},
 		{fakeRetention{line: "Snapshot retention (dry run): failed at 2026-11-18 12:00", failed: true},
-			`<div><dt>Snapshot retention (dry run)</dt><dd class="warn">failed at 2026-11-18 12:00</dd></div>`},
+			`<div class="facts__row"><dt>Snapshot retention (dry run)</dt><dd><span class="alert">failed at 2026-11-18 12:00</span></dd></div>`},
 	} {
 		b := getAdmin(t, newServer(c.r), "root", adminRole, "/desk/admin/").Body.String()
 		if !strings.Contains(b, c.want) {
@@ -937,7 +953,7 @@ func TestAdminOverviewShowsRetentionLine(t *testing.T) {
 	}
 
 	b := getAdmin(t, newServer(nil), "root", adminRole, "/desk/admin/").Body.String()
-	if strings.Contains(b, "Snapshot retention") || !strings.Contains(b, "<h2>Health</h2>") {
+	if strings.Contains(b, "Snapshot retention") || !strings.Contains(b, `<h2 class="h2">Health</h2>`) {
 		t.Errorf("overview without the pass shows a retention line:\n%s", b)
 	}
 }
@@ -1031,7 +1047,7 @@ func TestAdminStopStopsAndLogs(t *testing.T) {
 	}
 
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<p class="notice" role="status">stopped alice</p>`; !strings.Contains(b, want) {
+	if want := `<p class="note" role="status">stopped alice</p>`; !strings.Contains(b, want) {
 		t.Errorf("page after the stop lacks %q:\n%s", want, b)
 	}
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
@@ -1084,7 +1100,7 @@ func TestAdminStopOutlivesTheRequest(t *testing.T) {
 		t.Errorf("alice's idle clocks were not restarted after the stop")
 	}
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<p class="notice" role="status">stopped alice</p>`; !strings.Contains(b, want) {
+	if want := `<p class="note" role="status">stopped alice</p>`; !strings.Contains(b, want) {
 		t.Errorf("page after the stop lacks %q:\n%s", want, b)
 	}
 }
@@ -1158,7 +1174,7 @@ func TestAdminStopFailureWritesNoEvent(t *testing.T) {
 		t.Errorf("a failed stop wrote %+v", evs)
 	}
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<p class="notice" role="status">could not stop alice: docker: container desk-proxy-alice is not ours</p>`; !strings.Contains(b, want) {
+	if want := `<p class="note" role="status">could not stop alice: docker: container desk-proxy-alice is not ours</p>`; !strings.Contains(b, want) {
 		t.Errorf("page after the failed stop lacks %q:\n%s", want, b)
 	}
 }
@@ -1183,7 +1199,7 @@ func TestAdminStopStandsWhenLogFails(t *testing.T) {
 		t.Errorf("stops = %q, want [alice]", sess.stops)
 	}
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<p class="notice" role="status">stopped alice, but the desk log could not record the stop</p>`; !strings.Contains(b, want) {
+	if want := `<p class="note" role="status">stopped alice, but the desk log could not record the stop</p>`; !strings.Contains(b, want) {
 		t.Errorf("page after the stop lacks %q:\n%s", want, b)
 	}
 }
@@ -1203,10 +1219,10 @@ func TestStopButtonOnlyOnRunning(t *testing.T) {
 	srv, _ := newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	for _, want := range []string{
-		`<tr><td>alice</td><td>0:00</td><td>0:00</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop` + goMark + `</button></form></td></tr>`,
-		`<tr><td>bob</td><td>0:00</td><td>0:00</td><td>stopped</td></tr>`,
-		`<tr><td>carol</td><td>0:00</td><td>0:00</td><td>at template <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="carol"><button>Stop` + goMark + `</button></form></td></tr>`,
-		`<td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="x&#34;&lt;y&gt;&amp;z"><button>Stop` + goMark + `</button></form></td></tr>`,
+		`<tr><td>alice</td><td class="num">0:00</td><td class="num">0:00</td><td>running</td><td class="end"><form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button class="cmd cmd--sm">Stop</button></form></td></tr>`,
+		`<tr><td>bob</td><td class="num">0:00</td><td class="num">0:00</td><td>stopped</td><td class="end"></td></tr>`,
+		`<tr><td>carol</td><td class="num">0:00</td><td class="num">0:00</td><td>at template</td><td class="end"><form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="carol"><button class="cmd cmd--sm">Stop</button></form></td></tr>`,
+		`<td>running</td><td class="end"><form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="x&#34;&lt;y&gt;&amp;z"><button class="cmd cmd--sm">Stop</button></form></td></tr>`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q:\n%s", want, b)
@@ -1219,7 +1235,7 @@ func TestStopButtonOnlyOnRunning(t *testing.T) {
 	sess = &fakeAdminSessions{statusErr: errors.New("docker: no answer"), seats: []registry.Row{{User: "alice", Index: 1, Status: "live"}}}
 	srv, _ = newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<tr><td>alice</td><td>0:00</td><td>0:00</td><td>unknown</td></tr>`; !strings.Contains(b, want) {
+	if want := `<tr><td>alice</td><td class="num">0:00</td><td class="num">0:00</td><td>unknown</td><td class="end"></td></tr>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 	if strings.Contains(b, "/desk/admin/stop") {
@@ -1236,5 +1252,47 @@ func TestAdminHeaderLinks(t *testing.T) {
 		`<li><a class="site-nav__link is-current" href="/desk/admin/" aria-current="page">Admin</a></li>`
 	if !strings.Contains(b, want) {
 		t.Errorf("admin page lacks the header links %q", want)
+	}
+	// Under the desk's name: the platform, then who is signed in, as on the
+	// collector page.
+	if want := `<span class="site-header__subtitle">TestTube comment collection · root</span>`; !strings.Contains(b, want) {
+		t.Errorf("admin page lacks the subtitle %q", want)
+	}
+}
+
+// The top of the admin page: the collection's heading in the band's niche,
+// then the note of what was just done, then the flow.
+func TestAdminOrderOfTheTop(t *testing.T) {
+	srv, _ := newAdminServerWith(t, func(d *Deps) { d.AdminSessions = stopSessions() })
+	rec := postStop(t, srv, "root", adminRole, map[string]string{"Sec-Fetch-Site": "same-origin"}, "user=alice")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("stop: status = %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	inOrder(t, b,
+		`class="niche"`,
+		`<p class="note" role="status">stopped alice</p>`,
+		`class="flow"`,
+		`<h2 class="h2">Students</h2>`,
+	)
+}
+
+// Commands are square buttons and never carry the arrow disc, which is for
+// the next step and for links that go somewhere.
+func TestAdminCommandsCarryNoArrow(t *testing.T) {
+	ready := provision.State{Steps: allDoneSteps()}
+	srv, _ := newAdminServerWith(t, func(d *Deps) {
+		d.AdminSessions = &fakeAdminSessions{rows: []session.Row{{User: "alice", Index: 1, Live: true, Running: true, State: ready}}}
+	})
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	for _, want := range []string{`<button class="cmd cmd--main">Upload</button>`, `<button class="cmd cmd--sm">Stop</button>`} {
+		if !strings.Contains(b, want) {
+			t.Errorf("admin page lacks %q", want)
+		}
+	}
+	for _, gone := range []string{`class="disc`, "more__dots", `class="go"`} {
+		if strings.Contains(b, gone) {
+			t.Errorf("admin page still has %q", gone)
+		}
 	}
 }

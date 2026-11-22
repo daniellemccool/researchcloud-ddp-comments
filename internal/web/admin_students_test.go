@@ -180,15 +180,20 @@ func TestAdminStudentsTable(t *testing.T) {
 
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	inOrder(t, b,
-		`<h2>Collection: TestTube</h2>`,
-		`<h2>Students</h2><table><tr><th>Name</th><th>This week</th><th>Total</th><th>Uploaded</th><th>Session</th></tr>`,
-		`<tr><td><a href="/results/?user=erin">erin</a></td><td>0:00</td><td>0:00</td><td>nothing captured</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button>Stop`+goMark+`</button></form></td></tr>`,
-		`<tr><td><a href="/results/?user=alice">alice</a></td><td>0:10</td><td>0:15</td><td>yes, 09:30</td><td>running, input 7 min ago <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop`+goMark+`</button></form></td></tr>`,
-		`<tr><td><a href="/results/?user=carol">carol</a></td><td>0:00</td><td>0:00</td><td>nothing captured</td><td>at template (template missing)</td></tr>`,
-		`<tr><td><a href="/results/?user=bob">bob</a></td><td>0:00</td><td>0:05</td><td><span class="late">no, captures since Mon 14:00</span></td><td>stopped</td></tr>`,
+		`<h2 class="h2">Collection: TestTube</h2>`,
+		`<h2 class="h2">Students</h2><table class="table"><tr><th>Name</th><th>This week</th><th>Total</th><th>Uploaded</th><th>Session</th><th class="end"><span class="vh">Stop the session</span></th></tr>`,
+		`<tr><td><a href="/results/?user=erin">erin</a></td><td class="num">0:00</td><td class="num">0:00</td><td class="muted">nothing captured</td><td>running</td><td class="end"><form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button class="cmd cmd--sm">Stop</button></form></td></tr>`,
+		`<tr><td><a href="/results/?user=alice">alice</a></td><td class="num">0:10</td><td class="num">0:15</td><td>yes, 09:30</td><td>running, input 7 min ago</td><td class="end"><form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button class="cmd cmd--sm">Stop</button></form></td></tr>`,
+		`<tr><td><a href="/results/?user=carol">carol</a></td><td class="num">0:00</td><td class="num">0:00</td><td class="muted">nothing captured</td><td><span class="alert">at template (template missing)</span></td><td class="end"></td></tr>`,
+		`<tr><td><a href="/results/?user=bob">bob</a></td><td class="num">0:00</td><td class="num">0:05</td><td><span class="alert">no, captures since Mon 14:00</span></td><td>stopped</td><td class="end"></td></tr>`,
 		`</table>`,
-		`<h2>Problems</h2>`,
+		`<h2 class="h2">Problems</h2>`,
 	)
+	// A late upload (bob) and a broken seat (carol) carry the alert, the one
+	// part for what needs attention; round 2's own class for the first is gone.
+	if strings.Count(b, `<span class="alert">`) != 2 || strings.Contains(b, `class="late"`) {
+		t.Errorf("want exactly the two alerts (late upload, broken seat) and no class \"late\":\n%s", b)
+	}
 	if strings.Contains(b, "dave") {
 		t.Errorf("a retired seat has a row:\n%s", b)
 	}
@@ -207,8 +212,8 @@ func TestAdminStudentsWithoutFourcat(t *testing.T) {
 	}}
 	srv, _ := newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	want := `<h2>Students</h2><table><tr><th>Name</th><th>This week</th><th>Total</th><th>Session</th></tr>` +
-		`<tr><td>alice</td><td>0:00</td><td>0:00</td><td>stopped</td></tr></table>`
+	want := `<h2 class="h2">Students</h2><table class="table"><tr><th>Name</th><th>This week</th><th>Total</th><th>Session</th><th class="end"><span class="vh">Stop the session</span></th></tr>` +
+		`<tr><td>alice</td><td class="num">0:00</td><td class="num">0:00</td><td>stopped</td><td class="end"></td></tr></table>`
 	if !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
@@ -220,14 +225,14 @@ func TestAdminStudentsWithoutFourcat(t *testing.T) {
 	sess = &fakeAdminSessions{rows: []session.Row{{User: "alice", Index: 1, Live: false}}}
 	srv, _ = newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<h2>Students</h2><p>No one has a seat yet.</p>`; !strings.Contains(b, want) {
+	if want := `<h2 class="h2">Students</h2><p>No one has a seat yet.</p>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 
 	// No session data wired: the section has no table.
 	srv, _ = newAdminServer(t)
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if !strings.Contains(b, "<h2>Students</h2>") || strings.Contains(b, "<th>Name</th>") {
+	if !strings.Contains(b, `<h2 class="h2">Students</h2>`) || strings.Contains(b, "<th>Name</th>") {
 		t.Errorf("page without session data: want the heading and no table:\n%s", b)
 	}
 }
@@ -246,7 +251,7 @@ func TestAdminStudentsWhenDockerDoesNotAnswer(t *testing.T) {
 	})
 	appendLog(t, root, desklog.Event{T: tueNine, User: "alice", Action: "active"})
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	want := `<tr><td><a href="/results/?user=alice">alice</a></td><td>0:05</td><td>0:05</td><td>unknown</td><td>unknown</td></tr></table>`
+	want := `<tr><td><a href="/results/?user=alice">alice</a></td><td class="num">0:05</td><td class="num">0:05</td><td>unknown</td><td>unknown</td><td class="end"></td></tr></table>`
 	if !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
@@ -260,7 +265,7 @@ func TestAdminStudentsWhenDockerDoesNotAnswer(t *testing.T) {
 	sess = &fakeAdminSessions{statusErr: errors.New("docker: no answer"), seatsErr: errors.New("registry: unreadable")}
 	srv, _ = newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<h2>Students</h2><p class="warn">The students cannot be listed: the seat registry is unreadable.</p>`; !strings.Contains(b, want) {
+	if want := `<h2 class="h2">Students</h2><p class="note"><span class="alert">The students cannot be listed: the seat registry is unreadable.</span></p>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 	if strings.Contains(b, "<th>Name</th>") {
@@ -303,11 +308,11 @@ func TestAdminMemberLists(t *testing.T) {
 	)
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	inOrder(t, b,
-		`<h2>Students</h2>`,
+		`<h2 class="h2">Students</h2>`,
 		`</table>`,
-		`<div><dt>Hold the collector role, never claimed</dt><dd>chris, dewi</dd></div>`,
-		`<div><dt>Worked here, no longer have access</dt><dd>emma (removed 12 Nov), finn (role removed), ivan (removed), jo (removed)</dd></div>`,
-		`<h2>Problems</h2>`,
+		`<div class="facts__row"><dt>Hold the collector role, never claimed</dt><dd>chris, dewi</dd></div>`,
+		`<div class="facts__row"><dt>Worked here, no longer have access</dt><dd>emma (removed 12 Nov), finn (role removed), ivan (removed), jo (removed)</dd></div>`,
+		`<h2 class="h2">Problems</h2>`,
 	)
 
 	// Empty lists read "none".
@@ -317,10 +322,10 @@ func TestAdminMemberLists(t *testing.T) {
 	appendLog(t, root, desklog.Event{T: monAfternoon, User: "anna", Action: "claim", Kind: "video", ID: "1"})
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	inOrder(t, b,
-		`<h2>Students</h2>`,
-		`<div><dt>Hold the collector role, never claimed</dt><dd>none</dd></div>`,
-		`<div><dt>Worked here, no longer have access</dt><dd>none</dd></div>`,
-		`<h2>Problems</h2>`,
+		`<h2 class="h2">Students</h2>`,
+		`<div class="facts__row"><dt>Hold the collector role, never claimed</dt><dd>none</dd></div>`,
+		`<div class="facts__row"><dt>Worked here, no longer have access</dt><dd>none</dd></div>`,
+		`<h2 class="h2">Problems</h2>`,
 	)
 
 	// No poller wired: neither line.
@@ -339,8 +344,8 @@ func TestAdminListsUnknownWithoutPoll(t *testing.T) {
 	appendLog(t, root, desklog.Event{T: monAfternoon, User: "emma", Action: "claim", Kind: "video", ID: "1"})
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	for _, want := range []string{
-		`<div><dt>Hold the collector role, never claimed</dt><dd>unknown: no member list yet</dd></div>`,
-		`<div><dt>Worked here, no longer have access</dt><dd>unknown: no member list yet</dd></div>`,
+		`<div class="facts__row"><dt>Hold the collector role, never claimed</dt><dd>unknown: no member list yet</dd></div>`,
+		`<div class="facts__row"><dt>Worked here, no longer have access</dt><dd>unknown: no member list yet</dd></div>`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q:\n%s", want, b)
@@ -364,9 +369,9 @@ func TestAdminStudentsEscapes(t *testing.T) {
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	for _, want := range []string{
 		`<tr><td><a href="/results/?user=x%22%3Cy%3E%26z">x&#34;&lt;y&gt;&amp;z</a></td>`,
-		`<td>at registry (&lt;b&gt;bad&lt;/b&gt;)</td>`,
-		`<div><dt>Hold the collector role, never claimed</dt><dd>&lt;m&gt;</dd></div>`,
-		`<div><dt>Worked here, no longer have access</dt><dd>carol (removed), x&#34;&lt;y&gt;&amp;z (removed)</dd></div>`,
+		`<td><span class="alert">at registry (&lt;b&gt;bad&lt;/b&gt;)</span></td>`,
+		`<div class="facts__row"><dt>Hold the collector role, never claimed</dt><dd>&lt;m&gt;</dd></div>`,
+		`<div class="facts__row"><dt>Worked here, no longer have access</dt><dd>carol (removed), x&#34;&lt;y&gt;&amp;z (removed)</dd></div>`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q:\n%s", want, b)
@@ -394,7 +399,7 @@ func TestAdminStudentsRunningWithoutInput(t *testing.T) {
 		d.AdminSessions = sess
 	})
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<tr><td>erin</td><td>0:00</td><td>0:00</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button>Stop` + goMark + `</button></form></td></tr>`; !strings.Contains(b, want) {
+	if want := `<tr><td>erin</td><td class="num">0:00</td><td class="num">0:00</td><td>running</td><td class="end"><form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button class="cmd cmd--sm">Stop</button></form></td></tr>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 	if strings.Contains(b, "running, input") {
