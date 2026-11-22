@@ -98,3 +98,37 @@ func TestPolicyLocksOfflineStatusOff(t *testing.T) {
 		t.Errorf("network.manage-offline-status = %v, want {Value:false Status:locked}", got)
 	}
 }
+
+// The browser draws without a graphics card and its picture is streamed, so
+// every frame costs processor time twice: once to draw, once to send. The
+// policy turns smooth scrolling off and caps the frame rate at 30, which
+// cuts the in-between frames of a scroll; on the study desk comments then
+// loaded while scrolling without the pause at the bottom (2026-11-22). Both
+// are locked, so every collector's browser behaves the same.
+func TestPolicyLimitsTheFramesOfAScroll(t *testing.T) {
+	raw, err := Policy(testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p struct {
+		Policies struct {
+			Preferences map[string]map[string]any `json:"Preferences"`
+		} `json:"policies"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("rendered policy is not valid JSON: %v", err)
+	}
+	for name, want := range map[string]any{
+		"general.smoothScroll": false,
+		"layout.frame_rate":    float64(30), // JSON numbers decode as float64
+	} {
+		got, ok := p.Policies.Preferences[name]
+		if !ok {
+			t.Errorf("Preferences has no %s", name)
+			continue
+		}
+		if len(got) != 2 || got["Value"] != want || got["Status"] != "locked" {
+			t.Errorf("%s = %v, want {Value:%v Status:locked}", name, got, want)
+		}
+	}
+}
