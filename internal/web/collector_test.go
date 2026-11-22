@@ -695,7 +695,9 @@ func TestHomePageProblemMessageAndDisabledNext(t *testing.T) {
 	}
 }
 
-func TestHomePageHelpOpenOnlyWhenNoClaims(t *testing.T) {
+// The guide starts by itself until the collector has opened a first item; the
+// help stays folded throughout.
+func TestHomePageGuidesUntilTheFirstOpen(t *testing.T) {
 	e := readyPageEnv(t, true)
 	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n")
 
@@ -704,8 +706,11 @@ func TestHomePageHelpOpenOnlyWhenNoClaims(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	b := rec.Body.String()
-	if !strings.Contains(b, `<details class="fold" name="fold" open><summary class="site-nav__link">How to collect</summary>`) {
-		t.Errorf("page without claims lacks the open help details")
+	if !strings.Contains(b, `const G={"auto":true,`) {
+		t.Errorf("page without claims does not start the guide")
+	}
+	if strings.Contains(b, `name="fold" open>`) {
+		t.Errorf("page without claims opens a fold by itself")
 	}
 	// Nothing claimed: no list and no next action, and the queue's end
 	// still offers more.
@@ -721,9 +726,14 @@ func TestHomePageHelpOpenOnlyWhenNoClaims(t *testing.T) {
 	if err := e.log.Append(desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	rec2 := e.get(t, "alice", collectorRole, "/desk/")
-	if b := rec2.Body.String(); !strings.Contains(b, `<details class="fold" name="fold"><summary class="site-nav__link">How to collect</summary>`) {
-		t.Errorf("page with claims lacks the closed help details")
+	if b := e.get(t, "alice", collectorRole, "/desk/").Body.String(); !strings.Contains(b, `const G={"auto":true,`) {
+		t.Errorf("page with a claim and nothing opened does not start the guide")
+	}
+	if err := e.log.Append(desklog.Event{T: 2, User: "alice", Action: "open", Kind: "video", ID: "111", Code: "", ExecRC: intPtr(0)}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if b := e.get(t, "alice", collectorRole, "/desk/").Body.String(); !strings.Contains(b, `const G={"auto":false,`) {
+		t.Errorf("page after the first open still starts the guide by itself")
 	}
 }
 

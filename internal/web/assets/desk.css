@@ -239,6 +239,23 @@ body:has(#stopped:not([hidden])) .side, body:has(#denied:not([hidden])) .side { 
 .halt[hidden] { display:none; }
 .halt p { margin:0 0 var(--space-8); }
 
+/* --- the guide: a hint that walks along with a collector's first item -----
+   The script places the hint beside what to use next and the ring around it;
+   the ring lets clicks through. */
+.guide { position:fixed; z-index:60; box-sizing:border-box; width:280px; padding:var(--space-16); background:var(--surface);
+         border:1px solid var(--border); border-top:var(--line-page) solid var(--blue); box-shadow:0 6px 24px rgba(37,42,52,.18);
+         font:var(--text-small); color:var(--text); }
+.guide[hidden], .guide__ring[hidden], .guide [hidden] { display:none; }
+.guide__text { margin:0 0 var(--space-12); }
+.guide__row { display:flex; align-items:center; gap:var(--space-12); }
+.guide__skip { margin-left:auto; padding:0; border:0; background:none; cursor:pointer; font:inherit; color:var(--text-muted);
+               text-decoration:underline dotted; text-underline-offset:3px; }
+.guide__ring { position:fixed; z-index:59; box-sizing:border-box; pointer-events:none; border:2px solid var(--blue); border-radius:6px;
+               box-shadow:0 0 0 4px var(--blue-tint); }
+.guide__icon { display:inline-block; width:20px; height:20px; vertical-align:-5px; }
+.guide__again { margin:var(--space-8) 0 0 44px; padding:0; border:0; background:none; cursor:pointer; font:var(--text-link); color:var(--heading);
+                text-decoration:underline dotted var(--sky); text-decoration-thickness:var(--line-underline); text-underline-offset:var(--line-underline-offset-title); }
+
 /* --- reading pages: admin and the message pages --------------------------
    The title band is ddp-inspector's: the title on a white line between two
    nodes; the line runs on, drops past the step to the consent badge and ends

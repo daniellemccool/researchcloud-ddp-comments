@@ -388,3 +388,17 @@ func TestQueueSitsRightOfTheBrowser(t *testing.T) {
 		t.Errorf("the help still says the browser is on the right")
 	}
 }
+
+// The guide's hint and its ring are placed by the script; the stylesheet
+// draws them in the look and keeps both out of the way while hidden.
+func TestStylesheetDrawsTheGuide(t *testing.T) {
+	for _, want := range []string{
+		".guide { position:fixed;", ".guide__ring { position:fixed;", "pointer-events:none;",
+		// hidden wins over the display the look gives a button
+		".guide[hidden], .guide__ring[hidden], .guide [hidden] { display:none; }", ".guide__skip {", ".guide__again {", ".guide__icon {",
+	} {
+		if !strings.Contains(pageCSS, want) {
+			t.Errorf("stylesheet lacks %q", want)
+		}
+	}
+}

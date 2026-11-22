@@ -86,14 +86,13 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 		NoteCodes:     []string{"OTHER"},
 		ProgressHTML:  progress(0, 1),
 		Body:          `<p>%%USER%% stays literal</p>`,
-		OpenHelp:      true,
 		Footer:        &footer,
 	})
 	for _, want := range []string{
 		"<title>TestTube desk — alice</title>",
 		`<h1 class="side__title">Your queue</h1>`,
 		`<span class="site-header__subtitle">TestTube comment collection · alice</span>`,
-		`<details class="fold" name="fold" open><summary class="site-nav__link">How to collect</summary>`,
+		`<details class="fold" name="fold"><summary class="site-nav__link">How to collect</summary>`,
 		", or until the timer reaches 0:00",
 		"const SECONDS=120,NOTE_CODES=[\"OTHER\"]",
 		`<p>%%USER%% stays literal</p>`, // one pass: substituted text is never rescanned
@@ -338,7 +337,7 @@ func TestDeskPageFollowsTheNoun(t *testing.T) {
 // queue's end still offers more.
 func TestDeskPageWithNothingClaimed(t *testing.T) {
 	out := deskPage(pageParams{
-		User: "alice", PlatformLabel: "T", Noun: "video", OpenHelp: true,
+		User: "alice", PlatformLabel: "T", Noun: "video", Guide: true,
 		Body: `<div class="queue__end"><div class="queue__more" id="getmore"><button class="cmd cmd--sm cmd--main" onclick="more(5)">Get 5 more videos</button></div></div>`,
 	})
 	for _, gone := range []string{`id="next"`, `<ul class="rows">`, `id="prog"`} {
@@ -382,5 +381,46 @@ func TestDeskPageRedrawsTheQueueInPlace(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("page lacks %q", want)
 		}
+	}
+}
+
+// The guide walks along with a collector's first item: one hint at a time,
+// each beside the thing to use next, moving on when the collector does it.
+// It starts by itself for a collector who has never opened an item, and How
+// to collect can start it again for anyone. It replaces the help that used to
+// open by itself, which would now cover the queue.
+func TestDeskPageCarriesTheGuide(t *testing.T) {
+	first := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "clip", Guide: true})
+	later := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "clip"})
+	if !strings.Contains(first, `const G={"auto":true,`) {
+		t.Errorf("a first-time page does not start the guide")
+	}
+	if !strings.Contains(later, `const G={"auto":false,`) {
+		t.Errorf("a later page starts the guide by itself")
+	}
+	for _, want := range []string{
+		`<div id="guide" class="guide" hidden>`,
+		`<button id="guide-next" class="cmd cmd--sm cmd--main"></button>`,
+		`<button id="guide-skip" class="guide__skip">Skip the guide</button>`,
+		`<i id="guide-ring" class="guide__ring" hidden></i>`,
+		// the hints follow the platform's noun
+		`"more":"Start here: get your first clips."`,
+		`"next":"Open the next clip here. It opens in the browser on the left."`,
+		`"screen":"Open the comments in the browser:`,
+		`"problem":"If the clip won't show or the comments won't load, pick what happened here."`,
+		`"upload":"Before you leave, send what you captured to 4CAT:`,
+		// How to collect starts it again
+		`<button class="guide__again" onclick="guideStart(true)">Show me around</button>`,
+		// the guide follows what the collector does
+		`guideOn('drawn')`, `guideOn('opened')`,
+	} {
+		for name, page := range map[string]string{"first-time": first, "later": later} {
+			if !strings.Contains(page, want) {
+				t.Errorf("%s page lacks %q", name, want)
+			}
+		}
+	}
+	if strings.Contains(first, `name="fold" open>`) {
+		t.Errorf("a fold opens by itself on a first-time page")
 	}
 }

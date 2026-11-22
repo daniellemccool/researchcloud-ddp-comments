@@ -178,7 +178,7 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 		ProgressHTML:  q.Progress,
 		Next:          q.Next,
 		Body:          q.Body,
-		OpenHelp:      len(view.Claims) == 0,
+		Guide:         len(view.Opened) == 0,
 		Footer:        footer,
 		FooterWarn:    footerWarn,
 		IdleMinutes:   h.cfg.IdleSeconds / 60,

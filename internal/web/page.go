@@ -40,7 +40,12 @@ import (
 // data-kind and data-id, and by the classes msg, timer and current; the
 // stylesheet keys every state on those same hooks. To redraw the queue it
 // also finds the classes count, count__bar, side__head and side__list, and
-// a row by its id (r and the item's id).
+// a row by its id (r and the item's id). The guide (guideJSON) finds its
+// hint and ring by id (guide, guide-text, guide-next, guide-skip,
+// guide-ring) and its targets by getmore's button, next, the class
+// screen-slot, the open row's pick and upload; every call into it from the
+// rest of the script is caught, so a fault in the guide ends the guide and
+// never stops an open or a redraw.
 const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>%%TITLE%%</title>
 <style>
@@ -60,6 +65,8 @@ const PAGE = `<!doctype html>
 <div id="denied" hidden class="halt"><div class="stop"><span class="bang" aria-hidden="true">!</span><div><p class="lede">You are signed out, or your access to the desk was removed.</p><p>If reloading keeps failing, contact %%CONTACT%%.</p>%%RELOAD_PAGE%%</div></div></div>
 </div>
 </div>
+<div id="guide" class="guide" hidden><p id="guide-text" class="guide__text"></p><div class="guide__row"><button id="guide-next" class="cmd cmd--sm cmd--main"></button><button id="guide-skip" class="guide__skip">Skip the guide</button></div></div>
+<i id="guide-ring" class="guide__ring" hidden></i>
 <script>
 const SECONDS=%%SECONDS%%,NOTE_CODES=%%NOTE_CODES%%;let timer=null,wasReady=false,sawInput=false,stopped=false;
 async function waitScreen(){try{const r=await fetch('status');if(r.ok&&(await r.json()).ready){
@@ -94,7 +101,7 @@ function startTimer(){if(timer)clearInterval(timer.h);document.querySelectorAll(
 function current(l){document.querySelectorAll('li.current').forEach(x=>x.classList.remove('current'));
  l.classList.add('current');if(SECONDS>0)startTimer();}
 async function open_(l){const r=await fetch('open?'+q(l),{method:'POST'});
- if(r.ok){if(l.dataset.state!=='problem')l.dataset.state='done';l.classList.add('done');setMsg(l,'');current(l);refresh();}
+ if(r.ok){if(l.dataset.state!=='problem')l.dataset.state='done';l.classList.add('done');setMsg(l,'');current(l);refresh();guideOn('opened');}
  else if(r.status===503){setMsg(l,'the browser is still starting; try again in a moment',true);}
  else{setMsg(l,'could not open; tell the operator',true);}}
 function openNext(){const n=document.querySelector('ul.rows li[data-state=todo]');if(n)open_(n);}
@@ -113,13 +120,53 @@ function draw(j){const cur=document.querySelector('li.current'),id=cur?cur.id:''
  const c=document.querySelector('.count');c.querySelectorAll('#prog,.count__bar').forEach(x=>x.remove());c.insertAdjacentHTML('afterbegin',j.progress);
  const nx=document.getElementById('next');if(nx)nx.remove();document.querySelector('.side__head').insertAdjacentHTML('beforeend',j.next);
  document.querySelector('.side__list').innerHTML=j.body;
- const l=id&&document.getElementById(id);if(l){l.classList.add('current');if(timer)tick();}}
+ const l=id&&document.getElementById(id);if(l){l.classList.add('current');if(timer)tick();}guideOn('drawn');}
 async function redraw(){if(stopped)return;
  try{const r=await fetch('queue',{redirect:'manual'});
   if(refused(r)){showDenied();return;}
   if(r.ok){draw(await r.json());return;}
  }catch(e){}setTimeout(redraw,2000);}
 async function more(n){try{await fetch('claim?n='+n,{method:'POST'});}catch(e){}document.querySelectorAll('details.fold[open]').forEach(d=>{d.open=false;});redraw();}
+const G=%%GUIDE%%,GUIDE_STEPS=['more','next','screen','problem','upload'];let guide=null;
+function guideTarget(s){
+ if(s==='more')return document.querySelector('#getmore button');
+ if(s==='next'){const n=document.getElementById('next');return n&&!n.disabled?n:null;}
+ if(s==='screen')return document.querySelector('.screen-slot');
+ if(s==='problem')return document.querySelector('li.current .pick');
+ if(s==='upload')return document.getElementById('upload')?document.querySelector('.screen-slot'):null;
+ return null;}
+function guideEnd(){if(guide)clearInterval(guide.h);guide=null;document.getElementById('guide').hidden=true;document.getElementById('guide-ring').hidden=true;}
+function guidePlace(){if(!guide)return;
+ try{if(stopped){guideEnd();return;}
+  const t=guideTarget(guide.step),box=document.getElementById('guide'),ring=document.getElementById('guide-ring');
+  if(!t){box.hidden=ring.hidden=true;return;}
+  let r=t.getBoundingClientRect();
+  if(guide.step==='upload')r={left:r.right-101,top:r.top+48,width:32,height:32};
+  else if(guide.step==='screen')r={left:r.left+8,top:r.top+8,width:r.width-16,height:r.height-16};
+  box.hidden=ring.hidden=false;
+  ring.style.left=(r.left-4)+'px';ring.style.top=(r.top-4)+'px';ring.style.width=(r.width+8)+'px';ring.style.height=(r.height+8)+'px';
+  const w=box.offsetWidth,h=box.offsetHeight;let x=r.left-w-20,y=r.top+r.height/2-h/2;
+  if(guide.step==='screen'){x=r.left+24;y=r.top+r.height-h-24;}
+  if(guide.step==='upload'){x=r.left+r.width-w;y=r.top+r.height+16;}
+  box.style.left=Math.max(8,Math.min(x,innerWidth-w-8))+'px';box.style.top=Math.max(8,Math.min(y,innerHeight-h-8))+'px';
+ }catch(e){guideEnd();}}
+function guideGo(i){for(;i<GUIDE_STEPS.length&&!guideTarget(GUIDE_STEPS[i]);i++);
+ if(i>=GUIDE_STEPS.length){guideEnd();return;}
+ guide.step=GUIDE_STEPS[i];let later=false;for(let j=i+1;j<GUIDE_STEPS.length;j++)if(guideTarget(GUIDE_STEPS[j]))later=true;
+ document.getElementById('guide-text').innerHTML=G.steps[guide.step];
+ const nx=document.getElementById('guide-next');nx.textContent=later?'Next':'Done';nx.hidden=!guide.replay&&i<2;
+ const t=guideTarget(guide.step);if(i!==2&&i!==4&&t.scrollIntoView)t.scrollIntoView({block:'nearest'});
+ guidePlace();}
+function guideStart(replay){try{document.querySelectorAll('details.fold[open]').forEach(d=>{d.open=false;});
+  if(guide)clearInterval(guide.h);guide=null;
+  if(!replay&&!guideTarget('more')&&!guideTarget('next'))return;
+  guide={replay:replay,step:'',h:setInterval(guidePlace,500)};guideGo(0);}catch(e){guideEnd();}}
+function guideOn(e){if(!guide)return;
+ try{const i=GUIDE_STEPS.indexOf(guide.step);
+  if(e==='opened'&&i<2)guideGo(2);else if(!guideTarget(guide.step))guideGo(i);else guidePlace();}catch(x){guideEnd();}}
+document.getElementById('guide-next').onclick=()=>{if(guide)try{guideGo(GUIDE_STEPS.indexOf(guide.step)+1);}catch(e){guideEnd();}};
+document.getElementById('guide-skip').onclick=guideEnd;
+if(G.auto)guideStart(false);
 </script></body></html>`
 
 // message renders a one-message page: title (plain text) names the tab,
@@ -218,10 +265,10 @@ type pageParams struct {
 	Noun          string // the platform's default kind, escaped by deskPage
 	Seconds       int    // the per-item timer, TimerMinutes*60
 	NoteCodes     []string
-	ProgressHTML  string // already HTML
-	Next          string // already HTML: the next action (nextAction), in the sidebar's head; "" without items
-	Body          string // already HTML
-	OpenHelp      bool
+	ProgressHTML  string         // already HTML
+	Next          string         // already HTML: the next action (nextAction), in the sidebar's head; "" without items
+	Body          string         // already HTML
+	Guide         bool           // the guide starts by itself: the collector has never opened an item
 	Footer        *string        // the footer's inner HTML (uploadFooter); nil hides the footer
 	FooterWarn    bool           // the footer warns: something captured is not in 4CAT yet
 	IdleMinutes   int            // N of the stopped banner, desk_idle_seconds/60 rounded down, at least 1
@@ -255,7 +302,7 @@ func deskPage(p pageParams) string {
 		links = append(links, navLink{Label: "Admin", Href: "/desk/admin/"})
 	}
 	count := `<div class="count">` + p.ProgressHTML + workedHTML(p.Worked, p.Now) + `</div>`
-	folds := earlierDaysHTML(p.Worked, p.Now) + howToHTML(noun, p.Seconds > 0, p.OpenHelp)
+	folds := earlierDaysHTML(p.Worked, p.Now) + howToHTML(noun, p.Seconds > 0)
 	subtitle := platformLine(p.PlatformLabel) + " · " + html.EscapeString(p.User)
 	return strings.NewReplacer(
 		"%%TITLE%%", html.EscapeString(p.PlatformLabel)+" desk — "+html.EscapeString(p.User),
@@ -266,6 +313,7 @@ func deskPage(p pageParams) string {
 		"%%FOOTER%%", footer,
 		"%%SECONDS%%", strconv.Itoa(p.Seconds),
 		"%%NOTE_CODES%%", noteCodes,
+		"%%GUIDE%%", guideJSON(noun, p.Guide),
 		"%%IDLE_MINUTES%%", strconv.Itoa(max(p.IdleMinutes, 1)),
 		"%%CONTACT%%", html.EscapeString(p.Contact),
 		"%%RELOAD_CONTINUE%%", actionLink("/desk/", "Reload to continue"),
@@ -274,22 +322,53 @@ func deskPage(p pageParams) string {
 }
 
 // howToHTML is the header's How to collect fold: the four steps down one
-// line, numbered in discs, in a panel under the header. noun is already
-// escaped; open opens the fold (a student with nothing claimed yet). The
-// folds share a name, so opening one closes the other.
-func howToHTML(noun string, timer, open bool) string {
-	attr, timerHelp := "", ""
-	if open {
-		attr = " open"
-	}
+// line, numbered in discs, in a panel under the header, and the button that
+// starts the guide again. noun is already escaped. The fold never opens by
+// itself: a collector who is new gets the guide, and an open panel would
+// cover the queue. The folds share a name, so opening one closes the other.
+func howToHTML(noun string, timer bool) string {
+	timerHelp := ""
 	if timer {
 		timerHelp = ", or until the timer reaches 0:00"
 	}
-	return `<li><details class="fold" name="fold"` + attr + `><summary class="site-nav__link">How to collect</summary>` +
+	return `<li><details class="fold" name="fold"><summary class="site-nav__link">How to collect</summary>` +
 		`<div class="panel"><ol class="howto">` +
 		`<li>Click <b>Open next ` + noun + `</b>, or a ` + noun + ` in the list. It opens in the browser on the left.</li>` +
 		`<li>Open the comments and scroll until no more load` + timerHelp + `. Don't open replies.</li>` +
 		`<li>If the ` + noun + ` won't show or the comments won't load, pick what happened under <b>Report a problem</b>.</li>` +
 		`<li>When every ` + noun + ` is done, get more.</li>` +
-		`</ol></div></details></li>`
+		`</ol><button class="guide__again" onclick="guideStart(true)">Show me around</button></div></details></li>`
+}
+
+// guideIcon is the speech bubble the guide shows for a platform's comments
+// button, which the page cannot point at inside the streamed browser.
+const guideIcon = `<svg class="guide__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H10l-5 4v-4H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>`
+
+// guideJSON is the script's G: whether the guide starts by itself, and the
+// hint of each step as HTML. noun is already escaped. encoding/json escapes
+// <, > and &, so the value is safe inside the script element.
+//
+// The guide walks along with a collector's first item. Each hint sits beside
+// what to use next and is ringed: getting items, opening the first, the
+// browser's pane (the comments button is drawn, since the page cannot see
+// into the streamed browser), reporting a problem, and the Zeeschuimer
+// button in the browser's toolbar, which is at a fixed place from the pane's
+// top right corner. The first two hints of a walk move on when the collector
+// does the thing; started again from How to collect, every hint has Next.
+func guideJSON(noun string, auto bool) string {
+	g := struct {
+		Auto  bool              `json:"auto"`
+		Steps map[string]string `json:"steps"`
+	}{auto, map[string]string{
+		"more":    "Start here: get your first " + noun + "s.",
+		"next":    "Open the next " + noun + " here. It opens in the browser on the left.",
+		"screen":  "Open the comments in the browser: look for the speech-bubble button " + guideIcon + " beside the " + noun + ". Then scroll the comments until no more load. Don't open replies.",
+		"problem": "If the " + noun + " won't show or the comments won't load, pick what happened here.",
+		"upload":  "Before you leave, send what you captured to 4CAT: click <b>Z</b> here, in the browser's toolbar. The note at the bottom of your queue has the steps.",
+	}}
+	b, err := json.Marshal(g)
+	if err != nil {
+		return `{"auto":false,"steps":{}}`
+	}
+	return string(b)
 }
