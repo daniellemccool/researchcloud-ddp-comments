@@ -1226,3 +1226,15 @@ func TestStopButtonOnlyOnRunning(t *testing.T) {
 		t.Errorf("a row with an unknown session has a Stop button:\n%s", b)
 	}
 }
+
+// The admin page links back to the collector page by its name, Your queue,
+// and marks Admin as the page it is.
+func TestAdminHeaderLinks(t *testing.T) {
+	srv, _ := newAdminServer(t)
+	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
+	want := `<li><a class="site-nav__link" href="/desk/">Your queue</a></li>` +
+		`<li><a class="site-nav__link is-current" href="/desk/admin/" aria-current="page">Admin</a></li>`
+	if !strings.Contains(b, want) {
+		t.Errorf("admin page lacks the header links %q", want)
+	}
+}

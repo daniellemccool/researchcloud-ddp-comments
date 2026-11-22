@@ -88,7 +88,7 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 	})
 	for _, want := range []string{
 		"<title>TestTube desk — alice</title>",
-		`<h1 class="side__title">Your videos</h1>`, // the sidebar's heading follows the noun
+		`<h1 class="side__title">Your queue</h1>`,
 		`<span class="site-header__subtitle">TestTube comment collection · alice</span>`,
 		`<details class="fold" name="fold" open><summary class="site-nav__link">How to collect</summary>`,
 		", or until the timer reaches 0:00",
@@ -314,8 +314,8 @@ func TestRowNamesItsProblemControl(t *testing.T) {
 func TestDeskPageFollowsTheNoun(t *testing.T) {
 	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "post", Seconds: 60, Next: nextAction("post", false)})
 	for _, want := range []string{
-		`<h1 class="side__title">Your posts</h1>`,
-		`<a class="site-nav__link is-current" href="/desk/" aria-current="page">Your posts</a>`,
+		`<h1 class="side__title">Your queue</h1>`, // the page's name is the same on every platform
+		`<a class="site-nav__link is-current" href="/desk/" aria-current="page">Your queue</a>`,
 		`<span class="next__label">Open next post</span>`,
 		`Click <b>Open next post</b>, or a post in the list.`,
 		`If the post won't show or the comments won't load, pick what happened under <b>Report a problem</b>.`,
@@ -343,7 +343,7 @@ func TestDeskPageWithNothingClaimed(t *testing.T) {
 			t.Errorf("page with nothing claimed has %q", gone)
 		}
 	}
-	for _, want := range []string{`id="getmore"`, `<div class="side__head"><h1 class="side__title">Your videos</h1></div>`, `<div class="count"><span class="count__time"><span id="worked">`} {
+	for _, want := range []string{`id="getmore"`, `<div class="side__head"><h1 class="side__title">Your queue</h1></div>`, `<div class="count"><span class="count__time"><span id="worked">`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("page with nothing claimed lacks %q", want)
 		}

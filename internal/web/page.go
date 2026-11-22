@@ -25,8 +25,8 @@ import (
 
 // PAGE is the two-pane desk page: the header with the count and the two
 // folds (Earlier days, How to collect), then the sidebar beside the streamed
-// browser. The sidebar is a route: its head names the items and holds the
-// next action, the queue runs down a line with a node per item, and the
+// browser. The sidebar is a route: its head names it (Your queue, the page's
+// name on every platform) and holds the next action, the queue runs down a line with a node per item, and the
 // upload note closes it. A stopped or signed-out desk fills the browser's
 // pane with its message. %%NAME%% slots are substituted by deskPage.
 //
@@ -43,7 +43,7 @@ const PAGE = `<!doctype html>
 %%HEADER%%
 <div class="panes">
 <aside class="side">
-<div class="side__head"><h1 class="side__title">Your %%NOUN%%s</h1>%%NEXT%%</div>
+<div class="side__head"><h1 class="side__title">Your queue</h1>%%NEXT%%</div>
 <div class="side__list">%%BODY%%</div>
 %%FOOTER%%</aside>
 <div class="screen-slot">
@@ -232,7 +232,7 @@ func deskPage(p pageParams) string {
 		noteCodes = strings.ReplaceAll(string(codes), "<", `\u003c`)
 	}
 	noun := html.EscapeString(p.Noun)
-	links := []navLink{{Label: "Your " + p.Noun + "s", Href: "/desk/", Current: true}}
+	links := []navLink{{Label: "Your queue", Href: "/desk/", Current: true}}
 	if p.Admin {
 		links = append(links, navLink{Label: "Admin", Href: "/desk/admin/"})
 	}
@@ -243,7 +243,6 @@ func deskPage(p pageParams) string {
 		"%%TITLE%%", html.EscapeString(p.PlatformLabel)+" desk — "+html.EscapeString(p.User),
 		"%%CSS%%", pageCSS,
 		"%%HEADER%%", headerHTML(subtitle, count, links, folds, true),
-		"%%NOUN%%", noun,
 		"%%NEXT%%", p.Next,
 		"%%BODY%%", p.Body,
 		"%%FOOTER%%", footer,

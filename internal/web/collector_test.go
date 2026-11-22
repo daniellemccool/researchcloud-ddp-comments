@@ -458,7 +458,7 @@ func TestHomeSetupFailedHealsOnNextVisit(t *testing.T) {
 	if strings.Contains(b2, "Setup failed") {
 		t.Errorf("second visit still shows the failure")
 	}
-	if !strings.Contains(b2, `<h1 class="side__title">Your videos</h1>`) {
+	if !strings.Contains(b2, `<h1 class="side__title">Your queue</h1>`) {
 		t.Errorf("second visit did not render the collector page")
 	}
 	if n := e.sess.startCount(); n != 1 {

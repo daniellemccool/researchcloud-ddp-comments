@@ -46,7 +46,7 @@ func (a *adminHandler) shell(title, inner, notice string) string {
 		box = `<p class="notice" role="status">` + html.EscapeString(notice) + `</p>`
 	}
 	links := []navLink{
-		{Label: "Your " + a.kinds.Default() + "s", Href: "/desk/"},
+		{Label: "Your queue", Href: "/desk/"},
 		{Label: "Admin", Href: "/desk/admin/", Current: true},
 	}
 	return pageTop(title, "", platformLine(a.platform.Label), links, title) + box + inner + pageBottom
