@@ -195,19 +195,32 @@ func TestAssetsOpenToAnySignedInMember(t *testing.T) {
 	for _, path := range []string{
 		"/desk/", "/desk/status", "/desk/admin/", "/desk/vnc/", "/fourcat/", "/desk/assets", "/desk/assets/", "/desk/assets/fonts/", "/desk/assetsx/zeeschuimer-64.png",
 		"/desk/assets/../status", "/desk/assets/../admin/", "/desk/assets/%2e%2e/status", "/desk/assets/fonts/../../status",
+		"/desk/assets//zeeschuimer-64.png", "/desk//assets/zeeschuimer-64.png", "/desk/assets/fonts//OFL-NunitoSans.txt",
 	} {
 		rec := do(t, srv, "someone", nobody, testGate, path)
 		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "You are not registered for the desk") {
 			t.Errorf("%s without a standing: status %d, want the 403 page", path, rec.Code)
 		}
 	}
-	// Only a GET: nothing is posted to the files.
-	post := httptest.NewRequest(http.MethodPost, "/desk/assets/zeeschuimer-64.png", nil)
-	access.SetTestHeaders(post, "someone", nobody, testGate)
+	// Only a GET: no other method reaches the files.
+	for _, method := range []string{http.MethodPost, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodOptions} {
+		req := httptest.NewRequest(method, "/desk/assets/zeeschuimer-64.png", nil)
+		access.SetTestHeaders(req, "someone", nobody, testGate)
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s of a file without a standing: status %d, want 403", method, rec.Code)
+		}
+	}
+	// The decoded path decides, never the raw one: a request whose raw path
+	// names a file while its path is another page gets the 403 page.
+	odd := httptest.NewRequest(http.MethodGet, "/desk/status", nil)
+	odd.URL.RawPath = "/desk/assets/zeeschuimer-64.png"
+	access.SetTestHeaders(odd, "someone", nobody, testGate)
 	rec := httptest.NewRecorder()
-	srv.Handler.ServeHTTP(rec, post)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("POST to a file without a standing: status %d, want 403", rec.Code)
+	srv.Handler.ServeHTTP(rec, odd)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "You are not registered for the desk") {
+		t.Errorf("raw path names a file, path is /desk/status: status %d, want the 403 page", rec.Code)
 	}
 	// The gate secret still comes first (ADR-0003).
 	if rec := do(t, srv, "someone", nobody, "wrong", "/desk/assets/zeeschuimer-64.png"); rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "PNG") {
