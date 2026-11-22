@@ -23,9 +23,9 @@ import (
 // pool note, say) is never scanned for placeholders again, exactly as the
 // Python re.sub.
 //
-// Values from a platform definition (labels, upload_hint) are trusted HTML;
-// everything a user, the pool or the log supplies is escaped with
-// html.EscapeString.
+// Values from a platform definition (labels, upload_hint, comments_hint) are
+// trusted HTML; everything a user, the pool or the log supplies is escaped
+// with html.EscapeString.
 
 // PAGE is the two-pane desk page: the header with the count and the two
 // folds (Earlier days, How to collect), then the sidebar and the streamed
@@ -269,6 +269,7 @@ type pageParams struct {
 	Next          string         // already HTML: the next action (nextAction), in the sidebar's head; "" without items
 	Body          string         // already HTML
 	Guide         bool           // the guide starts by itself: the collector has never opened an item
+	CommentsHint  string         // the platform's comments_hint, trusted HTML; "" for the plain instruction
 	Footer        *string        // the footer's inner HTML (uploadFooter); nil hides the footer
 	FooterWarn    bool           // the footer warns: something captured is not in 4CAT yet
 	IdleMinutes   int            // N of the stopped banner, desk_idle_seconds/60 rounded down, at least 1
@@ -313,7 +314,7 @@ func deskPage(p pageParams) string {
 		"%%FOOTER%%", footer,
 		"%%SECONDS%%", strconv.Itoa(p.Seconds),
 		"%%NOTE_CODES%%", noteCodes,
-		"%%GUIDE%%", guideJSON(noun, p.Guide),
+		"%%GUIDE%%", guideJSON(noun, p.CommentsHint, p.Guide),
 		"%%IDLE_MINUTES%%", strconv.Itoa(max(p.IdleMinutes, 1)),
 		"%%CONTACT%%", html.EscapeString(p.Contact),
 		"%%RELOAD_CONTINUE%%", actionLink("/desk/", "Reload to continue"),
@@ -340,31 +341,32 @@ func howToHTML(noun string, timer bool) string {
 		`</ol><button class="guide__again" onclick="guideStart(true)">Show me around</button></div></details></li>`
 }
 
-// guideIcon is the speech bubble the guide shows for a platform's comments
-// button, which the page cannot point at inside the streamed browser.
-const guideIcon = `<svg class="guide__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H10l-5 4v-4H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>`
-
 // guideJSON is the script's G: whether the guide starts by itself, and the
-// hint of each step as HTML. noun is already escaped. encoding/json escapes
+// hint of each step as HTML. noun is already escaped; commentsHint is the
+// platform's, trusted HTML. encoding/json escapes
 // <, > and &, so the value is safe inside the script element.
 //
 // The guide walks along with a collector's first item. Each hint sits beside
-// what to use next and is ringed: getting items, opening the first, the
-// browser's pane (the comments button is drawn, since the page cannot see
-// into the streamed browser), reporting a problem, and the Zeeschuimer
+// what to use next and is ringed: getting items, opening the next, the
+// browser's pane (the page cannot see into the streamed browser, so where the
+// comments open is said in words, the platform's comments_hint when it has
+// one), reporting a problem, and the Zeeschuimer
 // button in the browser's toolbar, which is at a fixed place from the pane's
 // top right corner. The first two hints of a walk move on when the collector
 // does the thing; started again from How to collect, every hint has Next.
-func guideJSON(noun string, auto bool) string {
+func guideJSON(noun, commentsHint string, auto bool) string {
+	if commentsHint == "" {
+		commentsHint = "Open the comments in the browser."
+	}
 	g := struct {
 		Auto  bool              `json:"auto"`
 		Steps map[string]string `json:"steps"`
 	}{auto, map[string]string{
 		"more":    "Start here: get your first " + noun + "s.",
 		"next":    "Open the next " + noun + " here. It opens in the browser on the left.",
-		"screen":  "Open the comments in the browser: look for the speech-bubble button " + guideIcon + " beside the " + noun + ". Then scroll the comments until no more load. Don't open replies.",
+		"screen":  commentsHint + " Then scroll the comments until no more load. Don't open replies.",
 		"problem": "If the " + noun + " won't show or the comments won't load, pick what happened here.",
-		"upload":  "Before you leave, send what you captured to 4CAT: click <b>Z</b> here, in the browser's toolbar. The note at the bottom of your queue has the steps.",
+		"upload":  "When you're done for the day, send what you captured to 4CAT: click <b>Z</b> here, in the browser's toolbar. The note at the bottom of your queue has the steps.",
 	}}
 	b, err := json.Marshal(g)
 	if err != nil {

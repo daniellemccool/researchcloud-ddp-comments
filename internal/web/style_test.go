@@ -395,7 +395,7 @@ func TestStylesheetDrawsTheGuide(t *testing.T) {
 	for _, want := range []string{
 		".guide { position:fixed;", ".guide__ring { position:fixed;", "pointer-events:none;",
 		// hidden wins over the display the look gives a button
-		".guide[hidden], .guide__ring[hidden], .guide [hidden] { display:none; }", ".guide__skip {", ".guide__again {", ".guide__icon {",
+		".guide[hidden], .guide__ring[hidden], .guide [hidden] { display:none; }", ".guide__skip {", ".guide__again {",
 	} {
 		if !strings.Contains(pageCSS, want) {
 			t.Errorf("stylesheet lacks %q", want)

@@ -106,3 +106,15 @@ func TestTrailingContentRefused(t *testing.T) {
 		t.Fatal("Load accepted content after the JSON object")
 	}
 }
+
+// TikTok's page opens on its You may like tab; the guide sends a collector to
+// the Comments tab beside it (seen on the study desk, 2026-11-22).
+func TestTikTokCommentsHint(t *testing.T) {
+	p, err := Load(tiktokPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Click <b>Comments</b>, next to <b>You may like</b> at the top right of the browser."; p.CommentsHint != want {
+		t.Errorf("CommentsHint = %q, want %q", p.CommentsHint, want)
+	}
+}

@@ -269,7 +269,7 @@ func TestWhen(t *testing.T) {
 // platform's own HTML and goes in as it is.
 func TestUploadFooterStates(t *testing.T) {
 	const hint = "upload <i>both</i> to 4CAT"
-	const plain = "Before you leave: click <b>Z</b> in the browser's toolbar, upload <i>both</i> to 4CAT."
+	const plain = "When you're done for the day: click <b>Z</b> in the browser's toolbar, upload <i>both</i> to 4CAT."
 	now := tueHalfPastFour
 	at := time.Date(2026, 11, 17, 13, 2, 0, 0, time.UTC) // 14:02 in Amsterdam
 	for _, c := range []struct {
@@ -317,7 +317,7 @@ func footerEnv(t *testing.T, reader *fakeUploads) *collectorEnv {
 }
 
 const (
-	plainFooter = "Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT."
+	plainFooter = "When you're done for the day: click <b>Z</b> in the browser's toolbar, upload them to 4CAT."
 	dueFooter   = `<span class="alert">What you captured since 09:40 is not in 4CAT yet.</span> ` + plainFooter
 	doneFooter  = "Uploaded to 4CAT at 09:45."
 )

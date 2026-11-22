@@ -1,6 +1,7 @@
 {"name": "tiktok", "label": "TikTok",
  "zeeschuimer_modules": ["tiktok-comments", "tiktok"],
  "upload_hint": "press <b>to 4CAT</b> on <i>TikTok (comments)</i>, then on <i>TikTok</i>, and wait until both say they're done",
+ "comments_hint": "Click <b>Comments</b>, next to <b>You may like</b> at the top right of the browser.",
  "item_kinds": {"video": {"url": "https://www.tiktok.com/@x/video/{id}/", "id": "^[0-9]+$"}},
  "default_kind": "video", "hosts": ["tiktok.com"],
  "open_pattern": "^/@[^/]+/(video|photo)/(?P<id>[0-9]+)",

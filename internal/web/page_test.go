@@ -77,7 +77,7 @@ func TestProgress(t *testing.T) {
 }
 
 func TestDeskPageSlotsAndOnePass(t *testing.T) {
-	footer := "Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT."
+	footer := "When you're done for the day: click <b>Z</b> in the browser's toolbar, upload them to 4CAT."
 	out := deskPage(pageParams{
 		User:          "alice",
 		PlatformLabel: "TestTube",
@@ -96,7 +96,7 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 		", or until the timer reaches 0:00",
 		"const SECONDS=120,NOTE_CODES=[\"OTHER\"]",
 		`<p>%%USER%% stays literal</p>`, // one pass: substituted text is never rescanned
-		`<footer id="upload" class="upload">Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>`,
+		`<footer id="upload" class="upload">When you're done for the day: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>`,
 		`fetch('status')`,
 		`f.src='/desk/vnc/?resize=remote'`, // the remote browser follows the frame's size
 	} {
@@ -406,9 +406,10 @@ func TestDeskPageCarriesTheGuide(t *testing.T) {
 		// the hints follow the platform's noun
 		`"more":"Start here: get your first clips."`,
 		`"next":"Open the next clip here. It opens in the browser on the left."`,
-		`"screen":"Open the comments in the browser:`,
+		// without a hint from the platform, the plain instruction
+		`"screen":"Open the comments in the browser. Then scroll the comments until no more load. Don't open replies."`,
 		`"problem":"If the clip won't show or the comments won't load, pick what happened here."`,
-		`"upload":"Before you leave, send what you captured to 4CAT:`,
+		`"upload":"When you're done for the day, send what you captured to 4CAT:`,
 		// How to collect starts it again
 		`<button class="guide__again" onclick="guideStart(true)">Show me around</button>`,
 		// the guide follows what the collector does
@@ -422,5 +423,22 @@ func TestDeskPageCarriesTheGuide(t *testing.T) {
 	}
 	if strings.Contains(first, `name="fold" open>`) {
 		t.Errorf("a fold opens by itself on a first-time page")
+	}
+}
+
+// Where a platform's comments open is the platform's to say: its
+// comments_hint (trusted HTML, as upload_hint is) leads the hint at the
+// browser's pane. The page draws no picture of a button to look for.
+func TestGuideUsesThePlatformsCommentsHint(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "clip",
+		CommentsHint: "Click <b>Comments</b>, next to <b>You may like</b>."})
+	want := `"screen":"Click \u003cb\u003eComments\u003c/b\u003e, next to \u003cb\u003eYou may like\u003c/b\u003e. Then scroll the comments until no more load. Don't open replies."`
+	if !strings.Contains(out, want) {
+		t.Errorf("page lacks %q", want)
+	}
+	for _, gone := range []string{"speech-bubble", "guide__icon"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("page still has %q", gone)
+		}
 	}
 }

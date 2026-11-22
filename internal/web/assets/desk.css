@@ -252,7 +252,6 @@ body:has(#stopped:not([hidden])) .side, body:has(#denied:not([hidden])) .side { 
                text-decoration:underline dotted; text-underline-offset:3px; }
 .guide__ring { position:fixed; z-index:59; box-sizing:border-box; pointer-events:none; border:2px solid var(--blue); border-radius:6px;
                box-shadow:0 0 0 4px var(--blue-tint); }
-.guide__icon { display:inline-block; width:20px; height:20px; vertical-align:-5px; }
 .guide__again { margin:var(--space-8) 0 0 44px; padding:0; border:0; background:none; cursor:pointer; font:var(--text-link); color:var(--heading);
                 text-decoration:underline dotted var(--sky); text-decoration-thickness:var(--line-underline); text-underline-offset:var(--line-underline-offset-title); }
 

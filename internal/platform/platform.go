@@ -60,6 +60,7 @@ type Platform struct {
 	Name, Label        string
 	ZeeschuimerModules []string
 	UploadHint         string
+	CommentsHint       string // optional, trusted HTML: where this platform's comments open, for the guide
 	ItemKinds          map[string]ItemKind
 	DefaultKind        string
 	Hosts              []string
@@ -111,6 +112,7 @@ type rawPlatform struct {
 	Label              string                 `json:"label"`
 	ZeeschuimerModules []string               `json:"zeeschuimer_modules"`
 	UploadHint         string                 `json:"upload_hint"`
+	CommentsHint       string                 `json:"comments_hint"`
 	ItemKinds          map[string]rawItemKind `json:"item_kinds"`
 	DefaultKind        string                 `json:"default_kind"`
 	Hosts              []string               `json:"hosts"`
@@ -156,6 +158,7 @@ func build(raw rawPlatform) (*Platform, error) {
 		Label:              raw.Label,
 		ZeeschuimerModules: raw.ZeeschuimerModules,
 		UploadHint:         raw.UploadHint,
+		CommentsHint:       raw.CommentsHint,
 		ItemKinds:          make(map[string]ItemKind, len(raw.ItemKinds)),
 		DefaultKind:        raw.DefaultKind,
 		Hosts:              raw.Hosts,

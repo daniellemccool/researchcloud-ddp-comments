@@ -179,6 +179,7 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 		Next:          q.Next,
 		Body:          q.Body,
 		Guide:         len(view.Opened) == 0,
+		CommentsHint:  h.platform.CommentsHint,
 		Footer:        footer,
 		FooterWarn:    footerWarn,
 		IdleMinutes:   h.cfg.IdleSeconds / 60,
