@@ -458,7 +458,7 @@ func TestHomeSetupFailedHealsOnNextVisit(t *testing.T) {
 	if strings.Contains(b2, "Setup failed") {
 		t.Errorf("second visit still shows the failure")
 	}
-	if !strings.Contains(b2, "<b>Your videos</b>") {
+	if !strings.Contains(b2, "<h1>Your videos</h1>") {
 		t.Errorf("second visit did not render the collector page")
 	}
 	if n := e.sess.startCount(); n != 1 {
@@ -684,9 +684,9 @@ func TestHomePageProblemMessageAndDisabledNext(t *testing.T) {
 	}
 	b := rec.Body.String()
 	for _, want := range []string{
-		`<div class="msg warn">— Other: some &lt;note&gt;</div>`, // the problem message, escaped
+		`<div class="msg warn">Other: some &lt;note&gt;</div>`, // the problem message, escaped
 		`data-state="problem"`,
-		`<button id="next" class="next" onclick="openNext()" disabled>Open next video</button>`, // all shown done
+		`<button id="next" class="next" onclick="openNext()" disabled>Open next video` + goMark + `</button>`, // all shown done
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q", want)
@@ -739,7 +739,7 @@ func TestAdminGetsCollectorPageWithAdminLink(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("second visit: status = %d, want 200", rec2.Code)
 	}
-	if b := rec2.Body.String(); !strings.Contains(b, `<a href="/desk/admin/">admin</a>`) {
+	if b := rec2.Body.String(); !strings.Contains(b, `<li class="site-nav__item"><a href="/desk/admin/">Admin</a></li>`) {
 		t.Errorf("admin page lacks the admin link")
 	}
 }

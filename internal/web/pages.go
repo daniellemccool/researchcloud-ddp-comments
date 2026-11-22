@@ -19,6 +19,9 @@ type pageData struct {
 	User     string
 	Platform string
 	Detail   string
+
+	Top    template.HTML // set by render: the head, the header and the band with Title (pageTop)
+	Bottom template.HTML // set by render: pageBottom
 }
 
 // pages holds the parsed HTML templates (no JavaScript, plain HTML).
@@ -38,7 +41,15 @@ func mustLoadPages() *pages {
 func (p *pages) render(w http.ResponseWriter, status int, name string, d pageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	if err := p.t.ExecuteTemplate(w, name+".html", d); err != nil {
+	if err := p.t.ExecuteTemplate(w, name+".html", chrome(d)); err != nil {
 		log.Printf("web: render %s: %v", name, err)
 	}
+}
+
+// chrome fills in the page's top and bottom: Title on the band, and the
+// platform's line under the desk's name.
+func chrome(d pageData) pageData {
+	d.Top = template.HTML(pageTop(d.Title, "", platformLine(d.Platform), nil, d.Title))
+	d.Bottom = template.HTML(pageBottom)
+	return d
 }

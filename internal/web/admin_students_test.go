@@ -182,10 +182,10 @@ func TestAdminStudentsTable(t *testing.T) {
 	inOrder(t, b,
 		`<h2>Collection: TestTube</h2>`,
 		`<h2>Students</h2><table><tr><th>Name</th><th>This week</th><th>Total</th><th>Uploaded</th><th>Session</th></tr>`,
-		`<tr><td><a href="/results/?user=erin">erin</a></td><td>0:00</td><td>0:00</td><td>nothing captured</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button>Stop</button></form></td></tr>`,
-		`<tr><td><a href="/results/?user=alice">alice</a></td><td>0:10</td><td>0:15</td><td>yes, 09:30</td><td>running, input 7 min ago <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop</button></form></td></tr>`,
+		`<tr><td><a href="/results/?user=erin">erin</a></td><td>0:00</td><td>0:00</td><td>nothing captured</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button>Stop`+goMark+`</button></form></td></tr>`,
+		`<tr><td><a href="/results/?user=alice">alice</a></td><td>0:10</td><td>0:15</td><td>yes, 09:30</td><td>running, input 7 min ago <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop`+goMark+`</button></form></td></tr>`,
 		`<tr><td><a href="/results/?user=carol">carol</a></td><td>0:00</td><td>0:00</td><td>nothing captured</td><td>at template (template missing)</td></tr>`,
-		`<tr><td><a href="/results/?user=bob">bob</a></td><td>0:00</td><td>0:05</td><td>no, captures since Mon 14:00</td><td>stopped</td></tr>`,
+		`<tr><td><a href="/results/?user=bob">bob</a></td><td>0:00</td><td>0:05</td><td><span class="late">no, captures since Mon 14:00</span></td><td>stopped</td></tr>`,
 		`</table>`,
 		`<h2>Problems</h2>`,
 	)
@@ -305,8 +305,8 @@ func TestAdminMemberLists(t *testing.T) {
 	inOrder(t, b,
 		`<h2>Students</h2>`,
 		`</table>`,
-		`<p>Hold the collector role, never claimed: chris, dewi</p>`,
-		`<p>Worked here, no longer have access: emma (removed 12 Nov), finn (role removed), ivan (removed), jo (removed)</p>`,
+		`<div><dt>Hold the collector role, never claimed</dt><dd>chris, dewi</dd></div>`,
+		`<div><dt>Worked here, no longer have access</dt><dd>emma (removed 12 Nov), finn (role removed), ivan (removed), jo (removed)</dd></div>`,
 		`<h2>Problems</h2>`,
 	)
 
@@ -318,8 +318,8 @@ func TestAdminMemberLists(t *testing.T) {
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	inOrder(t, b,
 		`<h2>Students</h2>`,
-		`<p>Hold the collector role, never claimed: none</p>`,
-		`<p>Worked here, no longer have access: none</p>`,
+		`<div><dt>Hold the collector role, never claimed</dt><dd>none</dd></div>`,
+		`<div><dt>Worked here, no longer have access</dt><dd>none</dd></div>`,
 		`<h2>Problems</h2>`,
 	)
 
@@ -339,8 +339,8 @@ func TestAdminListsUnknownWithoutPoll(t *testing.T) {
 	appendLog(t, root, desklog.Event{T: monAfternoon, User: "emma", Action: "claim", Kind: "video", ID: "1"})
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	for _, want := range []string{
-		`<p>Hold the collector role, never claimed: unknown: no member list yet</p>`,
-		`<p>Worked here, no longer have access: unknown: no member list yet</p>`,
+		`<div><dt>Hold the collector role, never claimed</dt><dd>unknown: no member list yet</dd></div>`,
+		`<div><dt>Worked here, no longer have access</dt><dd>unknown: no member list yet</dd></div>`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q:\n%s", want, b)
@@ -365,8 +365,8 @@ func TestAdminStudentsEscapes(t *testing.T) {
 	for _, want := range []string{
 		`<tr><td><a href="/results/?user=x%22%3Cy%3E%26z">x&#34;&lt;y&gt;&amp;z</a></td>`,
 		`<td>at registry (&lt;b&gt;bad&lt;/b&gt;)</td>`,
-		`<p>Hold the collector role, never claimed: &lt;m&gt;</p>`,
-		`<p>Worked here, no longer have access: carol (removed), x&#34;&lt;y&gt;&amp;z (removed)</p>`,
+		`<div><dt>Hold the collector role, never claimed</dt><dd>&lt;m&gt;</dd></div>`,
+		`<div><dt>Worked here, no longer have access</dt><dd>carol (removed), x&#34;&lt;y&gt;&amp;z (removed)</dd></div>`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q:\n%s", want, b)
@@ -394,7 +394,7 @@ func TestAdminStudentsRunningWithoutInput(t *testing.T) {
 		d.AdminSessions = sess
 	})
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<tr><td>erin</td><td>0:00</td><td>0:00</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button>Stop</button></form></td></tr>`; !strings.Contains(b, want) {
+	if want := `<tr><td>erin</td><td>0:00</td><td>0:00</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="erin"><button>Stop` + goMark + `</button></form></td></tr>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 	if strings.Contains(b, "running, input") {

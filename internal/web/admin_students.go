@@ -166,7 +166,12 @@ func (a *adminHandler) studentsTable(ctx context.Context, evs []desklog.Event, l
 		}
 		b.WriteString(`<tr><td>` + a.nameCell(s.user) + `</td><td>` + week + `</td><td>` + total + `</td>`)
 		if a.cfg.FourcatEnabled {
-			b.WriteString(`<td>` + html.EscapeString(uploadCell(a.uploads.Of(ctx, s.user), now)) + `</td>`)
+			st := a.uploads.Of(ctx, s.user)
+			cell := html.EscapeString(uploadCell(st, now))
+			if st.Kind == uploadDue {
+				cell = `<span class="late">` + cell + `</span>` // captures not in 4CAT yet: the coral node
+			}
+			b.WriteString(`<td>` + cell + `</td>`)
 		}
 		b.WriteString(`<td>` + html.EscapeString(s.session) + stopButton(s) + `</td></tr>`)
 	}
@@ -182,7 +187,7 @@ func stopButton(s student) string {
 		return ""
 	}
 	return ` <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="` +
-		html.EscapeString(s.user) + `"><button>Stop</button></form>`
+		html.EscapeString(s.user) + `"><button>Stop` + goMark + `</button></form>`
 }
 
 // nameCell is the person's name, linked to /results/?user=<name> when 4CAT
@@ -269,6 +274,6 @@ func (a *adminHandler) memberLists(evs []desklog.Event, logKnown bool, sd seatDa
 			lost = strings.Join(names, ", ")
 		}
 	}
-	return `<p>Hold the collector role, never claimed: ` + never + `</p>` +
-		`<p>Worked here, no longer have access: ` + lost + `</p>`
+	return `<dl class="facts"><div><dt>Hold the collector role, never claimed</dt><dd>` + never + `</dd></div>` +
+		`<div><dt>Worked here, no longer have access</dt><dd>` + lost + `</dd></div></dl>`
 }

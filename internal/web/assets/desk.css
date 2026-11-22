@@ -1,0 +1,318 @@
+/* The comment desk, in the datadonation.eu look.
+
+   The look is D3I's design system 2 ("datadonation.eu 2026"): a white page,
+   dark ink, blue as the one working colour, Nunito Sans for everything read,
+   a condensed serif for headings, square corners, hairlines, and lines that
+   start and end at nodes. Its brand book is docs/design-system-2/project/README.md
+   in the d3i-website.github.io repository.
+
+   tokens.css, fonts/ and network/ beside this file are verbatim copies from
+   that system (docs/design-system-2/project/, as of 1eef4e3, 2026-11-21); the
+   two OFL texts come with the fonts. Nothing in them is edited here; the page
+   layer (style.go) points tokens.css's font URLs at /desk/assets/fonts/.
+
+   The header, the band, the type, the tables, the notices and the actions
+   follow ddp-inspector's public/assets/style.css, which draws what the
+   system's React components draw (SiteHeader, ActionLink, Callout) in plain
+   markup. The desk's own parts: the collector page's two panes, the small
+   band at the head of its sidebar with the next item in the cutout under
+   it, the queue on a sky line with a node per item, and the header's count
+   and folds. The mock-ups are the claude.ai canvas "Comment desk restyle". */
+
+*, *::before, *::after { box-sizing:border-box; }
+html { -webkit-text-size-adjust:none; text-size-adjust:none; }
+body { margin:0; background:var(--surface); color:var(--text); font:var(--text-body); -webkit-font-smoothing:antialiased; }
+:root { --edge:var(--gutter); }
+@media (max-width:599px) { :root { --edge:var(--space-16); } }
+
+/* --- type and links ------------------------------------------------------ */
+h1, h2, h3 { color:var(--heading); letter-spacing:0; overflow-wrap:break-word; }
+h1 { margin:0; font:420 2rem/1.08 var(--font-serif); }
+@media (min-width:768px) { h1 { font-size:2.4rem; } }
+h2 { margin:var(--space-48) 0 var(--space-12); font:420 1.6875rem/1.2 var(--font-serif); }
+p { margin:var(--space-8) 0; }
+b, strong { font-weight:800; color:var(--heading); }
+a { color:inherit; font-weight:700; text-decoration:underline dotted var(--sky);
+    text-decoration-thickness:var(--line-underline); text-underline-offset:var(--line-underline-offset);
+    text-decoration-skip-ink:auto; }
+a:hover, a:focus-visible { text-decoration-style:solid; }
+:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+.muted { color:var(--text-muted); }
+.num { font-variant-numeric:tabular-nums; }
+
+/* --- header: the name over the platform, the links on the right ---------- */
+.site-header { position:sticky; top:0; z-index:40;
+               background:color-mix(in srgb, var(--surface) 96%, transparent); backdrop-filter:blur(4px);
+               border-bottom:1px solid color-mix(in srgb, var(--heading) 6%, transparent); }
+.site-header__inner { max-width:var(--site-width); margin:0 auto; padding:1rem var(--edge) 0;
+                      display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center;
+                      gap:0 2rem; line-height:1; }
+.site-header__brand { color:var(--ink); font-weight:400; text-decoration:none; }
+.site-header__brand:hover, .site-header__brand:focus-visible { color:var(--blue); }
+.site-header__name { display:block; font-size:1rem; font-weight:800; line-height:1; }
+.site-header__subtitle { display:block; margin-top:.1875rem; color:var(--nav-text); font-size:.875rem; line-height:1; }
+.site-header__brand:hover .site-header__subtitle { color:inherit; }
+.site-nav__list { display:flex; flex-wrap:wrap; list-style:none; margin:0 -.875rem 0 0; padding:0; }
+.site-nav__item > a, .site-nav__item > details > summary {
+  display:block; position:relative; padding:.8125rem .875rem; color:var(--nav-text); cursor:pointer;
+  font-size:.9375rem; font-weight:500; line-height:1; text-decoration:none; list-style:none;
+  transition:color .2s ease-in-out; }
+.site-nav__item > details > summary::-webkit-details-marker { display:none; }
+.site-nav__item > a::before, .site-nav__item > details > summary::before {
+  content:""; position:absolute; bottom:.4rem; left:.875rem; right:.875rem; height:4px;
+  background:var(--blue); transform:scaleX(0); transition:transform .2s ease-in-out; }
+.site-nav__item > a:hover, .site-nav__item > a:focus-visible,
+.site-nav__item > details > summary:hover, .site-nav__item > details > summary:focus-visible { color:var(--blue); }
+.site-nav__item > a:hover::before, .site-nav__item > a:focus-visible::before,
+.site-nav__item > details > summary:hover::before, .site-nav__item > details > summary:focus-visible::before,
+.site-nav__item.is-active > a::before, .site-nav__item > details[open] > summary::before { transform:scaleX(1); }
+.site-nav__item.is-active > a, .site-nav__item > details[open] > summary { color:var(--heading); }
+/* While a fold is open its link takes the bar from the page's own. */
+.site-nav__list:has(details[open]) .site-nav__item.is-active > a { color:var(--nav-text); }
+.site-nav__list:has(details[open]) .site-nav__item.is-active > a::before { transform:scaleX(0); }
+
+/* The collector's count: done of shown on its line, and the time worked. */
+.hdr-progress { display:grid; grid-template-columns:auto 96px; align-items:center; gap:2px var(--space-12);
+                margin:0 auto 0 var(--space-48); padding-bottom:1px;
+                font:var(--text-caption); color:var(--nav-text); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.hdr-progress #prog { font:var(--text-small); font-weight:700; line-height:1.2; color:var(--heading); }
+.hdr-progress .worked { grid-column:1 / 3; line-height:1.2; }
+.bar { position:relative; height:var(--line-page); margin:0 6px 0 0; background:var(--border); }
+.bar::after { content:""; position:absolute; right:-5px; top:-4.75px; width:11px; height:11px;
+              border:1.4px solid var(--border-strong); border-radius:var(--radius-circle); background:var(--surface); }
+.bar i { position:relative; display:block; height:100%; background:var(--blue); }
+.bar i::after { content:""; position:absolute; right:calc(var(--node) / -2); top:calc(var(--node) / -2 + .75px);
+                width:var(--node); height:var(--node); border-radius:var(--radius-circle); background:var(--blue); }
+
+/* The folds open a panel under the header, at its right edge. */
+.hdr-panel { position:absolute; top:100%; right:var(--page-edge); z-index:41; width:min(380px, calc(100vw - 2 * var(--edge)));
+             padding:var(--space-24); background:var(--surface); border:1px solid var(--border); border-top:0;
+             color:var(--text); font:var(--text-small); cursor:auto; }
+.hdr-panel h2 { margin:0 0 var(--space-16); font:var(--text-eyebrow); letter-spacing:.12em; text-transform:uppercase; color:var(--text-muted); }
+/* how to collect: the steps hang on one line, numbered in discs */
+.howto { position:relative; list-style:none; margin:0; padding:0; counter-reset:step; }
+.howto::before { content:""; position:absolute; left:calc(14px - .75px); top:14px; bottom:14px; width:var(--line-page); background:var(--blue); }
+.howto li { position:relative; min-height:28px; padding:4px 0 var(--space-16) 44px; counter-increment:step; }
+.howto li:last-child { padding-bottom:0; }
+.howto li::before { content:counter(step, decimal-leading-zero); position:absolute; left:0; top:0; width:28px; height:28px;
+                    display:grid; place-items:center; border-radius:var(--radius-circle); background:var(--blue);
+                    color:var(--on-sky); font:420 15px/1 var(--font-serif); }
+/* earlier days: rows between hairlines */
+.daylist { margin:0; padding:0; list-style:none; border-top:1px solid var(--border); font-variant-numeric:tabular-nums; }
+.daylist li { padding:var(--space-8) 0; border-bottom:1px solid var(--border); }
+
+/* --- the title band: the front page's band, in small ------------------------
+   As ddp-inspector draws it. A sky band under the header holds the page's
+   title on a white line between two nodes. Right of the title the line
+   carries the phone, drops past the step to the consent badge and ends at the
+   globe. The lower edge is the blue line with its step, the coral node in the
+   step and a blue node on the deep side. Measured from the right edge, so it
+   holds at any width. */
+:root { --tb-depth:84px; --tb-drop:44px; --tb-step:44px; --tb-deep:clamp(280px, 34vw, 640px); }
+.band { position:relative; background:var(--sky); overflow-x:clip; --tb-line:50%; }
+.band__row { display:grid; min-height:var(--tb-depth);
+             grid-template-columns:minmax(var(--edge), 1fr) minmax(0, calc(var(--site-width) - 2 * var(--edge))) minmax(var(--edge), 1fr); }
+.band__lead { grid-column:1; position:relative; margin-right:12px; }
+.band__main { grid-column:2 / 4; display:flex; align-items:center; min-width:0; }
+.band__lead::before, .band__line { content:""; position:absolute; height:var(--line-band); background:var(--on-sky); }
+.band__lead::before { left:0; right:0; top:var(--tb-line); }
+.band__lead::after, .band__thread::before { content:""; position:absolute; top:calc(var(--tb-line) - var(--node) / 2 + .5px);
+                                            width:var(--node); height:var(--node);
+                                            border-radius:var(--radius-circle); background:var(--on-sky); }
+.band__lead::after { right:calc(var(--node) / -2); }
+.band h1 { flex:0 1 auto; min-width:0; margin:0 12px 0 0; padding:var(--space-16) 0; color:var(--on-sky); }
+.band__thread { flex:1; align-self:stretch; position:relative; min-width:0; }
+.band__thread::before { left:calc(var(--node) / -2); }
+.band__line--title { left:0; right:calc(var(--tb-deep) - 40px); top:var(--tb-line); }
+.band__drop { position:absolute; right:calc(var(--tb-deep) - 96px); top:var(--tb-line); width:56px; height:calc(100% - var(--tb-line) + 8px);
+              overflow:visible; fill:none; stroke:var(--on-sky); stroke-width:var(--line-band); }
+.band__line--deep { right:0; width:calc(var(--tb-deep) - 96px); top:calc(100% + 8px); }
+.band__piece { position:absolute; transform:translate(50%, -50%); }
+/* Zeeschuimer, the browser extension that captures the comments, takes the
+   phone's place: its mark in a white disc, as the network's pieces are. */
+.band__piece--zee { right:calc(var(--tb-deep) + 120px); top:calc(var(--tb-line) + .5px);
+                    display:grid; place-items:center; width:var(--disc); height:var(--disc);
+                    border-radius:var(--radius-circle); background:var(--on-sky); }
+.band__piece--zee img { display:block; }
+.band__piece--badge { right:calc(var(--tb-deep) * .55); top:calc(100% + 8.5px); }
+.band__piece--globe { right:calc(var(--page-edge) - var(--gutter) + var(--edge) + 20px); top:calc(100% + 8.5px); }
+.band__deep { position:absolute; right:0; top:calc(100% - 1px); width:calc(var(--tb-deep) + 1px);
+              height:calc(var(--tb-drop) + 1px); background:var(--sky); }
+.band__deep::after { content:""; position:absolute; left:32%; bottom:calc(var(--node-edge) / -2); width:var(--node-edge);
+                     height:var(--node-edge); border-radius:var(--radius-circle); background:var(--blue); }
+.band__step { position:absolute; right:var(--tb-deep); top:100%; width:var(--tb-step); height:var(--tb-drop); }
+.band__step svg, .sideband__step svg { display:block; width:100%; height:100%; overflow:visible; }
+.band__step-sky { fill:var(--sky); }
+.band__edge { fill:none; stroke:var(--blue); stroke-width:var(--line-page); }
+.band__step::after, .sideband__step::after {
+  content:""; position:absolute; left:calc(50% - var(--node-edge) / 2); top:calc(50% - var(--node-edge) / 2);
+  width:var(--node-edge); height:var(--node-edge); border-radius:var(--radius-circle); background:var(--coral); }
+@media (max-width:899px) { .band__piece--zee { display:none; } }
+@media (max-width:767px) { .band__thread > *, .band__thread::before, .band__lead::before, .band__lead::after { display:none; } }
+@media (max-width:599px) { :root { --tb-depth:72px; --tb-drop:28px; --tb-step:28px; --tb-deep:38vw; } }
+
+/* A reading page's own content starts clear of the band's deep side. */
+.wrap { max-width:var(--site-width); margin:0 auto; padding:calc(var(--tb-drop) + var(--space-24)) var(--edge) var(--space-96); }
+.wrap p.say { max-width:40rem; font:420 1.6875rem/1.25 var(--font-serif); color:var(--heading); }
+
+/* --- notices: on a short blue line from a coral node to a ring node ------
+   The system's Callout, drawn with pseudo-elements so a script may replace
+   the text (the collector's upload footer). */
+.notice, .warn { position:relative; max-width:44rem; margin:var(--space-16) 0; padding:2px 0 2px 28px;
+                 font:var(--text-small); color:var(--heading);
+                 background:linear-gradient(var(--blue), var(--blue))
+                            calc(var(--node-edge) / 2 - .75px) 6px / var(--line-page) calc(100% - 10px) no-repeat; }
+.notice::before { content:""; position:absolute; left:0; top:4px; width:var(--node-edge); height:var(--node-edge);
+                  border-radius:var(--radius-circle); background:var(--coral); }
+.notice::after, .warn::after { content:""; position:absolute; left:calc(var(--node-edge) / 2 - var(--node-ring) / 2);
+                               bottom:0; width:var(--node-ring); height:var(--node-ring);
+                               border-radius:var(--radius-circle); background:var(--surface);
+                               border:1.4px solid var(--blue); }
+/* Something went wrong: the coral exclamation disc heads the line. */
+.warn { padding:2px 0 16px 36px; font-weight:700; background-position:calc(var(--disc-arrow-sm) / 2 - .75px) 12px; }
+.warn::before { content:"!"; position:absolute; left:0; top:0; width:var(--disc-arrow-sm); height:var(--disc-arrow-sm);
+                border-radius:var(--radius-circle); background:var(--coral); color:var(--on-accent);
+                font:800 15px/var(--disc-arrow-sm) var(--font-sans); text-align:center; }
+.warn::after { left:calc(var(--disc-arrow-sm) / 2 - var(--node-ring) / 2); }
+/* In running text or a table: a coral node before the words, set bold. */
+.late { font-weight:700; color:var(--heading); }
+.late::before { content:""; display:inline-block; width:var(--node); height:var(--node); margin-right:var(--space-8);
+                border-radius:var(--radius-circle); background:var(--coral); }
+
+/* --- actions: a label, a dotted line, the arrow disc -------------------- */
+button { display:inline-flex; align-items:center; gap:var(--space-8); margin:0; padding:6px 0;
+         border:0; border-radius:0; background:none; cursor:pointer; text-align:left;
+         font:var(--text-label); line-height:1.3; color:var(--text); text-decoration:none; }
+button:disabled { cursor:default; color:var(--text-muted); }
+button:disabled .go circle { fill:var(--border-strong); }
+.more__dots { display:block; flex:none; width:28px; height:var(--line-dot-page);
+              background:radial-gradient(circle at 1px 1px, var(--sky) .95px, transparent 1.1px)
+                         0 0 / var(--line-dot-spacing) var(--line-dot-page) repeat-x; }
+button:not(:disabled):hover .more__dots, button:focus-visible .more__dots { background:var(--sky); }
+.go { display:block; flex:none; overflow:visible; }
+.go circle { fill:var(--blue); }
+.go path { fill:none; stroke:var(--on-accent); stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+
+/* --- forms ---------------------------------------------------------------- */
+select { padding:2px 4px; border:1px solid var(--border-strong); border-radius:0; background:var(--surface);
+         color:var(--text); font:var(--text-caption); }
+.field { display:block; margin:var(--space-24) 0 var(--space-4); font:var(--text-label); line-height:1.3; color:var(--heading); }
+.field small { display:block; margin-top:2px; font:var(--text-small); color:var(--text-muted); }
+.filerow { display:flex; flex-wrap:wrap; align-items:center; gap:var(--space-12) var(--space-32); }
+input[type=file] { font:var(--text-small); color:var(--text-muted); }
+::file-selector-button { margin-right:var(--space-12); padding:8px 12px; border:1px solid var(--border-strong);
+                         border-radius:0; background:var(--surface); color:var(--heading);
+                         font:var(--text-label); line-height:1.3; cursor:pointer; }
+
+/* --- tables, figures and label rows: between hairlines, no boxes -------- */
+table { border-collapse:collapse; width:100%; margin:var(--space-12) 0 var(--space-24); font-size:.9375rem; line-height:1.45; }
+th { padding:var(--space-8) var(--space-24) var(--space-8) 0; border-bottom:1px solid var(--border);
+     font:700 13px/1.3 var(--font-sans); color:var(--text-muted); text-align:left; vertical-align:bottom; }
+td { padding:9px var(--space-24) 9px 0; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+th:last-child, td:last-child { padding-right:0; }
+td form { display:inline; margin-left:var(--space-12); }
+td button { padding:0; }
+.figures { display:flex; flex-wrap:wrap; margin:var(--space-12) 0 var(--space-24); padding:0; list-style:none;
+           border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
+.figures li { flex:1 1 0; min-width:7rem; padding:var(--space-12) var(--space-16) var(--space-12) 0; }
+.figures li + li { padding-left:var(--space-16); border-left:1px solid var(--border); }
+.figures b { display:block; font:420 2rem/1.1 var(--font-serif); color:var(--heading); font-variant-numeric:tabular-nums; }
+.figures span { display:block; margin-top:var(--space-4); font:var(--text-caption); color:var(--text-muted); }
+.facts { margin:var(--space-12) 0 0; border-top:1px solid var(--border); }
+.facts > div { display:grid; grid-template-columns:16rem minmax(0, 1fr); gap:var(--space-16); padding:10px 0; border-bottom:1px solid var(--border); }
+.facts dt { font:var(--text-label); line-height:1.45; color:var(--text-muted); }
+.facts dd { margin:0; font:var(--text-small); line-height:1.45; color:var(--text); font-variant-numeric:tabular-nums; }
+.facts dd.warn { margin:0; padding:0 0 0 var(--space-16); background:none; }
+.facts dd.warn::before { content:""; top:6px; width:var(--node); height:var(--node); }
+.facts dd.warn::after { display:none; }
+@media (max-width:599px) {
+  .facts > div { grid-template-columns:minmax(0, 1fr); gap:2px; }
+  table { display:block; overflow-x:auto; }
+}
+
+/* --- the collector page: the header over the two panes ------------------ */
+body.desk { height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+body.desk .site-header { position:relative; flex:none; z-index:40; }
+/* The collector page is a tool on the whole window: its header runs edge to
+   edge, the name at the left and the links at the right. */
+body.desk .site-header__inner { max-width:none; }
+body.desk .hdr-panel { right:var(--edge); }
+.panes { flex:1; display:flex; min-height:0; }
+aside { width:340px; flex:0 0 340px; display:flex; flex-direction:column; min-height:0;
+        border-right:1px solid var(--border); background:var(--surface); }
+#screen { flex:1 1 auto; min-width:0; border:0; }
+
+/* The small band at the head of the sidebar: the title on its line, the
+   step with its coral node, and the next item in the white cutout under the
+   band's shallow side. As on the full band, the title's line runs on past
+   the step, curves down into the deep side and leaves at the sidebar's edge;
+   the lower edge, drawn long, is clipped there too. */
+:root { --sb-depth:76px; --sb-drop:44px; --sb-deep:64px; --sb-thread:18px; }
+.sideband { position:relative; flex:none; height:var(--sb-depth); background:var(--sky); overflow-x:clip; }
+.sideband::before { content:""; position:absolute; left:0; right:calc(var(--sb-deep) - 4px); top:50%; height:var(--line-band); background:var(--on-sky); }
+.sideband__drop { position:absolute; right:calc(var(--sb-deep) - 32px); top:50%; width:28px; height:calc(50% + var(--sb-thread));
+                  overflow:visible; fill:none; stroke:var(--on-sky); stroke-width:var(--line-band); z-index:1; }
+.sideband__line { position:absolute; right:0; width:calc(var(--sb-deep) - 32px); top:calc(100% + var(--sb-thread));
+                  height:var(--line-band); background:var(--on-sky); z-index:1; }
+.sideband h1 { position:relative; display:inline-block; margin:0 0 0 var(--space-32); padding:0 12px; top:50%; transform:translateY(-50%);
+               background:var(--sky); font:420 2.4rem/1 var(--font-serif); color:var(--on-sky); white-space:nowrap; }
+.sideband h1::before, .sideband h1::after { content:""; position:absolute; top:calc(50% - var(--node) / 2 + 2px); width:var(--node); height:var(--node);
+                                            border-radius:var(--radius-circle); background:var(--on-sky); }
+.sideband h1::before { left:calc(var(--node) / -2); }
+.sideband h1::after { right:calc(var(--node) / -2); }
+.sideband__deep { position:absolute; right:0; top:calc(100% - 1px); width:calc(var(--sb-deep) + 1px); height:calc(var(--sb-drop) + 1px); background:var(--sky); }
+.sideband__deep::after { content:""; position:absolute; left:45%; bottom:calc(var(--node-edge) / -2); width:var(--node-edge);
+                         height:var(--node-edge); border-radius:var(--radius-circle); background:var(--blue); }
+.sideband__step { position:absolute; right:var(--sb-deep); top:100%; width:var(--sb-drop); height:var(--sb-drop); }
+.sideniche { flex:none; display:flex; align-items:center; height:var(--sb-drop);
+             max-width:calc(100% - var(--sb-deep) - var(--sb-drop) - var(--space-8)); padding-left:var(--space-32); white-space:nowrap; }
+
+/* --- the queue: a sky line with a node per item ------------------------- */
+.list { flex:1; overflow:auto; padding:var(--space-12) var(--space-24) var(--space-8); }
+ul.rows { position:relative; list-style:none; margin:0; padding:0; }
+ul.rows::before { content:""; position:absolute; left:9.25px; top:0; bottom:0; width:var(--line-page); background:var(--sky); }
+ul.rows li { position:relative; padding:10px 4px 10px 32px; border-bottom:1px solid var(--border); }
+ul.rows li:first-child { border-top:1px solid var(--border); }
+ul.rows li.current { background:var(--paper); }
+.row { display:flex; gap:var(--space-8); align-items:baseline; }
+.row a { flex:1; min-width:0; color:var(--heading); font:var(--text-row-title); font-weight:700; line-height:1.4;
+         text-underline-offset:var(--line-underline-offset-title); overflow-wrap:anywhere; }
+.mark { position:absolute; left:4px; top:15px; width:12px; height:12px; border:1.4px solid var(--border-strong);
+        border-radius:var(--radius-circle); background:var(--surface);
+        display:flex; align-items:center; justify-content:center; font:800 12px/1 var(--font-sans); }
+li[data-state=done] .mark, li[data-state=problem] .mark { left:0; top:11px; width:20px; height:20px; }
+li[data-state=done] .mark { background:var(--blue); border-color:var(--blue); }
+li[data-state=done] .mark::before { content:"\2713"; color:var(--on-sky); }
+li[data-state=problem] .mark { background:var(--coral); border-color:var(--coral); }
+li[data-state=problem] .mark::before { content:"!"; color:var(--on-sky); }
+li.current .mark { box-shadow:0 0 0 3px var(--paper), 0 0 0 4.4px var(--blue); }
+.sub { display:flex; gap:var(--space-8); align-items:center; margin-top:var(--space-4);
+       font:var(--text-caption); color:var(--text-muted); font-variant-numeric:tabular-nums; }
+.sub select { max-width:170px; }
+.msg { margin-top:2px; font:var(--text-caption); }
+.msg.warn { margin:2px 0 0; padding:0; background:none; font-weight:700; color:var(--heading); }
+.msg.warn::before { content:""; position:static; display:inline-block; width:var(--node); height:var(--node); margin-right:var(--space-8);
+                    border-radius:var(--radius-circle); background:var(--coral); }
+.msg.warn::after { display:none; }
+.timer { font:var(--text-label); color:var(--blue); font-variant-numeric:tabular-nums; }
+.timer.up { font-weight:800; color:var(--coral); }
+.hint { margin:var(--space-12) 0; font:var(--text-small); color:var(--text-muted); }
+.more { display:flex; flex-direction:column; align-items:flex-start; gap:var(--space-4); padding:var(--space-8) 0; }
+/* The upload footer: the notice (or the warning) between a hairline and the
+   sidebar's foot, its line and nodes moved down by the 16px above it. */
+aside > footer { flex:none; max-width:none; margin:0 var(--space-24); padding-top:var(--space-16); padding-bottom:var(--space-16);
+                 border-top:1px solid var(--border);
+                 background-position:calc(var(--node-edge) / 2 - .75px) 22px; background-size:var(--line-page) calc(100% - 42px); }
+aside > footer::before { top:20px; }
+aside > footer::after { bottom:var(--space-16); }
+aside > footer.warn { padding-bottom:var(--space-32);
+                      background-position:calc(var(--disc-arrow-sm) / 2 - .75px) 28px; background-size:var(--line-page) calc(100% - 48px); }
+aside > footer.warn::before { top:var(--space-16); }
+#starting { flex:1; display:flex; align-items:center; justify-content:center; font:420 1.6875rem/1.2 var(--font-serif); color:var(--text-muted); }
+#stopped, #denied { position:fixed; top:0; left:0; right:0; z-index:50; margin:0; max-width:none; padding:14px var(--edge) 14px 56px;
+                    background-color:var(--surface); background-image:none; border-bottom:2px solid var(--coral); font:var(--text-label); }
+#stopped::before, #denied::before { left:var(--edge); top:11px; }
+#stopped::after, #denied::after { display:none; }
+#stopped[hidden], #denied[hidden] { display:none; }
+
+@media (prefers-reduced-motion:reduce) { *, *::before, *::after { transition:none !important; } }

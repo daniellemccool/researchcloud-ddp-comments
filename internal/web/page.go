@@ -12,77 +12,39 @@ import (
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/platform"
 )
 
-// This file is the Go page layer: the two-pane
-// desk page, the one-line message pages. The HTML, CSS and JavaScript are
-// verbatim — same ids, classes, texts and fetch calls — only the templating
-// moved to Go: the %%NAME%% slots are substituted with one
-// strings.NewReplacer pass, so text substituted in (a pool note, say) is
-// never scanned for placeholders again, exactly as the Python re.sub.
+// This file is the Go page layer: the two-pane desk page and the message
+// pages, in the datadonation.eu look (style.go, assets/desk.css). The
+// JavaScript is the prototype's, verbatim: same ids, classes and fetch
+// calls. The %%NAME%% slots are substituted with one strings.NewReplacer
+// pass, so text substituted in (a pool note, say) is never scanned for
+// placeholders again, exactly as the Python re.sub.
 //
 // Values from a platform definition (labels, upload_hint) are trusted HTML;
 // everything a user, the pool or the log supplies is escaped with
 // html.EscapeString.
 
-// CSS is the page's stylesheet.
-const CSS = `:root{--ink:#1d2329;--muted:#6b7480;--line:#e3e6ea;--bg:#f6f7f9;--accent:#1f6feb;--ok:#1a7f37;--warn:#b35900}
-*{box-sizing:border-box}
-body{margin:0;font:14px/1.4 system-ui,sans-serif;color:var(--ink);display:flex;height:100vh;overflow:hidden}
-aside{width:340px;flex:0 0 340px;display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--bg)}
-header{padding:12px 14px;border-bottom:1px solid var(--line);background:#fff}
-header b{font-size:15px}.who{color:var(--muted);font-size:12px}
-.progress{margin-top:6px;font-size:12px;color:var(--muted)}
-.bar{height:6px;background:var(--line);border-radius:3px;margin-top:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--ok)}
-.worked{margin-top:6px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
-details.days{padding:0;border:0;background:none;font-size:12px;margin-top:2px}
-details{padding:8px 14px;border-bottom:1px solid var(--line);background:#fff;font-size:13px}
-details summary{cursor:pointer;color:var(--accent)}details ol{margin:6px 0 2px 18px;padding:0}
-.list{flex:1;overflow:auto;padding:10px 10px 4px}
-.next{display:block;width:100%;padding:10px;margin:0 0 10px;font:inherit;font-weight:600;color:#fff;background:var(--accent);border:0;border-radius:6px;cursor:pointer}
-.next:disabled{background:#9aa4b0;cursor:default}
-ul.rows{list-style:none;margin:0;padding:0}
-ul.rows li{background:#fff;border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:0 0 6px}
-ul.rows li.current{border-color:var(--accent);box-shadow:0 0 0 2px #1f6feb33}
-.row{display:flex;gap:8px;align-items:baseline}
-.row a{flex:1;color:var(--ink);text-decoration:none;font-weight:600}.row a:hover{color:var(--accent)}
-.mark{width:1.2em;text-align:center}
-li[data-state=done] .mark::before{content:"\2713";color:var(--ok)}
-li[data-state=problem] .mark::before{content:"\26A0";color:var(--warn)}
-li[data-state=todo] .mark::before{content:"\25CB";color:var(--muted)}
-.sub{display:flex;gap:8px;align-items:center;margin-top:4px;font-size:12px;color:var(--muted)}
-.sub select{font:inherit;font-size:12px;max-width:150px}
-.msg{font-size:12px}.msg.warn{color:var(--warn)}.timer{font-variant-numeric:tabular-nums;font-weight:600;color:var(--accent)}
-.timer.up{color:var(--ok)}
-.more{padding:8px 0}.more button{font:inherit;padding:6px 10px;margin-right:6px;border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:6px;cursor:pointer}
-.hint{font-size:12px;color:var(--muted);margin:6px 2px}
-footer{padding:10px 14px;border-top:1px solid var(--line);background:#fff8e6;font-size:12px}
-footer.warn{background:#ffe3cc;color:var(--warn);font-weight:600;border-top:2px solid var(--warn)}
-#starting{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:15px}
-#stopped,#denied{position:fixed;top:0;left:0;right:0;z-index:10;padding:14px;text-align:center;font-size:15px;font-weight:600;background:#fff8e6;color:var(--warn);border-bottom:1px solid var(--line)}
-#stopped[hidden]{display:none}
-#denied[hidden]{display:none}`
-
-// PAGE is the two-pane desk page. %%NAME%% slots are
-// substituted by deskPage.
+// PAGE is the two-pane desk page: the header with the count and the two
+// folds (Earlier days, How to collect), then the sidebar (the small band
+// with the next item in the cutout under it, the queue, the upload footer)
+// beside the streamed browser. %%NAME%% slots are substituted by deskPage.
 const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>%%TITLE%%</title>
 <style>
 %%CSS%%
 </style></head>
-<body>
+<body class="desk">
+%%HEADER%%
+<div class="panes">
 <aside>
-<header><b>Your %%NOUN%%s</b> <span class="who">%%USER%%</span>%%PROGRESS%%%%WORKED%%</header>
-<details%%OPEN_HELP%%><summary>How to collect</summary><ol>
-<li>Click <b>Open next %%NOUN%%</b> (or an item in the list). It opens in the browser on the right.</li>
-<li>Open the comments and scroll until no more load%%TIMER_HELP%%. Don't open replies.</li>
-<li>If the item won't show or comments won't load, pick what happened under <b>Problem…</b>.</li>
-<li>When every item is done, get more.</li>
-</ol></details>
+<div class="sideband"><h1>Your %%NOUN%%s</h1><svg class="sideband__drop" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 C50 0 50 100 100 100" vector-effect="non-scaling-stroke"/></svg><i class="sideband__line" aria-hidden="true"></i><i class="sideband__deep" aria-hidden="true"></i><div class="sideband__step" aria-hidden="true">%%STEP%%</div></div>
+<div class="sideniche">%%NEXT%%</div>
 <div class="list">%%BODY%%</div>
 %%FOOTER%%</aside>
 <div id="starting">Starting your browser…</div>
-<div id="stopped" hidden>Your desk was stopped after %%IDLE_MINUTES%% minutes without activity. Reload to continue.</div>
-<div id="denied" hidden>You are signed out, or your access to the desk was removed. Reload this page. If it keeps failing, contact %%CONTACT%%.</div>
-<iframe id="screen" style="flex:1 1 auto;height:100vh;border:0;min-width:0;display:none" allow="clipboard-read; clipboard-write"></iframe>
+<iframe id="screen" style="display:none" allow="clipboard-read; clipboard-write"></iframe>
+</div>
+<div id="stopped" hidden class="warn">Your desk was stopped after %%IDLE_MINUTES%% minutes without activity. Reload to continue.</div>
+<div id="denied" hidden class="warn">You are signed out, or your access to the desk was removed. Reload this page. If it keeps failing, contact %%CONTACT%%.</div>
 <script>
 const SECONDS=%%SECONDS%%,NOTE_CODES=%%NOTE_CODES%%;let timer=null,wasReady=false,sawInput=false,stopped=false;
 async function waitScreen(){try{const r=await fetch('status');if(r.ok&&(await r.json()).ready){
@@ -135,20 +97,18 @@ function refresh(){const rows=[...document.querySelectorAll('ul.rows li')];const
 async function more(n){await fetch('claim?n='+n,{method:'POST'});location.reload();}
 </script></body></html>`
 
-// MESSAGE is the one-line message page.
-const MESSAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">%%REFRESH%%<title>desk</title></head>
-<body style="font:16px system-ui;margin:3em">%%TEXT%%</body></html>`
-
-// message renders a one-line page; text is plain text and is escaped.
-func message(text string, refresh int) string {
-	meta := ""
+// message renders a one-message page: heading (plain text) on the band and
+// text (plain text, escaped) under it, under the header with subtitle
+// (already HTML). With refresh > 0 the page reloads itself after that many
+// seconds, and says so.
+func message(heading, subtitle, text string, refresh int) string {
+	meta, note := "", ""
 	if refresh > 0 {
 		meta = `<meta http-equiv="refresh" content="` + strconv.Itoa(refresh) + `">`
+		note = `<p class="muted">This page reloads by itself.</p>`
 	}
-	return strings.NewReplacer(
-		"%%REFRESH%%", meta,
-		"%%TEXT%%", html.EscapeString(text),
-	).Replace(MESSAGE)
+	return pageTop(heading, meta, subtitle, nil, heading) +
+		`<p class="say">` + html.EscapeString(text) + `</p>` + note + pageBottom
 }
 
 // problemOptions is the problem <select> of every row.
@@ -184,12 +144,13 @@ func row(kind, itemID, state string, opened bool, title, msg, options string, ti
 	return b.String()
 }
 
-// progress renders the header progress bar. The
-// percentage rounds half to even, as Python's round does.
+// progress renders the header's count: done of shown, and the blue line
+// that runs that far towards its ring node. The percentage rounds half to
+// even, as Python's round does.
 func progress(nDone, n int) string {
 	pct := pyRound(100 * float64(nDone) / float64(n))
-	return `<div class="progress"><span id="prog">` + strconv.Itoa(nDone) + ` of ` + strconv.Itoa(n) + ` done</span>` +
-		`<div class="bar"><i id="barfill" style="width:` + strconv.Itoa(pct) + `%"></i></div></div>`
+	return `<span id="prog">` + strconv.Itoa(nDone) + ` of ` + strconv.Itoa(n) + ` done</span>` +
+		`<div class="bar"><i id="barfill" style="width:` + strconv.Itoa(pct) + `%"></i></div>`
 }
 
 // pyRound rounds half to even like Python's round for the positive values
@@ -212,12 +173,13 @@ func pyRound(x float64) int {
 // pageParams are the values deskPage substitutes into PAGE.
 type pageParams struct {
 	User          string
-	Admin         bool // admins get the /desk/admin/ link after their name (P10)
+	Admin         bool // admins get the Admin link in the header (P10)
 	PlatformLabel string
 	Noun          string // the platform's default kind, escaped by deskPage
 	Seconds       int    // the per-item timer, TimerMinutes*60
 	NoteCodes     []string
 	ProgressHTML  string // already HTML
+	Next          string // already HTML: the next-item action, in the cutout under the band; "" without items
 	Body          string // already HTML
 	OpenHelp      bool
 	Footer        *string        // the footer's inner HTML (uploadFooter); nil hides the footer
@@ -228,16 +190,16 @@ type pageParams struct {
 	Now           time.Time      // the clock's reading: which of Worked's days is today
 }
 
-// deskPage renders the two-pane page. Body and
-// ProgressHTML are already HTML, and so is Footer; a nil Footer hides the footer.
+// deskPage renders the two-pane page. Body, Next and ProgressHTML are
+// already HTML, and so is Footer; a nil Footer hides the footer.
 func deskPage(p pageParams) string {
 	footer := ""
 	if p.Footer != nil {
-		warn := ""
+		cls := "notice"
 		if p.FooterWarn {
-			warn = ` class="warn"`
+			cls = "notice warn"
 		}
-		footer = `<footer id="upload"` + warn + `>` + *p.Footer + "</footer>\n"
+		footer = `<footer id="upload" class="` + cls + `">` + *p.Footer + "</footer>\n"
 	}
 	noteCodes := "[]" // a nil NoteCodes renders as [], never null
 	if p.NoteCodes != nil {
@@ -247,32 +209,46 @@ func deskPage(p pageParams) string {
 		}
 		noteCodes = strings.ReplaceAll(string(codes), "<", `\u003c`)
 	}
-	user := html.EscapeString(p.User)
+	noun := html.EscapeString(p.Noun)
+	links := []navLink{{Label: "Your " + p.Noun + "s", Href: "/desk/", Current: true}}
 	if p.Admin {
-		user += ` <a href="/desk/admin/">admin</a>`
+		links = append(links, navLink{Label: "Admin", Href: "/desk/admin/"})
 	}
-	openHelp := ""
-	if p.OpenHelp {
-		openHelp = " open"
-	}
-	timerHelp := ""
-	if p.Seconds > 0 {
-		timerHelp = ", or until the timer reaches 0:00"
-	}
+	count := `<div class="hdr-progress">` + p.ProgressHTML + workedHTML(p.Worked, p.Now) + `</div>`
+	folds := earlierDaysHTML(p.Worked, p.Now) + howToHTML(noun, p.Seconds > 0, p.OpenHelp)
+	subtitle := platformLine(p.PlatformLabel) + " · " + html.EscapeString(p.User)
 	return strings.NewReplacer(
 		"%%TITLE%%", html.EscapeString(p.PlatformLabel)+" desk — "+html.EscapeString(p.User),
-		"%%CSS%%", CSS,
-		"%%USER%%", user,
-		"%%NOUN%%", html.EscapeString(p.Noun),
-		"%%PROGRESS%%", p.ProgressHTML,
-		"%%WORKED%%", workedHTML(p.Worked, p.Now),
-		"%%OPEN_HELP%%", openHelp,
+		"%%CSS%%", pageCSS,
+		"%%HEADER%%", headerHTML(subtitle, count, links, folds),
+		"%%NOUN%%", noun,
+		"%%STEP%%", stepSVG,
+		"%%NEXT%%", p.Next,
 		"%%BODY%%", p.Body,
-		"%%TIMER_HELP%%", timerHelp,
 		"%%FOOTER%%", footer,
 		"%%SECONDS%%", strconv.Itoa(p.Seconds),
 		"%%NOTE_CODES%%", noteCodes,
 		"%%IDLE_MINUTES%%", strconv.Itoa(max(p.IdleMinutes, 1)),
 		"%%CONTACT%%", html.EscapeString(p.Contact),
 	).Replace(PAGE)
+}
+
+// howToHTML is the header's How to collect fold: the four steps on one
+// line, numbered in discs. noun is already escaped; open opens the fold
+// (a student with nothing claimed yet).
+func howToHTML(noun string, timer, open bool) string {
+	attr, timerHelp := "", ""
+	if open {
+		attr = " open"
+	}
+	if timer {
+		timerHelp = ", or until the timer reaches 0:00"
+	}
+	return `<li class="site-nav__item"><details` + attr + `><summary>How to collect</summary>` +
+		`<div class="hdr-panel"><h2>How to collect</h2><ol class="howto">` +
+		`<li>Click <b>Open next ` + noun + `</b> (or an item in the list). It opens in the browser on the right.</li>` +
+		`<li>Open the comments and scroll until no more load` + timerHelp + `. Don't open replies.</li>` +
+		`<li>If the item won't show or comments won't load, pick what happened under <b>Problem…</b>.</li>` +
+		`<li>When every item is done, get more.</li>` +
+		`</ol></div></details></li>`
 }

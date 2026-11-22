@@ -400,9 +400,13 @@ func adminCollectionSection(t *testing.T, fill func(*Deps)) {
 	b := rec.Body.String()
 	for _, want := range []string{
 		`<h2>Collection: TestTube</h2>`,
-		`<p>Queue 3 videos · unclaimed 1 · claimed 2 · done 1 (1 problem) · open 1</p>`,
-		`<p>Records captured 4 · collectors who took part 2</p>`,
-		`<form method="post" action="/desk/admin/pool" enctype="multipart/form-data"><label>Add to the pool (CSV with an id column; kind, bucket, note optional): <input type="file" name="file" accept=".csv,text/csv" required></label> <button>Upload</button></form>`,
+		`<ul class="figures"><li><b>3</b><span>videos in the queue</span></li><li><b>1</b><span>unclaimed</span></li>` +
+			`<li><b>2</b><span>claimed</span></li><li><b>1</b><span>done, 1 problem</span></li><li><b>1</b><span>open</span></li>` +
+			`<li><b>4</b><span>records captured</span></li><li><b>2</b><span>collectors took part</span></li></ul>`,
+		`<form method="post" action="/desk/admin/pool" enctype="multipart/form-data">` +
+			`<label class="field" for="poolfile">Add to the pool<small>A CSV with an id column; kind, bucket and note are optional.</small></label>` +
+			`<div class="filerow"><input id="poolfile" type="file" name="file" accept=".csv,text/csv" required>` +
+			`<button>Upload` + goMark + `</button></div></form>`,
 		`<title>Desk admin</title>`,
 	} {
 		if !strings.Contains(b, want) {
@@ -422,22 +426,26 @@ func adminCollectionSection(t *testing.T, fill func(*Deps)) {
 		last = i
 	}
 	// A second view of the unchanged pool reads the same.
-	queue := `<p>Queue 3 videos · unclaimed 1 · claimed 2 · done 1 (1 problem) · open 1</p>`
+	queue := `<li><b>3</b><span>videos in the queue</span></li><li><b>1</b><span>unclaimed</span></li>` +
+		`<li><b>2</b><span>claimed</span></li><li><b>1</b><span>done, 1 problem</span></li><li><b>1</b><span>open</span></li>`
 	if b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String(); !strings.Contains(b, queue) {
 		t.Errorf("second view lacks %q:\n%s", queue, b)
 	}
 
-	// An unreadable pool.csv shows the error line instead of the queue line;
-	// the rest of the page is still there.
+	// An unreadable pool.csv shows the error line instead of the queue's
+	// figures; the rest of the page is still there.
 	if err := os.WriteFile(poolPath, []byte("a,b\n1,2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rec = getAdmin(t, srv, "root", adminRole, "/desk/admin/")
 	b = rec.Body.String()
-	if !strings.Contains(b, "pool.csv unreadable: pool.csv: unrecognised header [a b]") {
+	if !strings.Contains(b, `<p class="warn">pool.csv unreadable: pool.csv: unrecognised header [a b]</p>`) {
 		t.Errorf("unreadable pool line missing from:\n%s", b)
 	}
-	if !strings.Contains(b, "<h2>Problems</h2>") || !strings.Contains(b, "Records captured 4") {
+	if strings.Contains(b, "videos in the queue") {
+		t.Errorf("with an unreadable pool the queue's figures still show:\n%s", b)
+	}
+	if !strings.Contains(b, "<h2>Problems</h2>") || !strings.Contains(b, "<li><b>4</b><span>records captured</span></li>") {
 		t.Errorf("with an unreadable pool the rest of the page is gone:\n%s", b)
 	}
 }
@@ -467,7 +475,7 @@ func logFailServer(t *testing.T, setLog func(t *testing.T, root string) string) 
 // failure: no warning, and the zeros stay.
 func TestAdminUnreadableDeskLog(t *testing.T) {
 	const warning = `<p class="warn">The desk log cannot be read, so the figures that come from it are unknown.</p>`
-	stop := `<form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop</button></form>`
+	stop := `<form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop` + goMark + `</button></form>`
 	for _, tc := range []struct {
 		name   string
 		setLog func(t *testing.T, root string) string
@@ -499,13 +507,15 @@ func TestAdminUnreadableDeskLog(t *testing.T) {
 			}
 			b := rec.Body.String()
 			for _, want := range []string{
-				`<h1>Desk admin</h1>` + warning + `<h2>Collection: `,
-				`<p>Queue 3 videos · unclaimed unknown · claimed unknown · done unknown (problems unknown) · open unknown</p>`,
-				` · collectors who took part unknown</p>`,
+				`<div class="wrap">` + warning + `<h2>Collection: `,
+				`<li><b>3</b><span>videos in the queue</span></li><li><b>unknown</b><span>unclaimed</span></li>` +
+					`<li><b>unknown</b><span>claimed</span></li><li><b>unknown</b><span>done, problems unknown</span></li>` +
+					`<li><b>unknown</b><span>open</span></li>`,
+				`<li><b>unknown</b><span>collectors took part</span></li>`,
 				`<h2>Problems</h2><p>unknown: the desk log cannot be read</p>`,
 				`<tr><td>alice</td><td>unknown</td><td>unknown</td><td>running ` + stop + `</td></tr>`,
-				`<p>Hold the collector role, never claimed: unknown: the desk log cannot be read</p>`,
-				`<p>Worked here, no longer have access: unknown: the desk log cannot be read</p>`,
+				`<div><dt>Hold the collector role, never claimed</dt><dd>unknown: the desk log cannot be read</dd></div>`,
+				`<div><dt>Worked here, no longer have access</dt><dd>unknown: the desk log cannot be read</dd></div>`,
 				`<h2>Health</h2>`,
 			} {
 				if !strings.Contains(b, want) {
@@ -533,12 +543,13 @@ func TestAdminUnreadableDeskLog(t *testing.T) {
 		})
 		b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 		for _, want := range []string{
-			`<p>Queue 3 videos · unclaimed 3 · claimed 0 · done 0 (0 problems) · open 0</p>`,
-			` · collectors who took part 0</p>`,
+			`<li><b>3</b><span>videos in the queue</span></li><li><b>3</b><span>unclaimed</span></li>` +
+				`<li><b>0</b><span>claimed</span></li><li><b>0</b><span>done, 0 problems</span></li><li><b>0</b><span>open</span></li>`,
+			`<li><b>0</b><span>collectors took part</span></li>`,
 			`<h2>Problems</h2><p>No problems reported.</p>`,
 			`<tr><td>alice</td><td>0:00</td><td>0:00</td><td>running ` + stop + `</td></tr>`,
-			`<p>Hold the collector role, never claimed: chris</p>`,
-			`<p>Worked here, no longer have access: alice (removed)</p>`,
+			`<div><dt>Hold the collector role, never claimed</dt><dd>chris</dd></div>`,
+			`<div><dt>Worked here, no longer have access</dt><dd>alice (removed)</dd></div>`,
 		} {
 			if !strings.Contains(b, want) {
 				t.Errorf("page lacks %q:\n%s", want, b)
@@ -575,7 +586,7 @@ func TestAdminProblemsNewestFirst(t *testing.T) {
 	if i > j {
 		t.Error("the older report comes before the newer one")
 	}
-	if strings.Contains(b, "333") {
+	if strings.Contains(b, "v=333") {
 		t.Error("an open event shows in the problems table")
 	}
 
@@ -633,7 +644,7 @@ func TestAdminHealthSeatsLine(t *testing.T) {
 		d.Seats = seats
 	})
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<p>Seats: 1 of 3 running (configured 3; memory allows unknown) · registered 2 of 99</p>`; !strings.Contains(b, want) {
+	if want := `<div><dt>Seats</dt><dd>1 of 3 running (configured 3; memory allows unknown) · registered 2 of 99</dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 
@@ -644,7 +655,7 @@ func TestAdminHealthSeatsLine(t *testing.T) {
 		d.Seats = SeatFigures{Configured: 7, MemoryAllows: 3}
 	})
 	b = getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<p>Seats: 1 of 3 running (configured 7; memory allows 3) · registered 2 of 99</p>`; !strings.Contains(b, want) {
+	if want := `<div><dt>Seats</dt><dd>1 of 3 running (configured 7; memory allows 3) · registered 2 of 99</dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 
@@ -660,7 +671,7 @@ func TestAdminHealthSeatsLine(t *testing.T) {
 	})
 	rec := getAdmin(t, srv, "root", adminRole, "/desk/admin/")
 	b = rec.Body.String()
-	if want := `<p class="warn">Seats: the running count is unavailable; at most 3 may run (configured 3; memory allows unknown) · registered 2 of 99</p>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
+	if want := `<div><dt>Seats</dt><dd class="warn">the running count is unavailable; at most 3 may run (configured 3; memory allows unknown) · registered 2 of 99</dd></div>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
 		t.Errorf("status %d; page lacks %q:\n%s", rec.Code, want, b)
 	}
 	if !strings.Contains(b, "<h2>Collection: TestTube</h2>") || !strings.Contains(b, "<h2>Problems</h2>") {
@@ -710,7 +721,7 @@ func TestAdminStatusHasATimeLimit(t *testing.T) {
 		t.Errorf("the page took %v: it waited for the request to end instead of its own time limit", took.Round(time.Millisecond))
 	}
 	b := rec.Body.String()
-	if want := `<p class="warn">Seats: the running count is unavailable; at most 3 may run (configured 3; memory allows 3) · registered 1 of 99</p>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
+	if want := `<div><dt>Seats</dt><dd class="warn">the running count is unavailable; at most 3 may run (configured 3; memory allows 3) · registered 1 of 99</dd></div>`; rec.Code != http.StatusOK || !strings.Contains(b, want) {
 		t.Errorf("status %d; page lacks %q:\n%s", rec.Code, want, b)
 	}
 	for _, h := range []string{"<h2>Collection: TestTube</h2>", "<h2>Problems</h2>", "<h2>Health</h2>"} {
@@ -723,7 +734,7 @@ func TestAdminStatusHasATimeLimit(t *testing.T) {
 func TestAdminFourcatLinksOnlyWhenEnabled(t *testing.T) {
 	srv, _ := newAdminServerWith(t, func(d *Deps) { d.Cfg.FourcatEnabled = true })
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<p>4CAT: <a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></p>`; !strings.Contains(b, want) {
+	if want := `<div><dt>4CAT</dt><dd><a href="/results/">datasets</a> · <a href="/admin/">status</a> · <a href="/logs/">logs</a></dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("page lacks %q:\n%s", want, b)
 	}
 	srv, _ = newAdminServer(t)
@@ -863,12 +874,12 @@ func TestAdminOverviewShowsPollLine(t *testing.T) {
 	}
 
 	b := getAdmin(t, newServer(fakeMembers{line: "CO poll: last good 12:34, 0 failures"}), "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<h2>Health</h2><p>CO poll: last good 12:34, 0 failures</p>`; !strings.Contains(b, want) {
+	if want := `<h2>Health</h2><dl class="facts"><div><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("overview lacks %q:\n%s", want, b)
 	}
 
 	b = getAdmin(t, newServer(fakeMembers{line: "ALARM: CO poll: no good poll yet, 3 failures <x>"}), "root", adminRole, "/desk/admin/").Body.String()
-	if want := `<h2>Health</h2><p class="warn">ALARM: CO poll: no good poll yet, 3 failures &lt;x&gt;</p>`; !strings.Contains(b, want) {
+	if want := `<h2>Health</h2><dl class="facts"><div><dt>CO poll</dt><dd class="warn">ALARM: no good poll yet, 3 failures &lt;x&gt;</dd></div>`; !strings.Contains(b, want) {
 		t.Errorf("overview lacks the alarm line %q:\n%s", want, b)
 	}
 
@@ -909,15 +920,15 @@ func TestAdminOverviewShowsRetentionLine(t *testing.T) {
 		want string
 	}{
 		{fakeRetention{line: "Snapshot retention: not run yet"},
-			`<p>CO poll: last good 12:34, 0 failures</p><p>Snapshot retention: not run yet</p>`},
+			`<div><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div><div><dt>Snapshot retention</dt><dd>not run yet</dd></div>`},
 		{fakeRetention{line: "Snapshot retention: last run 2026-11-18 12:00, 9 snapshots read, 3 marked to expire, 2 unmarked"},
-			`<p>Snapshot retention: last run 2026-11-18 12:00, 9 snapshots read, 3 marked to expire, 2 unmarked</p>`},
+			`<div><dt>Snapshot retention</dt><dd>last run 2026-11-18 12:00, 9 snapshots read, 3 marked to expire, 2 unmarked</dd></div>`},
 		{fakeRetention{line: "Snapshot retention: failed at 2026-11-18 12:00 <x>", failed: true},
-			`<p class="warn">Snapshot retention: failed at 2026-11-18 12:00 &lt;x&gt;</p>`},
+			`<div><dt>Snapshot retention</dt><dd class="warn">failed at 2026-11-18 12:00 &lt;x&gt;</dd></div>`},
 		{fakeRetention{line: "Snapshot retention (dry run): last run 2026-11-18 12:00, 9 snapshots read, 3 would be marked to expire, 2 would be unmarked"},
-			`<p>CO poll: last good 12:34, 0 failures</p><p>Snapshot retention (dry run): last run 2026-11-18 12:00, 9 snapshots read, 3 would be marked to expire, 2 would be unmarked</p>`},
+			`<div><dt>CO poll</dt><dd>last good 12:34, 0 failures</dd></div><div><dt>Snapshot retention (dry run)</dt><dd>last run 2026-11-18 12:00, 9 snapshots read, 3 would be marked to expire, 2 would be unmarked</dd></div>`},
 		{fakeRetention{line: "Snapshot retention (dry run): failed at 2026-11-18 12:00", failed: true},
-			`<p class="warn">Snapshot retention (dry run): failed at 2026-11-18 12:00</p>`},
+			`<div><dt>Snapshot retention (dry run)</dt><dd class="warn">failed at 2026-11-18 12:00</dd></div>`},
 	} {
 		b := getAdmin(t, newServer(c.r), "root", adminRole, "/desk/admin/").Body.String()
 		if !strings.Contains(b, c.want) {
@@ -1192,10 +1203,10 @@ func TestStopButtonOnlyOnRunning(t *testing.T) {
 	srv, _ := newAdminServerWith(t, func(d *Deps) { d.AdminSessions = sess })
 	b := getAdmin(t, srv, "root", adminRole, "/desk/admin/").Body.String()
 	for _, want := range []string{
-		`<tr><td>alice</td><td>0:00</td><td>0:00</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop</button></form></td></tr>`,
+		`<tr><td>alice</td><td>0:00</td><td>0:00</td><td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="alice"><button>Stop` + goMark + `</button></form></td></tr>`,
 		`<tr><td>bob</td><td>0:00</td><td>0:00</td><td>stopped</td></tr>`,
-		`<tr><td>carol</td><td>0:00</td><td>0:00</td><td>at template <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="carol"><button>Stop</button></form></td></tr>`,
-		`<td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="x&#34;&lt;y&gt;&amp;z"><button>Stop</button></form></td></tr>`,
+		`<tr><td>carol</td><td>0:00</td><td>0:00</td><td>at template <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="carol"><button>Stop` + goMark + `</button></form></td></tr>`,
+		`<td>running <form method="post" action="/desk/admin/stop"><input type="hidden" name="user" value="x&#34;&lt;y&gt;&amp;z"><button>Stop` + goMark + `</button></form></td></tr>`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q:\n%s", want, b)

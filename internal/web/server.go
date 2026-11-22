@@ -165,6 +165,7 @@ func New(d Deps) *http.Server {
 	mux.HandleFunc("POST /desk/open", sameOrigin(h.serveOpen))       // open one claimed item
 	mux.HandleFunc("POST /desk/problem", sameOrigin(h.serveProblem)) // mark a problem on a claimed item
 	mux.HandleFunc("POST /desk/active", sameOrigin(h.serveActive))   // page heartbeat: input seen, is the pair running
+	mux.HandleFunc("GET /desk/assets/{path...}", serveAsset)         // the D3I look's faces and band pieces (style.go)
 	mux.HandleFunc("GET /desk/admin/{$}", h.serveAdmin)              // nil Admin handler → 404
 	mux.HandleFunc("POST /desk/admin/pool", h.serveAdmin)            // nil Admin handler → 404
 	mux.HandleFunc("POST /desk/admin/stop", h.serveAdmin)            // stop a hung pair; nil Admin handler → 404

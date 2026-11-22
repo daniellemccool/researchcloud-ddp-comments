@@ -142,7 +142,7 @@ func (h *handler) kick(user string) {
 func (h *handler) say(w http.ResponseWriter, status int, text string, refresh int) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(message(text, refresh)))
+	_, _ = w.Write([]byte(message("Your desk", platformLine(h.platform.Label), text, refresh)))
 }
 
 // servePage renders the collector page.
@@ -189,7 +189,7 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 			if p, ok := h.problemByCode(pr.Code); ok {
 				label = p.Label
 			}
-			msg = "— " + html.EscapeString(label)
+			msg = html.EscapeString(label)
 			if pr.Note != "" {
 				msg += ": " + html.EscapeString(pr.Note)
 			}
@@ -209,12 +209,13 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 	}
 
 	var body strings.Builder
+	next := "" // the next-item action, in the cutout under the sidebar's band
 	if len(shown) > 0 {
 		disabled := ""
 		if nDone == len(shown) {
 			disabled = " disabled"
 		}
-		body.WriteString(`<button id="next" class="next" onclick="openNext()"` + disabled + `>Open next ` + noun + `</button>`)
+		next = `<button id="next" class="next" onclick="openNext()"` + disabled + `>Open next ` + noun + goMark + `</button>`
 		body.WriteString(`<ul class="rows">` + strings.Join(items, "") + `</ul>`)
 	}
 	if earlier > 0 {
@@ -234,7 +235,7 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 	case anyUntaken(snap.Valid, taken):
 		body.WriteString(`<div class="more" id="getmore">`)
 		for _, n := range h.cfg.BatchSizes {
-			body.WriteString(`<button onclick="more(` + strconv.Itoa(n) + `)">Get ` + strconv.Itoa(n) + ` more ` + noun + `s</button>`)
+			body.WriteString(`<button onclick="more(` + strconv.Itoa(n) + `)">Get ` + strconv.Itoa(n) + ` more ` + noun + `s` + goMark + `</button>`)
 		}
 		body.WriteString(`</div>`)
 	default:
@@ -264,6 +265,7 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 		Seconds:       h.cfg.TimerMinutes * 60,
 		NoteCodes:     noteCodes,
 		ProgressHTML:  progressHTML,
+		Next:          next,
 		Body:          body.String(),
 		OpenHelp:      len(view.Claims) == 0,
 		Footer:        footer,

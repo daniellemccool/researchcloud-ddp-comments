@@ -8,14 +8,14 @@ import (
 )
 
 func TestMessageEscapesTextAndRefresh(t *testing.T) {
-	got := message(`a<b> & "q"`, 3)
+	got := message("Your <desk>", "TikTok comment collection", `a<b> & "q"`, 3)
 	if !strings.Contains(got, `<meta http-equiv="refresh" content="3">`) {
 		t.Errorf("message lacks the refresh meta:\n%s", got)
 	}
 	if !strings.Contains(got, `a&lt;b&gt; &amp; &#34;q&#34;`) {
 		t.Errorf("message does not escape the text:\n%s", got)
 	}
-	plain := message("plain", 0)
+	plain := message("Your desk", "", "plain", 0)
 	if strings.Contains(plain, "refresh") {
 		t.Errorf("message without refresh contains a refresh meta:\n%s", plain)
 	}
@@ -88,13 +88,13 @@ func TestDeskPageSlotsAndOnePass(t *testing.T) {
 	})
 	for _, want := range []string{
 		"<title>TestTube desk — alice</title>",
-		`<b>Your videos</b>`, // header noun slot
-		`<span class="who">alice</span>`,
+		`<h1>Your videos</h1>`, // header noun slot
+		`<span class="site-header__subtitle">TestTube comment collection · alice</span>`,
 		`<details open>`,
 		", or until the timer reaches 0:00",
 		"const SECONDS=120,NOTE_CODES=[\"OTHER\"]",
 		`<p>%%USER%% stays literal</p>`, // one pass: substituted text is never rescanned
-		`<footer id="upload">Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>`,
+		`<footer id="upload" class="notice">Before you leave: click <b>Z</b> in the browser's toolbar, upload them to 4CAT.</footer>`,
 		`fetch('status')`,
 		`f.src='/desk/vnc/?resize=remote'`, // the remote browser follows the frame's size
 	} {
@@ -137,8 +137,8 @@ func TestDeskPageAdminLinkAndNoFooter(t *testing.T) {
 		NoteCodes:     nil,
 		Body:          "",
 	})
-	if !strings.Contains(out, `<span class="who">boss <a href="/desk/admin/">admin</a></span>`) {
-		t.Errorf("admin page lacks the admin link after the user name")
+	if !strings.Contains(out, `<li class="site-nav__item"><a href="/desk/admin/">Admin</a></li>`) {
+		t.Errorf("admin page lacks the Admin link in the header")
 	}
 	if strings.Contains(out, "<footer") {
 		t.Errorf("page without a footer renders one")
@@ -226,7 +226,7 @@ func TestPageDeniedBanner(t *testing.T) {
 		`fetch('status',{redirect:'manual'})`,
 		"r.status===401", "r.status===403", "r.type==='opaqueredirect'",
 		"function showDenied()",
-		"#denied[hidden]{display:none}",
+		"#stopped[hidden], #denied[hidden] { display:none; }",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("page lacks %q", want)
