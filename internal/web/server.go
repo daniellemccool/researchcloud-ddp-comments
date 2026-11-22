@@ -161,6 +161,7 @@ func New(d Deps) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /desk/{$}", h.serveHome)                     // the collector page, exactly /desk/
 	mux.HandleFunc("GET /desk/status", h.serveStatus)                // {"ready":bool} for the page's poll
+	mux.HandleFunc("GET /desk/queue", h.serveQueue)                  // the queue's parts, for the page to redraw in place
 	mux.HandleFunc("POST /desk/claim", sameOrigin(h.serveClaim))     // get more items
 	mux.HandleFunc("POST /desk/open", sameOrigin(h.serveOpen))       // open one claimed item
 	mux.HandleFunc("POST /desk/problem", sameOrigin(h.serveProblem)) // mark a problem on a claimed item

@@ -14,10 +14,14 @@ import (
 
 // This file is the Go page layer: the two-pane desk page and the message
 // pages, in the datadonation.eu look (style.go, assets/desk.css). The
-// JavaScript is the prototype's, verbatim: same ids, classes and fetch
-// calls. The %%NAME%% slots are substituted with one strings.NewReplacer
-// pass, so text substituted in (a pool note, say) is never scanned for
-// placeholders again, exactly as the Python re.sub.
+// JavaScript keeps the prototype's ids, classes and fetch calls; it never
+// reloads the page, because a reload rebuilds the streamed browser's frame
+// and loses the open item's timer: after the last item and after getting
+// more it fetches the queue's parts (GET /desk/queue, queueParts) and
+// redraws the count and the sidebar in place. The %%NAME%% slots are
+// substituted with one strings.NewReplacer pass, so text substituted in (a
+// pool note, say) is never scanned for placeholders again, exactly as the
+// Python re.sub.
 //
 // Values from a platform definition (labels, upload_hint) are trusted HTML;
 // everything a user, the pool or the log supplies is escaped with
@@ -33,7 +37,9 @@ import (
 // The script finds its parts by id (prog, barfill, next, getmore, worked,
 // upload, stopped, denied, screen, starting), by ul.rows li with data-state,
 // data-kind and data-id, and by the classes msg, timer and current; the
-// stylesheet keys every state on those same hooks.
+// stylesheet keys every state on those same hooks. To redraw the queue it
+// also finds the classes count, count__bar, side__head and side__list, and
+// a row by its id (r and the item's id).
 const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>%%TITLE%%</title>
 <style>
@@ -78,14 +84,14 @@ setInterval(async()=>{if(stopped)return;const hadInput=sawInput;sawInput=false;
  }catch(e){if(hadInput)sawInput=true;}},60000);
 function q(l){return 'id='+encodeURIComponent(l.dataset.id)+'&kind='+encodeURIComponent(l.dataset.kind);}
 function setMsg(l,text,warn){const m=l.querySelector('.msg');m.textContent=text;m.className='msg'+(warn?' warn':'');}
-function startTimer(l){if(timer)clearInterval(timer.h);document.querySelectorAll('.timer').forEach(t=>t.textContent='');
- const t=l.querySelector('.timer');const end=Date.now()+SECONDS*1000;t.className='timer';
- const tick=()=>{const s=Math.max(0,Math.round((end-Date.now())/1000));
-  t.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
-  if(s===0){clearInterval(timer.h);t.textContent='Time’s up. Open the next one.';t.className='timer up';}};
- timer={h:setInterval(tick,1000)};tick();}
+function tick(){const t=document.querySelector('li.current .timer');if(!t)return;
+ const s=Math.max(0,Math.round((timer.end-Date.now())/1000));
+ if(s===0){clearInterval(timer.h);t.textContent='Time’s up. Open the next one.';t.className='timer up';return;}
+ t.className='timer';t.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
+function startTimer(){if(timer)clearInterval(timer.h);document.querySelectorAll('.timer').forEach(t=>t.textContent='');
+ timer={end:Date.now()+SECONDS*1000};timer.h=setInterval(tick,1000);tick();}
 function current(l){document.querySelectorAll('li.current').forEach(x=>x.classList.remove('current'));
- l.classList.add('current');if(SECONDS>0)startTimer(l);}
+ l.classList.add('current');if(SECONDS>0)startTimer();}
 async function open_(l){const r=await fetch('open?'+q(l),{method:'POST'});
  if(r.ok){if(l.dataset.state!=='problem')l.dataset.state='done';l.classList.add('done');setMsg(l,'');current(l);refresh();}
  else if(r.status===503){setMsg(l,'the browser is still starting; try again in a moment',true);}
@@ -101,8 +107,18 @@ function refresh(){const rows=[...document.querySelectorAll('ul.rows li')];const
  const p=document.getElementById('prog');if(p)p.textContent=done+' of '+rows.length+' done';
  const b=document.getElementById('barfill');if(b)b.style.width=(rows.length?100*done/rows.length:0)+'%';
  const nx=document.getElementById('next');if(nx)nx.disabled=!rows.some(r=>r.dataset.state==='todo');
- if(rows.length&&done===rows.length&&!document.getElementById('getmore'))setTimeout(()=>location.reload(),1500);}
-async function more(n){await fetch('claim?n='+n,{method:'POST'});location.reload();}
+ if(rows.length&&done===rows.length&&!document.getElementById('getmore'))redraw();}
+function draw(j){const cur=document.querySelector('li.current'),id=cur?cur.id:'';
+ const c=document.querySelector('.count');c.querySelectorAll('#prog,.count__bar').forEach(x=>x.remove());c.insertAdjacentHTML('afterbegin',j.progress);
+ const nx=document.getElementById('next');if(nx)nx.remove();document.querySelector('.side__head').insertAdjacentHTML('beforeend',j.next);
+ document.querySelector('.side__list').innerHTML=j.body;
+ const l=id&&document.getElementById(id);if(l){l.classList.add('current');if(timer)tick();}}
+async function redraw(){if(stopped)return;
+ try{const r=await fetch('queue',{redirect:'manual'});
+  if(refused(r)){showDenied();return;}
+  if(r.ok){draw(await r.json());return;}
+ }catch(e){}setTimeout(redraw,2000);}
+async function more(n){try{await fetch('claim?n='+n,{method:'POST'});}catch(e){}document.querySelectorAll('details.fold[open]').forEach(d=>{d.open=false;});redraw();}
 </script></body></html>`
 
 // message renders a one-message page: title (plain text) names the tab,

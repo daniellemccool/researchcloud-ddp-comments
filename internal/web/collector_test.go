@@ -1434,3 +1434,101 @@ func TestHomeStartedCountsAsInput(t *testing.T) {
 		t.Errorf("alice idle (%s) %v after a Started home visit; want both clocks restarted", why, idle-time.Second)
 	}
 }
+
+// queueAnswer is the body of GET /desk/queue.
+type queueAnswer struct {
+	Progress string `json:"progress"`
+	Next     string `json:"next"`
+	Body     string `json:"body"`
+}
+
+func getQueue(t *testing.T, e *collectorEnv) queueAnswer {
+	t.Helper()
+	rec := e.get(t, "alice", collectorRole, "/desk/queue")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("queue: status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("queue: Content-Type = %q, want application/json", ct)
+	}
+	var q queueAnswer
+	if err := json.Unmarshal(rec.Body.Bytes(), &q); err != nil {
+		t.Fatalf("queue: %v in %s", err, rec.Body.String())
+	}
+	return q
+}
+
+// The queue route answers the count, the next action and the queue exactly
+// as the page itself draws them, so the page can redraw its sidebar in place
+// and leave the streamed browser alone.
+func TestQueueAnswersThePagesOwnParts(t *testing.T) {
+	e := readyPageEnv(t, true)
+	writePool(t, e, "id,kind,bucket,note\n111,video,b1,First clip\n222,video,b1,Second clip\n333,video,b2,\n")
+	if err := e.log.Append(
+		desklog.Event{T: 1, User: "alice", Action: "claim", Kind: "video", ID: "111", Batch: 1, Code: ""},
+		desklog.Event{T: 2, User: "alice", Action: "claim", Kind: "video", ID: "222", Batch: 1, Code: ""},
+		desklog.Event{T: 3, User: "alice", Action: "open", Kind: "video", ID: "111", Code: "", ExecRC: intPtr(0)},
+	); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	page := e.get(t, "alice", collectorRole, "/desk/").Body.String()
+	q := getQueue(t, e)
+	for name, part := range map[string]string{"progress": q.Progress, "next": q.Next, "body": q.Body} {
+		if part == "" || !strings.Contains(page, part) {
+			t.Errorf("the page does not hold the queue's %s as answered: %q", name, part)
+		}
+	}
+	for _, c := range []struct{ name, part, want string }{
+		{"progress", q.Progress, `<span id="prog" class="count__done">1 of 2 done</span>`},
+		{"next", q.Next, `<button id="next" class="next" onclick="openNext()">`},
+		{"body", q.Body, `<ul class="rows">`},
+		{"body", q.Body, "Second clip"},
+		{"body", q.Body, "Finish these first"},
+	} {
+		if !strings.Contains(c.part, c.want) {
+			t.Errorf("queue %s lacks %q: %q", c.name, c.want, c.part)
+		}
+	}
+	if strings.Contains(q.Body, `id="getmore"`) {
+		t.Errorf("queue offers more while a video is unopened: %q", q.Body)
+	}
+
+	// The last one opened: the queue's end offers more and nothing is left
+	// to open.
+	if err := e.log.Append(desklog.Event{T: 4, User: "alice", Action: "open", Kind: "video", ID: "222", Code: "", ExecRC: intPtr(0)}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	q = getQueue(t, e)
+	for _, c := range []struct{ name, part, want string }{
+		{"progress", q.Progress, "2 of 2 done"},
+		{"next", q.Next, `onclick="openNext()" disabled>`},
+		{"body", q.Body, `<div class="queue__more" id="getmore">`},
+	} {
+		if !strings.Contains(c.part, c.want) {
+			t.Errorf("after the last open, queue %s lacks %q: %q", c.name, c.want, c.part)
+		}
+	}
+}
+
+// A collector with nothing claimed: no count and no next action, and the
+// queue's end offers more.
+func TestQueueWithNothingClaimed(t *testing.T) {
+	e := readyPageEnv(t, true)
+	writePool(t, e, "id,kind,bucket,note\n111,video,b1,\n")
+	q := getQueue(t, e)
+	if q.Progress != "" || q.Next != "" {
+		t.Errorf("queue with nothing claimed: progress %q, next %q, want both empty", q.Progress, q.Next)
+	}
+	if !strings.Contains(q.Body, `id="getmore"`) || strings.Contains(q.Body, `<ul class="rows">`) {
+		t.Errorf("queue with nothing claimed: body %q", q.Body)
+	}
+}
+
+// Before the desk exists there is no queue to draw, as there is nothing to
+// claim.
+func TestQueueBeforeTheDeskExists409(t *testing.T) {
+	e := newCollectorEnv(t, true)
+	if rec := e.get(t, "alice", collectorRole, "/desk/queue"); rec.Code != http.StatusConflict {
+		t.Errorf("queue before provisioning: status = %d, want 409", rec.Code)
+	}
+}

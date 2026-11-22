@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"html"
 	"log"
 	"net/http"
@@ -154,6 +155,54 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 		evs = nil
 	}
 	view := h.deskLog.ViewOf(user, evs)
+	q := h.queueOf(view, evs)
+
+	now := h.now()
+	footer, footerWarn := h.footer(r.Context(), user, now)
+	noteCodes := make([]string, 0, len(h.platform.Problems))
+	for _, p := range h.problems() {
+		if p.Note {
+			noteCodes = append(noteCodes, p.Code)
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(deskPage(pageParams{
+		User:          user,
+		Admin:         id.Admin,
+		PlatformLabel: h.platform.Label,
+		Noun:          h.platform.DefaultKind,
+		Seconds:       h.cfg.TimerMinutes * 60,
+		NoteCodes:     noteCodes,
+		ProgressHTML:  q.Progress,
+		Next:          q.Next,
+		Body:          q.Body,
+		OpenHelp:      len(view.Claims) == 0,
+		Footer:        footer,
+		FooterWarn:    footerWarn,
+		IdleMinutes:   h.cfg.IdleSeconds / 60,
+		Contact:       h.cfg.Contact,
+		Worked:        workedFrom(evs, user, now),
+		Now:           now,
+	})))
+}
+
+// queueParts are the parts of the collector page that follow the queue, each
+// already HTML: the header's count (progress; "" without items), the next
+// action in the sidebar's head (nextAction; "" without items) and the queue
+// with its end. The page is drawn from them, and GET /desk/queue answers
+// them so the page can redraw itself in place.
+type queueParts struct {
+	Progress string `json:"progress"`
+	Next     string `json:"next"`
+	Body     string `json:"body"`
+}
+
+// queueOf builds the queue's parts from a collector's view of the desk log
+// (evs is the whole log, for what others have taken) and the pool as it is
+// now.
+func (h *handler) queueOf(view desklog.View, evs []desklog.Event) queueParts {
 	snap := h.poolSnapshot()
 
 	latest := 0
@@ -208,10 +257,11 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 		}
 	}
 
+	var q queueParts
 	var body strings.Builder
-	next := "" // the next action, in the sidebar's head
 	if len(shown) > 0 {
-		next = nextAction(noun, nDone == len(shown))
+		q.Progress = progress(nDone, len(shown))
+		q.Next = nextAction(noun, nDone == len(shown))
 		body.WriteString(`<ul class="rows">` + strings.Join(items, "") + `</ul>`)
 	}
 	// The queue's end: the ring node that closes the line, with what is
@@ -220,18 +270,10 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 	if earlier > 0 {
 		body.WriteString(`<p>` + strconv.Itoa(earlier) + ` done earlier</p>`)
 	}
-	taken := h.deskLog.Taken(evs)
-	unfinished := false
-	for _, c := range shown {
-		if !view.Done[c.Key] {
-			unfinished = true
-			break
-		}
-	}
 	switch {
-	case unfinished:
+	case nDone < len(shown):
 		body.WriteString(`<p>Finish these first: open each one, or mark a problem. Then you can get more.</p>`)
-	case anyUntaken(snap.Valid, taken):
+	case anyUntaken(snap.Valid, h.deskLog.Taken(evs)):
 		body.WriteString(`<div class="queue__more" id="getmore">`)
 		for i, n := range h.cfg.BatchSizes {
 			cls := "cmd cmd--sm"
@@ -245,40 +287,37 @@ func (h *handler) servePage(w http.ResponseWriter, r *http.Request, id access.Id
 		body.WriteString(`<p id="getmore">No more ` + noun + `s right now; tell the operator.</p>`)
 	}
 	body.WriteString(`</div>`)
+	q.Body = body.String()
+	return q
+}
 
-	progressHTML := ""
-	if len(shown) > 0 {
-		progressHTML = progress(nDone, len(shown))
+// serveQueue is GET /desk/queue: the queue's parts as JSON, for the page to
+// redraw its count and sidebar without reloading, which would rebuild the
+// streamed browser's frame. Before the desk exists it is a 409, as a claim
+// is; a desk log that cannot be read is a 500, so the page keeps what it
+// shows and asks again.
+func (h *handler) serveQueue(w http.ResponseWriter, r *http.Request) {
+	user := identity(r).User
+	if !provision.Load(h.cfg, user).Ready() {
+		w.WriteHeader(http.StatusConflict)
+		return
 	}
-	now := h.now()
-	footer, footerWarn := h.footer(r.Context(), user, now)
-	noteCodes := make([]string, 0, len(h.platform.Problems))
-	for _, p := range h.problems() {
-		if p.Note {
-			noteCodes = append(noteCodes, p.Code)
-		}
+	evs, err := h.deskLog.Read()
+	if err != nil {
+		log.Printf("web: desk log: %v", err)
+		plain(w, http.StatusInternalServerError, "could not read the desk log")
+		return
 	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	body, err := json.Marshal(h.queueOf(h.deskLog.ViewOf(user, evs), evs))
+	if err != nil {
+		log.Printf("web: queue: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(deskPage(pageParams{
-		User:          user,
-		Admin:         id.Admin,
-		PlatformLabel: h.platform.Label,
-		Noun:          h.platform.DefaultKind,
-		Seconds:       h.cfg.TimerMinutes * 60,
-		NoteCodes:     noteCodes,
-		ProgressHTML:  progressHTML,
-		Next:          next,
-		Body:          body.String(),
-		OpenHelp:      len(view.Claims) == 0,
-		Footer:        footer,
-		FooterWarn:    footerWarn,
-		IdleMinutes:   h.cfg.IdleSeconds / 60,
-		Contact:       h.cfg.Contact,
-		Worked:        workedFrom(evs, user, now),
-		Now:           now,
-	})))
+	_, _ = w.Write(body)
 }
 
 // problems returns the platform's problem codes with {contact} in the labels

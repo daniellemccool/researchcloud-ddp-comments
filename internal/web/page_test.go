@@ -363,3 +363,24 @@ func TestNextAction(t *testing.T) {
 		t.Errorf("disabled nextAction = %q", got)
 	}
 }
+
+// The page never reloads itself: after the last item and after getting more
+// the script fetches the queue and redraws the sidebar, so the streamed
+// browser stays connected and the open item keeps its timer.
+func TestDeskPageRedrawsTheQueueInPlace(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video", Seconds: 120})
+	if strings.Contains(out, "location.reload") {
+		t.Errorf("the page's script reloads the page")
+	}
+	for _, want := range []string{
+		`fetch('queue',{redirect:'manual'})`,
+		// getting more also closes the help, which a reload used to do: it
+		// is open only for a collector with nothing claimed yet
+		`async function more(n){try{await fetch('claim?n='+n,{method:'POST'});}catch(e){}` +
+			`document.querySelectorAll('details.fold[open]').forEach(d=>{d.open=false;});redraw();}`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+}
