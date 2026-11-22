@@ -1,11 +1,15 @@
 package web
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/access"
 	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 )
 
@@ -162,6 +166,96 @@ func TestTemplatePagesUnderTheBand(t *testing.T) {
 	}
 	if plain := render("notready", pageData{Title: "Desk", Contact: "x"}); strings.Contains(plain, `class="muted"`) {
 		t.Error("the not-ready page without a detail has a detail line")
+	}
+}
+
+// A signed-in member without a standing still gets the look's files, so the
+// 403 page shows whole (its faces, the band's pictures), and gets nothing
+// else: every other path is the 403 page, as ADR-0004 says.
+func TestAssetsOpenToAnySignedInMember(t *testing.T) {
+	srv, _ := newTestServer(t)
+	const nobody = "src_co_other"
+	for path, ctype := range map[string]string{
+		"zeeschuimer-64.png":                       "image/png",
+		"network/globe.svg":                        "image/svg+xml",
+		"network/consent-badge.svg":                "image/svg+xml",
+		"fonts/NunitoSans-VariableFont_wght.woff2": "font/woff2",
+	} {
+		rec := do(t, srv, "someone", nobody, testGate, "/desk/assets/"+path)
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != ctype || rec.Body.Len() == 0 {
+			t.Errorf("%s without a standing: status %d, type %q, %d bytes; want the file", path, rec.Code, rec.Header().Get("Content-Type"), rec.Body.Len())
+		}
+	}
+	for _, path := range []string{"desk.css", "tokens.css", "missing.woff2", "fonts"} {
+		if rec := do(t, srv, "someone", nobody, testGate, "/desk/assets/"+path); rec.Code != http.StatusNotFound {
+			t.Errorf("%s without a standing: status %d, want 404", path, rec.Code)
+		}
+	}
+	// Everything else stays the 403 page, whatever the path looks like.
+	for _, path := range []string{
+		"/desk/", "/desk/status", "/desk/admin/", "/desk/vnc/", "/fourcat/", "/desk/assets", "/desk/assets/", "/desk/assets/fonts/", "/desk/assetsx/zeeschuimer-64.png",
+		"/desk/assets/../status", "/desk/assets/../admin/", "/desk/assets/%2e%2e/status", "/desk/assets/fonts/../../status",
+	} {
+		rec := do(t, srv, "someone", nobody, testGate, path)
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "You are not registered for the desk") {
+			t.Errorf("%s without a standing: status %d, want the 403 page", path, rec.Code)
+		}
+	}
+	// Only a GET: nothing is posted to the files.
+	post := httptest.NewRequest(http.MethodPost, "/desk/assets/zeeschuimer-64.png", nil)
+	access.SetTestHeaders(post, "someone", nobody, testGate)
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, post)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("POST to a file without a standing: status %d, want 403", rec.Code)
+	}
+	// The gate secret still comes first (ADR-0003).
+	if rec := do(t, srv, "someone", nobody, "wrong", "/desk/assets/zeeschuimer-64.png"); rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "PNG") {
+		t.Errorf("forged gate: status %d, want a plain 403", rec.Code)
+	}
+}
+
+// What /desk/assets/ serves goes to every signed-in member, whatever their
+// standing, so the list is pinned: a file added under internal/web/assets
+// fails here until it is added on purpose. Only public design material
+// belongs in it.
+func TestServedAssetsArePinned(t *testing.T) {
+	served := []string{
+		"fonts/LibreCaslonCondensed-latin-ext.woff2",
+		"fonts/LibreCaslonCondensed-latin.woff2",
+		"fonts/NunitoSans-Italic-VariableFont_wght.woff2",
+		"fonts/NunitoSans-VariableFont_wght.woff2",
+		"fonts/OFL-LibreCaslonCondensed.txt",
+		"fonts/OFL-NunitoSans.txt",
+		"network/consent-badge.svg",
+		"network/globe.svg",
+		"zeeschuimer-64.png",
+	}
+	inlined := []string{"desk.css", "tokens.css"} // in every page's <style>; the route refuses them
+	var got []string
+	err := fs.WalkDir(assetsFS, "assets", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			got = append(got, strings.TrimPrefix(p, "assets/"))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(append([]string{}, served...), inlined...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("internal/web/assets holds\n%q\nwant exactly\n%q\n(every file there but the two stylesheets is served to any signed-in member)", got, want)
+	}
+	srv, _ := newTestServer(t)
+	for _, path := range served {
+		if rec := do(t, srv, "someone", "src_co_other", testGate, "/desk/assets/"+path); rec.Code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200", path, rec.Code)
+		}
 	}
 }
 

@@ -17,8 +17,12 @@ import (
 // their licences, two pieces of its network drawing and Zeeschuimer's mark,
 // all verbatim, and the desk's own stylesheet, assets/desk.css. Every page carries the
 // stylesheets inline, so it renders even where a request for a stylesheet
-// would be refused (the 403 page); the faces and the pieces are served from
-// /desk/assets/ behind the gate like every other desk path.
+// would be refused; the faces and the pieces are served from /desk/assets/
+// to every signed-in member, with or without a standing, so the 403 page
+// shows whole too (the gate, server.go). Whatever is in assets/ but the two
+// stylesheets is therefore served to people who are not collectors: only
+// public design material belongs there, and TestServedAssetsArePinned holds
+// the list.
 
 //go:embed assets
 var assetsFS embed.FS
@@ -40,11 +44,32 @@ func mustPageCSS() string {
 	return t + "\n" + string(desk)
 }
 
-// serveAsset serves GET /desk/assets/{path...}: the faces, their licences
-// and the band's pieces. The stylesheets are inlined in the pages, so they
-// are not served; nor is a folder.
+// assetsPrefix is where the look's files are served.
+const assetsPrefix = "/desk/assets/"
+
+// serveAsset serves GET /desk/assets/{path...} for a collector, through the
+// routes.
 func serveAsset(w http.ResponseWriter, r *http.Request) {
-	p := r.PathValue("path")
+	writeAsset(w, r, r.PathValue("path"))
+}
+
+// assetRequest reports whether r asks for one of the look's files, and for
+// which: a GET of a path under /desk/assets/ that is already clean, so no
+// ".." or doubled slash decides what is served. The gate uses it for a
+// member without a standing, who gets these files and nothing else.
+func assetRequest(r *http.Request) (string, bool) {
+	p := r.URL.Path
+	if r.Method != http.MethodGet || !strings.HasPrefix(p, assetsPrefix) || path.Clean(p) != p {
+		return "", false
+	}
+	return strings.TrimPrefix(p, assetsPrefix), true
+}
+
+// writeAsset writes the file p of assets/: the faces, their licences and
+// the band's pieces. The stylesheets are inlined in the pages, so they are
+// not served; nor is a folder. The files come from the binary alone, never
+// from the box's disk.
+func writeAsset(w http.ResponseWriter, r *http.Request, p string) {
 	if strings.HasSuffix(p, ".css") {
 		http.NotFound(w, r)
 		return

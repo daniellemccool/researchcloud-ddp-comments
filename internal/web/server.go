@@ -253,8 +253,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// A member with none of the three standings gets the 403 page. Every
 	// standing is a collector (an admin is one, and a Tech Admin is an admin;
-	// access.FromRequest, ADR-0004), so the gate has no case per path.
+	// access.FromRequest, ADR-0004), so the gate has no case per standing.
+	// Its one case per path: such a member still gets the look's files
+	// under /desk/assets/, so the 403 page shows whole. They are public
+	// design material from the binary (style.go).
 	if !id.Collector {
+		if p, ok := assetRequest(r); ok {
+			writeAsset(w, r, p)
+			return
+		}
 		h.forbidden(w)
 		return
 	}
