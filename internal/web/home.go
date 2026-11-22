@@ -142,7 +142,7 @@ func (h *handler) kick(user string) {
 func (h *handler) say(w http.ResponseWriter, status int, text string, refresh int) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(message("Your desk", platformLine(h.platform.Label), text, refresh)))
+	_, _ = w.Write([]byte(message("Your desk", bandName(h.cfg), platformLine(h.platform.Label), text, refresh)))
 }
 
 // servePage renders the collector page.

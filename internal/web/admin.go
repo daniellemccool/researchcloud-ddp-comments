@@ -718,7 +718,7 @@ func rejectText(rejects []pool.Reject) string {
 func (a *adminHandler) say(w http.ResponseWriter, status int, text string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(message("Desk admin", platformLine(a.platform.Label), text, 0)))
+	_, _ = w.Write([]byte(message("Desk admin", bandName(a.cfg), platformLine(a.platform.Label), text, 0)))
 }
 
 // redirect answers 303 to the overview (a refresh repeats the GET, not the

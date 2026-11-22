@@ -105,18 +105,19 @@ function refresh(){const rows=[...document.querySelectorAll('ul.rows li')];const
 async function more(n){await fetch('claim?n='+n,{method:'POST'});location.reload();}
 </script></body></html>`
 
-// message renders a one-message page: heading (plain text) on the band and
-// text (plain text, escaped) under it, under the header with subtitle
-// (already HTML). With refresh > 0 the page reloads itself after that many
-// seconds, and says so.
-func message(heading, subtitle, text string, refresh int) string {
+// message renders a one-message page: title (plain text) names the tab,
+// band (plain text; the project's name, bandName) is on the band, and text
+// (plain text, escaped) is the message under it, in the message text style,
+// under the header with subtitle (already HTML). With refresh > 0 the page
+// reloads itself after that many seconds, and says so.
+func message(title, band, subtitle, text string, refresh int) string {
 	meta, note := "", ""
 	if refresh > 0 {
 		meta = `<meta http-equiv="refresh" content="` + strconv.Itoa(refresh) + `">`
 		note = `<p class="muted">This page reloads by itself.</p>`
 	}
-	return pageTop(heading, meta, subtitle, nil, heading) +
-		`<p class="say">` + html.EscapeString(text) + `</p>` + note + pageBottom
+	return pageTop(title, meta, subtitle, nil, bandText(band)) +
+		`<p class="lede">` + html.EscapeString(text) + `</p>` + note + pageBottom
 }
 
 // problemOptions is the problem <select> of every row.

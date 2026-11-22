@@ -8,14 +8,17 @@ import (
 )
 
 func TestMessageEscapesTextAndRefresh(t *testing.T) {
-	got := message("Your <desk>", "TikTok comment collection", `a<b> & "q"`, 3)
+	got := message("Your <desk>", "OnlineHate", "TikTok comment collection", `a<b> & "q"`, 3)
 	if !strings.Contains(got, `<meta http-equiv="refresh" content="3">`) {
 		t.Errorf("message lacks the refresh meta:\n%s", got)
 	}
-	if !strings.Contains(got, `a&lt;b&gt; &amp; &#34;q&#34;`) {
-		t.Errorf("message does not escape the text:\n%s", got)
+	if !strings.Contains(got, `<p class="lede">a&lt;b&gt; &amp; &#34;q&#34;</p><p class="muted">This page reloads by itself.</p>`) {
+		t.Errorf("message does not escape the text, or does not say it reloads:\n%s", got)
 	}
-	plain := message("Your desk", "", "plain", 0)
+	if !strings.Contains(got, "<title>Your &lt;desk&gt;</title>") {
+		t.Errorf("message does not escape its title:\n%s", got)
+	}
+	plain := message("Your desk", "OnlineHate", "", "plain", 0)
 	if strings.Contains(plain, "refresh") {
 		t.Errorf("message without refresh contains a refresh meta:\n%s", plain)
 	}

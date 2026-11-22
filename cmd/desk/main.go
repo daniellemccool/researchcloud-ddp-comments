@@ -375,6 +375,7 @@ func fourcatProxy(cfg *config.Config, study *fourcat.Study, prov *provision.Prov
 	return web.NewFourcatProxy(web.FourcatDeps{
 		FQDN:    cfg.FQDN,
 		Contact: cfg.Contact,
+		Band:    cfg.COName,
 		Study:   study,
 		Token: func(user string) (string, error) {
 			return provision.APIToken(cfg, user)

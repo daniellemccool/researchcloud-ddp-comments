@@ -28,12 +28,14 @@ type fourcatStudy interface {
 }
 
 // FourcatDeps wires the /fourcat/ proxy: the desk's FQDN and contact, the
-// study (whether 4CAT's settings are asserted, its setup state, the proxy
+// project's name for the band of its refusal pages (desk.json's co_name;
+// empty gives "Comment desk"), the study (whether 4CAT's settings are asserted, its setup state, the proxy
 // secret), the token reader (provision.APIToken) and the seatless account
 // step (Provisioner.AdvanceFourcat).
 type FourcatDeps struct {
 	FQDN        string
 	Contact     string
+	Band        string
 	Study       fourcatStudy
 	Token       func(user string) (string, error)
 	MakeAccount func(ctx context.Context, user string) provision.State
@@ -173,11 +175,11 @@ func (p *FourcatProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id := identity(r)
 	tags := standingTags(id)
 	if tags == "" {
-		p.pages.render(w, http.StatusForbidden, "403", pageData{Title: "Not registered", Contact: p.deps.Contact})
+		p.pages.render(w, http.StatusForbidden, "403", pageData{Title: "Not registered", Band: p.deps.Band, Contact: p.deps.Contact})
 		return
 	}
 	if !p.fromOurSite(r) {
-		p.pages.render(w, http.StatusForbidden, "elsewhere", pageData{Title: "Open 4CAT from the desk"})
+		p.pages.render(w, http.StatusForbidden, "elsewhere", pageData{Title: "Open 4CAT from the desk", Band: p.deps.Band})
 		return
 	}
 	if !p.deps.Study.Ready() {
@@ -222,7 +224,7 @@ func (p *FourcatProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *FourcatProxy) notReady(w http.ResponseWriter, detail string) {
-	p.pages.render(w, http.StatusServiceUnavailable, "notready", pageData{Title: "Desk", Contact: p.deps.Contact, Detail: detail})
+	p.pages.render(w, http.StatusServiceUnavailable, "notready", pageData{Title: "Desk", Band: p.deps.Band, Contact: p.deps.Contact, Detail: detail})
 }
 
 // standingTags are the 4CAT tags of an identity's standing: studylead for

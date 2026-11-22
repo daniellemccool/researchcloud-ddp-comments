@@ -2,8 +2,11 @@ package web
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 )
 
 // The faces and the band's pieces are served to a collector, behind the
@@ -59,26 +62,106 @@ func TestPageCSSFontsAreServed(t *testing.T) {
 	}
 }
 
-// Every page carries the header and the inlined stylesheet; the reading
-// pages carry the band with their heading.
+// testProject is the test desk's co_name, the text of the message pages' band.
+const testProject = "OnlineHate"
+
+// Every page carries the header and the inlined stylesheet; the message
+// pages carry the band named for the project. A message that needs
+// attention is headed by the exclamation disc.
 func TestPagesCarryTheLook(t *testing.T) {
 	srv, _ := newTestServer(t)
-	for _, c := range []struct{ name, user, roles, heading string }{
-		{"403", "someone", "src_co_other", "Not registered"},
-		{"not ready", "dmccool2", collectorRole, "Your desk"},
+	for _, c := range []struct {
+		name, user, roles string
+		wants             []string
+	}{
+		{"403", "someone", "src_co_other", []string{
+			"<title>Not registered</title>",
+			`<div class="stop"><span class="bang" aria-hidden="true">!</span><p class="lede">You are not registered for the desk; ask ` + testContact + `.</p></div>`,
+		}},
+		{"not ready", "dmccool2", collectorRole, []string{
+			"<title>Your desk</title>",
+			`<p class="lede">The desk is not ready yet; ask ` + testContact + `.</p>`,
+		}},
 	} {
 		b := do(t, srv, c.user, c.roles, testGate, "/desk/").Body.String()
-		for _, want := range []string{`<header class="site-header">`, "--font-serif:", `<div class="band">`, `<h1 class="band__title">` + c.heading + "</h1>"} {
+		for _, want := range append([]string{
+			`<header class="site-header">`, "--font-serif:", `<div class="band">`,
+			`<h1 class="band__title">` + testProject + `</h1>`,
+		}, c.wants...) {
 			if !strings.Contains(b, want) {
 				t.Errorf("%s page lacks %q", c.name, want)
 			}
 		}
 	}
-	m := message("Your desk", "TikTok comment collection", "hello", 0)
-	for _, want := range []string{`<header class="site-header">`, `<h1 class="band__title">Your desk</h1>`, `<p class="say">hello</p>`, "TikTok comment collection"} {
+}
+
+// The band's text is the project's name from desk.json, and "Comment desk"
+// without one; a message page escapes it, and keeps its own title for the
+// tab.
+func TestBandName(t *testing.T) {
+	for _, c := range []struct {
+		cfg  *config.Config
+		want string
+	}{
+		{nil, "Comment desk"},
+		{&config.Config{}, "Comment desk"},
+		{&config.Config{COName: "  "}, "Comment desk"},
+		{&config.Config{COName: " OnlineHate "}, "OnlineHate"},
+	} {
+		if got := bandName(c.cfg); got != c.want {
+			t.Errorf("bandName(%+v) = %q, want %q", c.cfg, got, c.want)
+		}
+	}
+	m := message("Your desk", "A<b", "TikTok comment collection", "hello", 0)
+	for _, want := range []string{
+		`<h1 class="band__title">A&lt;b</h1>`, "<title>Your desk</title>", `<p class="lede">hello</p>`,
+		`<span class="site-header__subtitle">TikTok comment collection</span>`,
+	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message page lacks %q", want)
 		}
+	}
+	if strings.Contains(m, "A<b") {
+		t.Error("the band's text is not escaped")
+	}
+	if empty := message("Your desk", "", "", "hello", 0); !strings.Contains(empty, `<h1 class="band__title">Comment desk</h1>`) {
+		t.Error("a message page without a project name lacks the band's fallback")
+	}
+}
+
+// The three template pages: the band is the project's name, the title is
+// the tab's, and the page that leads somewhere ends in an action link.
+func TestTemplatePagesUnderTheBand(t *testing.T) {
+	p := mustLoadPages()
+	render := func(name string, d pageData) string {
+		rec := httptest.NewRecorder()
+		p.render(rec, http.StatusOK, name, d)
+		return rec.Body.String()
+	}
+	elsewhere := render("elsewhere", pageData{Title: "Open 4CAT from the desk", Band: "On<line"})
+	for _, want := range []string{
+		"<title>Open 4CAT from the desk</title>",
+		`<h1 class="band__title">On&lt;line</h1>`,
+		`<p class="lede">This link came from another website or from a mail.</p>`,
+		`<p>To keep your account safe, 4CAT on this desk only opens from its own pages. Open the start page and go on from there.</p>`,
+		actionLink("/", "Open the start page"),
+	} {
+		if !strings.Contains(elsewhere, want) {
+			t.Errorf("elsewhere page lacks %q", want)
+		}
+	}
+	nr := render("notready", pageData{Title: "Desk", Contact: "the <operator>", Detail: "template: missing"})
+	for _, want := range []string{
+		`<h1 class="band__title">Comment desk</h1>`, // no project name: the fallback
+		`<div class="stop"><span class="bang" aria-hidden="true">!</span><p class="lede">The desk is not ready yet; ask the &lt;operator&gt;.</p></div>`,
+		`<p class="muted">template: missing</p>`,
+	} {
+		if !strings.Contains(nr, want) {
+			t.Errorf("not-ready page lacks %q", want)
+		}
+	}
+	if plain := render("notready", pageData{Title: "Desk", Contact: "x"}); strings.Contains(plain, `class="muted"`) {
+		t.Error("the not-ready page without a detail has a detail line")
 	}
 }
 

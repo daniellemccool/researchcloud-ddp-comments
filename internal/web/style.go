@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"path"
 	"strings"
+
+	"github.com/daniellemccool/researchcloud-ddp-comments/internal/config"
 )
 
 // This file is the desk's share of the D3I look (datadonation.eu's design
@@ -146,6 +148,25 @@ func bandHTML(heading string) string {
 		`<img class="band__piece band__piece--badge" src="/desk/assets/network/consent-badge.svg" alt="" width="52" height="52">` +
 		`<img class="band__piece band__piece--globe" src="/desk/assets/network/globe.svg" alt="" width="40" height="40">` +
 		`</div></div></div><div class="band__step" aria-hidden="true">` + stepSVG + `</div></div>`
+}
+
+// bandText is the text of a message page's band: the project's name with
+// the space around it trimmed, or "Comment desk" without one. Plain text;
+// the caller escapes.
+func bandText(name string) string {
+	if name = strings.TrimSpace(name); name != "" {
+		return name
+	}
+	return "Comment desk"
+}
+
+// bandName is the band's text for cfg: its co_name from desk.json
+// (bandText). A nil cfg has none.
+func bandName(cfg *config.Config) string {
+	if cfg == nil {
+		return bandText("")
+	}
+	return bandText(cfg.COName)
 }
 
 // pageTop opens a reading page (admin, messages): the head with title

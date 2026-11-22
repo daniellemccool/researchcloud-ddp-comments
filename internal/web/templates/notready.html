@@ -1,4 +1,1 @@
-{{.Top}}
-<p class="say">The desk is not ready yet; ask {{.Contact}}.</p>
-{{if .Detail}}<p class="muted">{{.Detail}}</p>
-{{end}}{{.Bottom}}
+{{.Top}}<div class="stop"><span class="bang" aria-hidden="true">!</span><p class="lede">The desk is not ready yet; ask {{.Contact}}.</p></div>{{if .Detail}}<p class="muted">{{.Detail}}</p>{{end}}{{.Bottom}}
