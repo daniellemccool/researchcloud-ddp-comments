@@ -141,7 +141,7 @@ function guidePlace(){if(!guide)return;
   const t=guideTarget(guide.step),box=document.getElementById('guide'),ring=document.getElementById('guide-ring');
   if(!t){box.hidden=ring.hidden=true;return;}
   let r=t.getBoundingClientRect();
-  if(guide.step==='upload')r={left:r.right-101,top:r.top+48,width:32,height:32};
+  if(guide.step==='upload')r={left:r.right-113,top:r.top+48,width:32,height:32};
   else if(guide.step==='screen')r={left:r.left+8,top:r.top+8,width:r.width-16,height:r.height-16};
   box.hidden=ring.hidden=false;
   ring.style.left=(r.left-4)+'px';ring.style.top=(r.top-4)+'px';ring.style.width=(r.width+8)+'px';ring.style.height=(r.height+8)+'px';
@@ -352,7 +352,8 @@ func howToHTML(noun string, timer bool) string {
 // comments open is said in words, the platform's comments_hint when it has
 // one), reporting a problem, and the Zeeschuimer
 // button in the browser's toolbar, which is at a fixed place from the pane's
-// top right corner. The first two hints of a walk move on when the collector
+// top right corner (its centre 97 px in and 64 px down, measured on the study
+// desk; guidePlace rings a 32 px square around that point). The first two hints of a walk move on when the collector
 // does the thing; started again from How to collect, every hint has Next.
 func guideJSON(noun, commentsHint string, auto bool) string {
 	if commentsHint == "" {

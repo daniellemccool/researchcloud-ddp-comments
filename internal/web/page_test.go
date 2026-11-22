@@ -442,3 +442,14 @@ func TestGuideUsesThePlatformsCommentsHint(t *testing.T) {
 		}
 	}
 }
+
+// The guide rings the Zeeschuimer button where it sits in the streamed
+// browser's toolbar: its centre is 97 px in from the pane's right edge and
+// 64 px down, measured on the study desk under v1.4.0 at two window widths
+// (2026-11-22). v1.4.0 had it 85 px in, 12 px off to the right.
+func TestGuideRingsTheZeeschuimerButton(t *testing.T) {
+	out := deskPage(pageParams{User: "alice", PlatformLabel: "T", Noun: "video"})
+	if want := `if(guide.step==='upload')r={left:r.right-113,top:r.top+48,width:32,height:32};`; !strings.Contains(out, want) {
+		t.Errorf("page lacks %q", want)
+	}
+}
